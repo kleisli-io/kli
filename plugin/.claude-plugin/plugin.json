@@ -1,0 +1,10 @@
+{
+  "name": "kli",
+  "version": "0.1.0",
+  "description": "ACE workflow — research, plan, implement, reflect with event-sourced task management and pattern playbooks",
+  "author": {
+    "name": "kleisli"
+  },
+  "license": "MIT",
+  "keywords": ["ace", "task-management", "playbook", "agentic-workflow"]
+}

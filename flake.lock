@@ -1,0 +1,48 @@
+{
+  "nodes": {
+    "cl-deps": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1770821297,
+        "narHash": "sha256-BQIU9gKwwZl/3iT5OW1KBQxLPq4BYFRLOahAzFM8rnY=",
+        "owner": "kleisli-io",
+        "repo": "cl-deps",
+        "rev": "5055afcb412b57704a7c9b9a6c3998f627f3fe9d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kleisli-io",
+        "repo": "cl-deps",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1769018530,
+        "narHash": "sha256-MJ27Cy2NtBEV5tsK+YraYr2g851f3Fl1LpNHDzDX15c=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "88d3861acdd3d2f0e361767018218e51810df8a1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "88d3861acdd3d2f0e361767018218e51810df8a1",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "cl-deps": "cl-deps",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
