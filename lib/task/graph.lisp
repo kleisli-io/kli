@@ -205,8 +205,9 @@
      and :depot field added."
   (let ((tasks-root (gethash depot-name *depot-tasks-roots*)))
     (unless tasks-root
-      ;; Try to resolve via depot library
-      (let ((depot-fn (find-symbol "DEPOT-TASKS-ROOT" :depot)))
+      ;; Try to resolve via depot library (guard against missing package)
+      (let* ((depot-pkg (find-package :depot))
+             (depot-fn (when depot-pkg (find-symbol "DEPOT-TASKS-ROOT" depot-pkg))))
         (when depot-fn
           (setf tasks-root (funcall depot-fn depot-name)))))
     (when tasks-root
@@ -1813,6 +1814,7 @@
 (defparameter *event-type-display*
   '(("task.create"        :icon "+" :color "#58a6ff" :label "Created")
     ("session.join"       :icon ">" :color "#3fb950" :label "Session joined")
+    ("session.team-join"  :icon "T" :color "#3fb950" :label "Teammate joined")
     ("observation"        :icon "o" :color "#d2a8ff" :label "Observed")
     ("artifact.create"    :icon "@" :color "#d29922" :label "Artifact")
     ("artifact.delete"    :icon "x" :color "#f85149" :label "Artifact removed")
@@ -2348,6 +2350,8 @@
                        :session (event-session ev))
                  observations))
           (:session.join
+           (setf (gethash (event-session ev) sessions) t))
+          (:session.team-join
            (setf (gethash (event-session ev) sessions) t)))))
     ;; Extract from CRDT state
     (when state

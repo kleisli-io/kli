@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "task": {
+      "type": "http",
+      "url": "http://localhost:8090/mcp"
+    },
+    "playbook": {
+      "command": "kli",
+      "args": ["serve", "--playbook"],
+      "env": {
+        "PLAYBOOK_PATHS": "${PLAYBOOK_PATHS}"
+      }
+    }
+  }
+}

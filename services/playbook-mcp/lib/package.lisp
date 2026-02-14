@@ -135,6 +135,10 @@
   (:export #:write-activation-to-mcp-state
            #:read-mcp-activated-ids
            #:clear-mcp-activated-state)
+  ;; Feedback state file (for Stop hook)
+  (:export #:feedback-state-path
+           #:write-feedback-state-file
+           #:read-feedback-state-file)
   ;; File locking
   (:export #:with-file-lock)
   ;; Orphan cleanup

@@ -48,3 +48,21 @@
   :description "Tests for task event-sourced library")
 
 (in-suite :task-tests)
+
+;;; --- Shared Test Helpers ---
+;;; Defined here (loaded first) so test-markov.lisp and test-query.lisp
+;;; can use WITH-TASK-ROOTS as a macro rather than an undefined function.
+
+(defun task-roots-available-p ()
+  "Try to set up *depot-tasks-roots* from real depot data. Returns T if available."
+  (handler-case
+      (progn
+        (detect-all-task-roots)
+        (plusp (hash-table-count *depot-tasks-roots*)))
+    (error () nil)))
+
+(defmacro with-task-roots (&body body)
+  "Execute BODY only if real depot task roots are available, otherwise skip."
+  `(if (not (task-roots-available-p))
+       (skip "No depot task roots available (sandbox or missing depot)")
+       (progn ,@body)))

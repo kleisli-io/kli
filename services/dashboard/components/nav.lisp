@@ -19,9 +19,12 @@
               (:a :href (nav-href "/activity")
                   :class (format nil "nav-link~@[ active~]" (string= active-route "/activity"))
                   "activity")
-              (:a :href (nav-href "/health")
-                  :class (format nil "nav-link~@[ active~]" (string= active-route "/health"))
-                  "health")
+              (:a :href (nav-href "/stats")
+                  :class (format nil "nav-link~@[ active~]" (string= active-route "/stats"))
+                  "stats")
+              (:a :href (nav-href "/sessions")
+                  :class (format nil "nav-link~@[ active~]" (string= active-route "/sessions"))
+                  "sessions")
               (:a :href "/plan"
                   :class (format nil "nav-link~@[ active~]" (string= active-route "/plan"))
                   "plans")
@@ -30,7 +33,10 @@
                   "clusters")
               (:a :href (nav-href "/graph")
                   :class (format nil "nav-link~@[ active~]" (string= active-route "/graph"))
-                  "graph")))
+                  "graph")
+              (:a :href (nav-href "/health")
+                  :class (format nil "nav-link~@[ active~]" (string= active-route "/health"))
+                  "health")))
           (:div :class "nav-right"
             (:button :class "scratchpad-open-btn nav-scratchpad-btn"
                      :title "Global Scratchpad"

@@ -88,6 +88,31 @@
   (let ((r (permission-deny :message "denied")))
     (is (null (nth-value 1 (gethash "interrupt" r))))))
 
+;;; Stop/SubagentStop
+
+(test stop-continue-with-reason
+  "stop-continue produces continue=true with reason."
+  (let ((r (stop-continue :reason "patterns need feedback")))
+    (is (eq t (gethash "continue" r)))
+    (is (string= "patterns need feedback" (gethash "reason" r)))
+    (is (= 2 (hash-table-count r)))))
+
+(test stop-continue-minimal
+  "stop-continue with no reason produces only continue=true."
+  (let ((r (stop-continue)))
+    (is (eq t (gethash "continue" r)))
+    (is (= 1 (hash-table-count r)))))
+
+(test stop-allow-basic
+  "stop-allow returns NIL (empty stdout = allow stop)."
+  (is (null (stop-allow))))
+
+(test stop-continue-json-roundtrip
+  "stop-continue encodes to correct JSON with boolean true."
+  (let ((json (encode-json (stop-continue :reason "keep going"))))
+    (is (search "true" json))
+    (is (search "keep going" json))))
+
 ;;; Generic
 
 (test context-response-basic

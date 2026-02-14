@@ -2,4 +2,4 @@
 
 (defpackage #:kli
   (:use #:cl)
-  (:export #:main #:*version*))
+  (:export #:main #:init #:*version* #:*build-id* #:ensure-build-id))

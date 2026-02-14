@@ -7,9 +7,12 @@
     nixpkgs.url = "github:NixOS/nixpkgs/88d3861acdd3d2f0e361767018218e51810df8a1";
     cl-deps.url = "github:kleisli-io/cl-deps";
     cl-deps.inputs.nixpkgs.follows = "nixpkgs";
+    lol-reactive.url = "github:kleisli-io/lol-reactive";
+    lol-reactive.inputs.nixpkgs.follows = "nixpkgs";
+    lol-reactive.inputs.cl-deps.follows = "cl-deps";
   };
 
-  outputs = { nixpkgs, cl-deps, ... }:
+  outputs = { nixpkgs, cl-deps, lol-reactive, ... }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
     in {
@@ -144,58 +147,9 @@
             ];
           };
 
-          # --- Web framework ---
+          # --- Web framework (flake input) ---
 
-          kli-lol-reactive = buildLisp.library {
-            name = "lol-reactive";
-            deps = [
-              lisp.alexandria lisp.iterate lisp.cl-ppcre lisp.babel
-              lisp.let-over-lambda
-              lisp.cl-who lisp.parenscript lisp.cl-json lisp.hunchentoot
-              lisp.clack lisp.lack
-              lisp.lack-middleware-session lisp.lack-middleware-csrf
-              lisp.lack-middleware-static lisp.lack-middleware-accesslog
-              lisp.clack-handler-hunchentoot
-              lisp.websocket-driver-server
-            ];
-            srcs = map (f: ./lib/lol-reactive + "/${f}") [
-              "package.lisp"
-              "css/registry.lisp"
-              "css/tokens.lisp"
-              "css/generation.lisp"
-              "css/tailwind.lisp"
-              "components.lisp"
-              "signals.lisp"
-              "html.lisp"
-              "html/elements.lisp"
-              "html/escape.lisp"
-              "parenscript-utils.lisp"
-              "htmx/runtime.lisp"
-              "htmx/server.lisp"
-              "htmx/morph.lisp"
-              "server/clack.lisp"
-              "server/security.lisp"
-              "server/errors.lisp"
-              "server/app.lisp"
-              "server/routes.lisp"
-              "composition/props.lisp"
-              "composition/context.lisp"
-              "composition/children.lisp"
-              "forms/form-dsl.lisp"
-              "async/resources.lisp"
-              "advanced/wizards.lisp"
-              "realtime/websocket.lisp"
-              "realtime/sse.lisp"
-              "surgery.lisp"
-              "surgery-js.lisp"
-              "rendering/dom-diff.lisp"
-              "rendering/keyed-list.lisp"
-              "fullstack/component-api.lisp"
-              "fullstack/isomorphic.lisp"
-              "optimization/reactive-analysis.lisp"
-              "optimization/template-validation.lisp"
-            ];
-          };
+          kli-lol-reactive = lol-reactive.lib.${system}.library;
 
           # --- Service modules ---
 
@@ -262,6 +216,8 @@
               "css/frontier.lisp"
               "css/health.lisp"
               "css/activity.lisp"
+              "css/stats.lisp"
+              "css/sessions.lisp"
               "css/task-detail.lisp"
               "css/plan.lisp"
               "css/graph.lisp"
@@ -274,6 +230,7 @@
               "components/sections.lisp"
               # Scripts (before pages)
               "scripts/reveal.lisp"
+              "scripts/activity.lisp"
               "scripts/graph.lisp"
               # Pages
               "pages/frontier.lisp"
@@ -281,6 +238,8 @@
               "pages/activity.lisp"
               "pages/task-detail.lisp"
               "pages/plan.lisp"
+              "pages/stats.lisp"
+              "pages/sessions.lisp"
               "pages/graph.lisp"
               # Routes and server (must be after pages)
               "routes.lisp"
@@ -288,9 +247,9 @@
             ];
           };
 
-          # --- kli binary ---
+          # --- kli binary (unwrapped) ---
 
-          kli = buildLisp.program {
+          kli-binary = buildLisp.program {
             name = "kli";
             main = "kli:main";
             deps = [
@@ -323,9 +282,11 @@
                 "session-task-write.lisp"
                 "file-conflict.lisp"
                 "playbook-activate.lisp"
+                "feedback-nudge.lisp"
                 "dispatch.lisp"
               ]) ++ [
               ./src/package.lisp
+              ./src/init.lisp
               ./src/main.lisp
             ];
             tests = {
@@ -340,7 +301,19 @@
             };
           };
 
+          # --- kli wrapped with plugin data ---
+
+          kli = pkgs.runCommand "kli" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          } ''
+            mkdir -p $out/bin $out/share/kli
+            cp -rT ${./plugin} $out/share/kli/
+            makeWrapper ${kli-binary}/bin/kli $out/bin/kli \
+              --set KLI_DATA_DIR $out/share/kli
+          '';
+
         in {
+          inherit kli-binary;
           default = kli;
         });
     };

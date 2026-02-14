@@ -480,6 +480,37 @@
        (skip "No depot task roots available (sandbox or missing depot)")
        (progn ,@body)))
 
+(test detect-all-task-roots-preserves-data-on-failure
+  "detect-all-task-roots must not wipe existing data if discovery fails.
+   Regression test for the clear-then-error bug where clrhash ran before
+   find-symbol, leaving *depot-tasks-roots* permanently empty."
+  ;; Pre-populate the hash table with known data
+  (let ((saved-roots (make-hash-table :test 'equal))
+        (saved-tasks-root *tasks-root*)
+        (saved-current-depot *current-depot*))
+    ;; Save current state
+    (maphash (lambda (k v) (setf (gethash k saved-roots) v))
+             *depot-tasks-roots*)
+    (unwind-protect
+         (progn
+           ;; Set up known state
+           (clrhash *depot-tasks-roots*)
+           (setf (gethash "test-depot" *depot-tasks-roots*) "/tmp/fake-tasks/")
+           (is (= 1 (hash-table-count *depot-tasks-roots*))
+               "Precondition: table has one entry")
+           ;; Call detect-all-task-roots — even if it succeeds or uses
+           ;; fallback, it should never leave the table empty
+           (handler-case (detect-all-task-roots)
+             (error () nil))
+           (is (plusp (hash-table-count *depot-tasks-roots*))
+               "detect-all-task-roots must not leave *depot-tasks-roots* empty"))
+      ;; Restore original state
+      (clrhash *depot-tasks-roots*)
+      (maphash (lambda (k v) (setf (gethash k *depot-tasks-roots*) v))
+               saved-roots)
+      (setf *tasks-root* saved-tasks-root)
+      (setf *current-depot* saved-current-depot))))
+
 (test scan-depot-tasks-returns-plists
   "scan-depot-tasks returns a list of plists with expected keys."
   (with-task-roots

@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+            artifact: kli-linux-x86_64
+          - os: macos-13
+            system: x86_64-darwin
+            artifact: kli-darwin-x86_64
+          - os: macos-14
+            system: aarch64-darwin
+            artifact: kli-darwin-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build kli
+        run: |
+          nix build .#packages.${{ matrix.system }}.default
+          nix build .#packages.${{ matrix.system }}.kli-binary -o result-binary
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p staging/bin staging/share/kli
+          cp result-binary/bin/.kli-wrapped staging/bin/kli
+          cp -r result/share/kli/* staging/share/kli/
+          tar -czf ${{ matrix.artifact }}.tar.gz -C staging .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum kli-*.tar.gz > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            kli-*
+            checksums.txt

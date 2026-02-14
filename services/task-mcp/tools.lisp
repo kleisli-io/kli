@@ -293,6 +293,22 @@ Use to peek at any task without switching context. See task_bootstrap to join a 
              (format-task-list tasks)
              "No tasks found.")))))
 
+(defun session-team-data ()
+  "Return team metadata plist for current session, or NIL if not a teammate.
+   HTTP mode: reads from session context registry (set by register-pid hook).
+   STDIO mode: reads CLAUDE_CODE_* env vars directly (inherited from Claude)."
+  (or (when *http-mode*
+        (let ((ctx (gethash *session-id* *session-contexts*)))
+          (when (and ctx (ctx-team-name ctx))
+            (list :team-name (ctx-team-name ctx)
+                  :agent-name (ctx-agent-name ctx)
+                  :agent-type (ctx-agent-type ctx)))))
+      (let ((team (uiop:getenv "CLAUDE_CODE_TEAM_NAME")))
+        (when (and team (plusp (length team)))
+          (list :team-name team
+                :agent-name (uiop:getenv "CLAUDE_CODE_AGENT_NAME")
+                :agent-type (uiop:getenv "CLAUDE_CODE_AGENT_TYPE"))))))
+
 (defun join-task (task-id)
   "Shared join logic: resolve ID, set current, emit session.join,
    write session file, cleanup. Returns resolved task-id on success.
@@ -301,10 +317,13 @@ Use to peek at any task without switching context. See task_bootstrap to join a 
          (events-path (task:task-events-path resolved-id)))
     (unless (probe-file events-path)
       (error "Task ~A not found (no events.jsonl)" resolved-id))
-    ;; Set current task + emit session.join
+    ;; Set current task + emit session.join (or session.team-join for teammates)
     (setf *current-task-id* resolved-id)
     (finalize-session-context)
-    (emit-event :session.join nil)
+    (let ((team-data (session-team-data)))
+      (if team-data
+          (emit-event :session.team-join team-data)
+          (emit-event :session.join nil)))
     ;; Write session file for PostToolUse hooks (event tracking)
     (write-session-task-file)
     ;; Persist refreshed PID (write-session-task-file may update *claude-pid*)

@@ -1,23 +1,33 @@
 ;;;; KLI Dashboard — Activity page (real data)
+;;;; Event stream with depot filtering, category filters, infinite scroll.
 
 (in-package :kli-dashboard)
+
+;;; ============================================================
+;;; CONFIG
+;;; ============================================================
+
+(defparameter *activity-initial-limit* 50
+  "Number of events to render on initial page load.")
 
 ;;; ============================================================
 ;;; EVENT HELPERS
 ;;; ============================================================
 
 (defun event-category (type)
-  "Map event type keyword to display category."
+  "Map event type keyword to display category string."
   (let ((name (if (keywordp type) (symbol-name type) (string type))))
     (cond ((search "SESSION" name) "session")
           ((search "OBSERVATION" name) "observation")
           ((search "HANDOFF" name) "handoff")
+          ((search "ARTIFACT" name) "artifact")
           (t "task"))))
 
 (defun event-icon-char (category)
   (cond ((string= category "session") "S")
         ((string= category "observation") "O")
         ((string= category "handoff") "H")
+        ((string= category "artifact") "A")
         (t "T")))
 
 (defun event-type-label (type)
@@ -26,13 +36,18 @@
     (cond ((string= name "SESSION.JOIN") "Session joined")
           ((string= name "SESSION.LEAVE") "Session left")
           ((string= name "SESSION.CLAIM") "Task claimed")
+          ((string= name "SESSION.RELEASE") "Session released")
           ((string= name "OBSERVATION") "Observation")
           ((string= name "HANDOFF.CREATE") "Handoff created")
+          ((string= name "ARTIFACT.CREATE") "Artifact registered")
+          ((string= name "TASK.CREATE") "Task created")
+          ((string= name "TASK.FORK") "Task forked")
+          ((string= name "TASK.SPAWN") "Task spawned")
           ((search "LINK" name) "Edge created")
           ((search "SEVER" name) "Edge removed")
-          ((search "COMPLETE" name) "Task completed")
+          ((search "RECLASSIFY" name) "Edge reclassified")
           ((search "METADATA" name) "Metadata set")
-          ((search "TASK.CREATE" name) "Task created")
+          ((search "UPDATE-STATUS" name) "Status changed")
           (t (string-downcase name)))))
 
 (defun format-time (universal-time)
@@ -70,11 +85,34 @@
             (format nil "~@[~A ~]~A" edge target))))))
 
 ;;; ============================================================
-;;; ACTIVITY PAGE
+;;; STATS
+;;; ============================================================
+
+(defun compute-activity-stats (events)
+  "Compute activity stats from event list.
+   Returns plist with :total, :sessions, :days, and per-category counts."
+  (let ((sessions (make-hash-table :test #'equal))
+        (dates (make-hash-table :test #'equal))
+        (categories (make-hash-table :test #'equal)))
+    (dolist (ev events)
+      (let ((date (format-date (getf ev :timestamp)))
+            (cat (event-category (getf ev :type)))
+            (session (getf ev :session)))
+        (setf (gethash date dates) t)
+        (incf (gethash cat categories 0))
+        (when session (setf (gethash session sessions) t))))
+    (list :total (length events)
+          :sessions (hash-table-count sessions)
+          :days (hash-table-count dates)
+          :observations (gethash "observation" categories 0)
+          :handoffs (gethash "handoff" categories 0))))
+
+;;; ============================================================
+;;; EVENT ROWS
 ;;; ============================================================
 
 (defun render-event-row (event)
-  "Render a single event row."
+  "Render a single event row with data-category for client-side filtering."
   (let* ((task-id (getf event :task))
          (type (getf event :type))
          (timestamp (getf event :timestamp))
@@ -84,7 +122,7 @@
          (detail (event-detail-text data))
          (scolor (session-color session)))
     (htm-str
-      (:div :class "event-row"
+      (:div :class "event-row" :data-category category
         (:div :class (format nil "event-icon ~A" category)
           (cl-who:str (event-icon-char category)))
         (:div :class "event-body"
@@ -104,6 +142,60 @@
                 :style (format nil "background: ~A22; color: ~A" scolor scolor)
                 (cl-who:str (subseq session 0 (min 6 (length session))))))))))))
 
+(defun render-event-row-with-date (event)
+  "Render a single event row with inline date badge (for paginated fragments)."
+  (let* ((task-id (getf event :task))
+         (type (getf event :type))
+         (timestamp (getf event :timestamp))
+         (session (getf event :session))
+         (data (getf event :data))
+         (category (event-category type))
+         (detail (event-detail-text data))
+         (scolor (session-color session)))
+    (htm-str
+      (:div :class "event-row" :data-category category
+        (:div :class (format nil "event-icon ~A" category)
+          (cl-who:str (event-icon-char category)))
+        (:div :class "event-body"
+          (:div :class "event-title"
+            (cl-who:str (event-type-label type)) " in "
+            (:a :href (format nil "/task?id=~A" task-id)
+              (cl-who:str (or task-id "unknown"))))
+          (when (and detail (> (length detail) 0))
+            (cl-who:htm
+              (:div :class "event-detail"
+                (cl-who:str (truncate-string detail 120))))))
+        (:div :class "event-meta"
+          (:span :class "event-date" (cl-who:str (format-date timestamp)))
+          (:span :class "event-time" (cl-who:str (format-time timestamp)))
+          (when session
+            (cl-who:htm
+              (:span :class "event-session"
+                :style (format nil "background: ~A22; color: ~A" scolor scolor)
+                (cl-who:str (subseq session 0 (min 6 (length session))))))))))))
+
+;;; ============================================================
+;;; INFINITE SCROLL
+;;; ============================================================
+
+(defun render-load-more-sentinel (offset limit &optional category depot)
+  "Render the HTMX infinite scroll sentinel.
+   Uses hx-trigger='revealed once' to load more when scrolled into view."
+  (let* ((cat-str (or category "all"))
+         (base-url (format nil "/api/activity/events?offset=~D&limit=~D&category=~A"
+                           offset limit cat-str))
+         (url (if depot
+                  (format nil "~A&depot=~A" base-url depot)
+                  base-url)))
+    (htm-str
+      (:div :id "load-more-sentinel"
+            :class "load-more-sentinel"
+            :hx-get url
+            :hx-trigger "revealed once"
+            :hx-swap "outerHTML"
+        (:div :class "loading-indicator"
+          "Loading more events...")))))
+
 (defun group-events-by-day (events)
   "Group events into ((date . events) ...) alist, newest first."
   (let ((groups nil))
@@ -113,45 +205,62 @@
         (if existing
             (push ev (cdr existing))
             (push (cons date (list ev)) groups))))
-    ;; Sort groups newest first
     (sort groups #'string> :key #'car)))
 
-(defun render-activity ()
-  "Render the activity page with real event data."
-  (let* ((events (get-recent-events :limit 200))
-         (day-groups (when events (group-events-by-day events)))
-         (total (length events))
-         (sessions (length (remove-duplicates
-                             (mapcar (lambda (e) (getf e :session)) events)
-                             :test #'equal)))
-         (days (length day-groups))
-         (obs-count (count-if (lambda (e)
-                                (string= "observation" (event-category (getf e :type))))
-                              events))
-         (handoff-count (count-if (lambda (e)
-                                    (string= "handoff" (event-category (getf e :type))))
-                                  events)))
+;;; ============================================================
+;;; ACTIVITY PAGE
+;;; ============================================================
+
+(defun render-activity (&optional depot)
+  "Render the activity page with depot filtering, category filters, and infinite scroll."
+  (let* ((all-events (filter-events-by-depot (get-all-events) depot))
+         (items (subseq all-events 0 (min *activity-initial-limit* (length all-events))))
+         (stats (compute-activity-stats all-events))
+         (total (getf stats :total))
+         (day-groups (when items (group-events-by-day items))))
     (htm-str
       (:div :style "max-width: 860px; margin: 0 auto; padding: 2rem;"
-        ;; Summary bar
+        ;; Summary bar — stats from ALL depot-filtered events
         (:div :class "activity-summary"
           (:div :class "activity-stat"
-            (:div :class "count" (cl-who:fmt "~D" total))
+            (:div :class "count"
+              (if (> total (length items))
+                  (cl-who:fmt "~D+" total)
+                  (cl-who:fmt "~D" (length items))))
             (:div :class "label" "events"))
           (:div :class "activity-stat"
-            (:div :class "count" (cl-who:fmt "~D" sessions))
+            (:div :class "count" (cl-who:fmt "~D" (getf stats :sessions)))
             (:div :class "label" "sessions"))
           (:div :class "activity-stat"
-            (:div :class "count" (cl-who:fmt "~D" days))
+            (:div :class "count" (cl-who:fmt "~D" (getf stats :days)))
             (:div :class "label" "days"))
           (:div :class "activity-stat"
             (:div :class "count" :style "color: var(--color-success);"
-              (cl-who:fmt "~D" obs-count))
+              (cl-who:fmt "~D" (getf stats :observations)))
             (:div :class "label" "observations"))
           (:div :class "activity-stat"
             (:div :class "count" :style "color: var(--color-accent);"
-              (cl-who:fmt "~D" handoff-count))
+              (cl-who:fmt "~D" (getf stats :handoffs)))
             (:div :class "label" "handoffs")))
+
+        ;; Filter buttons
+        (:div :class "activity-filters"
+          (:button :class "filter-btn active" :onclick "filterEvents('all')"
+            "All")
+          (:button :class "filter-btn" :onclick "filterEvents('session')"
+            "Sessions")
+          (:button :class "filter-btn" :onclick "filterEvents('observation')"
+            "Observations")
+          (:button :class "filter-btn" :onclick "filterEvents('handoff')"
+            "Handoffs")
+          (:button :class "filter-btn" :onclick "filterEvents('task')"
+            "Tasks")
+          (:button :class "filter-btn" :onclick "filterEvents('artifact')"
+            "Artifacts"))
+
+        ;; Hidden filter state input
+        (:input :type "hidden" :id "current-filter" :name "category" :value "all")
+
         ;; Day groups
         (if day-groups
           (dolist (group day-groups)
@@ -160,18 +269,23 @@
               (cl-who:htm
                 (:div :class "day-group reveal"
                   (:div :class "day-header"
-                    (cl-who:fmt "~A (~D events)" date (length day-events)))
-                  (:div :style "display: flex; flex-direction: column; gap: 2px;"
+                    (cl-who:fmt "~A (~D event~:P)" date (length day-events)))
+                  (:div :class "event-list"
                     (dolist (ev day-events)
                       (cl-who:str (render-event-row ev))))))))
           (cl-who:htm
             (:div :class "empty-state"
-              "No events found. Is task-mcp running?")))))))
+              "No events found. Is task-mcp running?")))
+
+        ;; Infinite scroll sentinel
+        (when (> total (length items))
+          (cl-who:str (render-load-more-sentinel
+                       (length items) *activity-initial-limit* nil depot)))))))
 
 (defun render-activity-page (&optional depot)
   "Render the activity page with depot tabs and reveal script."
   (htm-str
     (:div :class "page-wrapper"
       (cl-who:str (render-depot-tabs depot "/activity"))
-      (cl-who:str (render-activity))
+      (cl-who:str (render-activity depot))
       (cl-who:str (render-reveal-script)))))

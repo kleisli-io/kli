@@ -62,15 +62,20 @@
    Resolution order:
    1. KLI_TASKS_DIR env (explicit override for kli standalone)
    2. ACE_TASKS_DIR env (backward compat with depot-of-depots)
-   3. DEPOT_ROOT/ace/tasks/ (depot-of-depots mode)
+   3. DEPOT_ROOT/.kli/tasks/ or DEPOT_ROOT/ace/tasks/ (.kli preferred)
    4. $GIT_ROOT/.kli/tasks/ (kli standalone default)
-   5. CWD/ace/tasks/ (legacy fallback)"
+   5. CWD/.kli/tasks/ or CWD/ace/tasks/ (legacy fallback, .kli preferred)"
   (setf *tasks-root*
         (or (uiop:getenv "KLI_TASKS_DIR")
             (uiop:getenv "ACE_TASKS_DIR")
             (let ((depot (uiop:getenv "DEPOT_ROOT")))
               (when depot
-                (format nil "~A/ace/tasks/" depot)))
+                (let ((kli-candidate (format nil "~A/.kli/tasks/" depot)))
+                  (if (probe-file kli-candidate)
+                      kli-candidate
+                      (let ((ace-candidate (format nil "~A/ace/tasks/" depot)))
+                        (when (probe-file ace-candidate)
+                          ace-candidate))))))
             ;; kli standalone: use git root + .kli/tasks/
             (let ((git-root (ignore-errors
                               (funcall (find-symbol "FIND-GIT-ROOT" :depot)))))
@@ -78,11 +83,14 @@
                 (let ((candidate (format nil "~A/.kli/tasks/" git-root)))
                   (when (probe-file candidate)
                     candidate))))
-            ;; Legacy fallback: ace/tasks/ from CWD
+            ;; Legacy fallback: .kli/tasks/ or ace/tasks/ from CWD
             (let ((cwd (namestring (uiop:getcwd))))
-              (let ((candidate (format nil "~Aace/tasks/" cwd)))
-                (when (probe-file candidate)
-                  candidate)))
+              (let ((kli-candidate (format nil "~A.kli/tasks/" cwd)))
+                (if (probe-file kli-candidate)
+                    kli-candidate
+                    (let ((ace-candidate (format nil "~Aace/tasks/" cwd)))
+                      (when (probe-file ace-candidate)
+                        ace-candidate)))))
             (error "Cannot detect tasks root: set KLI_TASKS_DIR, or run 'kli init' in a git repository"))))
 
 (defvar *depot-tasks-roots* (make-hash-table :test 'equal)
@@ -102,33 +110,44 @@
    Also sets *tasks-root* to the current depot's task root for backward
    compatibility.
 
+   Guards against missing :depot package (e.g., Swank/dev environments) and
+   never clears *depot-tasks-roots* unless new data is ready to replace it.
+
    Returns:
      The *depot-tasks-roots* hash-table."
-  ;; Clear existing entries
-  (clrhash *depot-tasks-roots*)
-
-  ;; Try to use depot library for multi-depot discovery
-  (let ((depot-fn (find-symbol "LIST-DEPOTS-WITH-TASKS" :depot)))
-    (if depot-fn
-        ;; Multi-depot mode: populate from all depots
-        (let ((depots-with-tasks (funcall depot-fn)))
-          (dolist (entry depots-with-tasks)
-            (let ((depot-name (getf entry :depot))
-                  (tasks-root (getf entry :tasks-root)))
-              (setf (gethash depot-name *depot-tasks-roots*) tasks-root)))
-          ;; Also set *tasks-root* to current depot for backward compat
-          (let* ((current-depot-fn (find-symbol "FIND-DEPOT-ROOT" :depot))
-                 (current-root (when current-depot-fn (funcall current-depot-fn))))
-            (when current-root
-              ;; Extract depot name from path
-              (let ((depot-name (car (last (pathname-directory (pathname current-root))))))
-                (setf *current-depot* depot-name)
-                (setf *tasks-root* (gethash depot-name *depot-tasks-roots*))))))
-        ;; Single depot fallback
-        (progn
+  (let ((depot-pkg (find-package :depot)))
+    (if depot-pkg
+        ;; Multi-depot mode: build into temp table, swap on success
+        (let ((depot-fn (find-symbol "LIST-DEPOTS-WITH-TASKS" depot-pkg)))
+          (if depot-fn
+              (let ((new-roots (make-hash-table :test 'equal))
+                    (depots-with-tasks (funcall depot-fn)))
+                (dolist (entry depots-with-tasks)
+                  (let ((depot-name (getf entry :depot))
+                        (tasks-root (getf entry :tasks-root)))
+                    (setf (gethash depot-name new-roots) tasks-root)))
+                ;; Only replace when we have results
+                (when (plusp (hash-table-count new-roots))
+                  (clrhash *depot-tasks-roots*)
+                  (maphash (lambda (k v)
+                             (setf (gethash k *depot-tasks-roots*) v))
+                           new-roots))
+                ;; Set *tasks-root* and *current-depot* for backward compat
+                (let* ((current-depot-fn (find-symbol "FIND-DEPOT-ROOT" depot-pkg))
+                       (current-root (when current-depot-fn (funcall current-depot-fn))))
+                  (when current-root
+                    (let ((depot-name (car (last (pathname-directory
+                                                  (pathname current-root))))))
+                      (setf *current-depot* depot-name)
+                      (setf *tasks-root* (gethash depot-name *depot-tasks-roots*))))))
+              ;; Symbol not found in depot package — single depot fallback
+              (when (zerop (hash-table-count *depot-tasks-roots*))
+                (detect-tasks-root)
+                (setf (gethash "default" *depot-tasks-roots*) *tasks-root*))))
+        ;; No :depot package — single depot fallback
+        (when (zerop (hash-table-count *depot-tasks-roots*))
           (detect-tasks-root)
           (setf (gethash "default" *depot-tasks-roots*) *tasks-root*))))
-
   *depot-tasks-roots*)
 
 (defun task-directory (task-id)

@@ -272,6 +272,24 @@
           (when (uiop:directory-exists-p ace-tasks)
             (namestring ace-tasks)))))))
 
+(defun depot-meta-root (depot-name)
+  "Get the metadata directory for a depot (.kli/ or ace/), or NIL.
+
+   This is the parent of the tasks directory — where playbook files,
+   dashboard state, and other per-depot metadata live.
+
+   Checks .kli/ first (kli standalone), then ace/ (depot-of-depots).
+   Derived from depot-tasks-root to ensure consistent resolution.
+
+   Arguments:
+     depot-name - Depot name string (or NIL for current depot)
+
+   Returns:
+     Path to metadata directory as string, or NIL if not found."
+  (let ((tasks-root (depot-tasks-root depot-name)))
+    (when tasks-root
+      (namestring (truename (merge-pathnames "../" (pathname tasks-root)))))))
+
 (defun list-depots-with-tasks ()
   "List all depots/projects that have tasks directories.
 

@@ -14,6 +14,7 @@
     (:session-task-write (input) (session-task-write-handler input))
     (:file-conflict      (input) (file-conflict-handler input))
     (:playbook-activate  (input) (playbook-activate-handler input))
+    (:feedback-nudge     (input) (feedback-nudge-handler input))
     (t (&rest args)      (error "Unknown hook: ~a" (car args)))))
 
 (defun hook-main (name)

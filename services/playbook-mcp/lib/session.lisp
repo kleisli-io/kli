@@ -424,6 +424,49 @@
       t)))
 
 ;;; =========================================================================
+;;; FEEDBACK STATE FILE (for Stop hook)
+;;; =========================================================================
+;;; The Stop hook needs to know which activated patterns have received feedback.
+;;; Since hooks run as separate processes, they can't access MCP in-memory state.
+;;; This file bridges the gap: MCP writes it, hook reads it.
+;;; Path: .claude/sessions/{session_id}/playbook/feedback-state.json
+
+(defun feedback-state-path (cwd session-id)
+  "Return path to feedback-state.json for a session."
+  (merge-pathnames (format nil ".claude/sessions/~A/playbook/feedback-state.json" session-id)
+                   (ensure-trailing-slash cwd)))
+
+(defun write-feedback-state-file (cwd session-id)
+  "Write current feedback state to session directory.
+   Reads activated and feedback-given from in-memory session state.
+   Creates {\"activated\":[...],\"feedback_given\":[...],\"pending\":[...],\"count\":N}."
+  (when (and cwd session-id)
+    (let ((session (get-session session-id)))
+      (when session
+        (handler-case
+            (let* ((activated (session-state-activated-patterns session))
+                   (feedback-ids (mapcar #'car (session-state-feedback-given session)))
+                   (pending (set-difference activated feedback-ids :test #'string=))
+                   (path (feedback-state-path cwd session-id))
+                   (ht (make-hash-table :test 'equal)))
+              (setf (gethash "activated" ht) (coerce activated 'vector))
+              (setf (gethash "feedback_given" ht) (coerce feedback-ids 'vector))
+              (setf (gethash "pending" ht) (coerce pending 'vector))
+              (setf (gethash "count" ht) (length pending))
+              (ensure-directories-exist path)
+              (with-open-file (s path :direction :output :if-exists :supersede)
+                (yason:encode ht s))
+              path)
+          (error () nil))))))
+
+(defun read-feedback-state-file (path)
+  "Read feedback state from JSON file. Returns hash-table or NIL."
+  (when (probe-file path)
+    (handler-case
+        (yason:parse (uiop:read-file-string path))
+      (error () nil))))
+
+;;; =========================================================================
 ;;; SIGNAL HANDLER CLEANUP
 ;;; =========================================================================
 ;;; Clean up mcp.lock file on graceful shutdown (SIGTERM/SIGINT).

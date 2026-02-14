@@ -20,6 +20,29 @@
         "type": "github"
       }
     },
+    "lol-reactive": {
+      "inputs": {
+        "cl-deps": [
+          "cl-deps"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1770896810,
+        "narHash": "sha256-zNcAinrtrXS9y++B75tRxV+eQ3ar1CYiJYOaFvqLcPE=",
+        "owner": "kleisli-io",
+        "repo": "lol-reactive",
+        "rev": "e81bc371ec2a02b6511af3073b4ecc7989aa5303",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kleisli-io",
+        "repo": "lol-reactive",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1769018530,
@@ -39,6 +62,7 @@
     "root": {
       "inputs": {
         "cl-deps": "cl-deps",
+        "lol-reactive": "lol-reactive",
         "nixpkgs": "nixpkgs"
       }
     }

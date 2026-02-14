@@ -99,9 +99,11 @@
   (cache-get :depot-roots 300
     (lambda ()
       (let ((result nil))
-        (maphash (lambda (k v)
-                   (push (cons k (namestring (truename (merge-pathnames "../../" v))))
-                         result))
+        (maphash (lambda (k _)
+                   (declare (ignore _))
+                   (let ((root (depot-root-for k)))
+                     (when root
+                       (push (cons k (namestring root)) result))))
                  task:*depot-tasks-roots*)
         result))))
 
@@ -221,17 +223,23 @@
 ;;; PIN STORAGE (per-depot, direct file I/O)
 ;;; ============================================================
 
-(defun depot-root-for (depot)
-  "Get the depot root directory from the tasks root."
+(defun meta-root-for (depot)
+  "Get the metadata directory (.kli/ or ace/) for a depot."
   (let ((tasks-root (gethash depot task:*depot-tasks-roots*)))
     (when tasks-root
-      (truename (merge-pathnames "../../" (pathname tasks-root))))))
+      (truename (merge-pathnames "../" (pathname tasks-root))))))
+
+(defun depot-root-for (depot)
+  "Get the depot root directory (parent of meta dir)."
+  (let ((meta (meta-root-for depot)))
+    (when meta
+      (truename (merge-pathnames "../" meta)))))
 
 (defun pin-file-path (depot)
-  "Pin file path: <depot-root>/ace/.dashboard-pins.json."
-  (let ((root (depot-root-for depot)))
-    (when root
-      (merge-pathnames "ace/.dashboard-pins.json" root))))
+  "Pin file path: <meta-root>/.dashboard-pins.json."
+  (let ((meta (meta-root-for depot)))
+    (when meta
+      (merge-pathnames ".dashboard-pins.json" meta))))
 
 (defun load-pins (&optional depot)
   "Load pins for a depot. Returns list of task ID strings."
@@ -267,6 +275,49 @@
   (member task-id (load-pins depot) :test #'string=))
 
 ;;; ============================================================
+;;; DISMISSED EDGE SUGGESTIONS
+;;; ============================================================
+
+(defun dismissed-edges-path ()
+  "Path: <meta-root>/.dashboard-dismissed-edges.json for current depot."
+  (let ((meta (meta-root-for nil)))
+    (when meta
+      (merge-pathnames ".dashboard-dismissed-edges.json" meta))))
+
+(defun load-dismissed-edges ()
+  "Load dismissed edge suggestions. Returns list of (from . to) string pairs."
+  (let ((path (dismissed-edges-path)))
+    (when (and path (probe-file path))
+      (handler-case
+          (with-open-file (s path)
+            (yason:parse s))
+        (error () nil)))))
+
+(defun save-dismissed-edges (edges)
+  "Save dismissed edge suggestion list."
+  (let ((path (dismissed-edges-path)))
+    (when path
+      (ensure-directories-exist path)
+      (with-open-file (s path :direction :output
+                              :if-exists :supersede
+                              :if-does-not-exist :create)
+        (yason:encode edges s)
+        t))))
+
+(defun dismiss-edge-suggestion (from to)
+  "Dismiss a suggested edge so it won't appear in health."
+  (let* ((dismissed (load-dismissed-edges))
+         (key (format nil "~A->~A" from to)))
+    (unless (member key dismissed :test #'string=)
+      (save-dismissed-edges (append dismissed (list key))))
+    (invalidate-cache :health)))
+
+(defun edge-dismissed-p (from to)
+  "Check if a suggested edge has been dismissed."
+  (let ((key (format nil "~A->~A" from to)))
+    (member key (load-dismissed-edges) :test #'string=)))
+
+;;; ============================================================
 ;;; SCRATCHPAD (per-task, direct file I/O)
 ;;; ============================================================
 
@@ -282,11 +333,14 @@
   (let* ((parts (split-qualified-id task-id))
          (depot (car parts))
          (bare-id (cdr parts))
-         (root (depot-root-for depot)))
-    (when (and root bare-id)
+         (meta (meta-root-for depot))
+         (tasks-root (gethash depot task:*depot-tasks-roots*)))
+    (when bare-id
       (if (string= bare-id "__global__")
-          (merge-pathnames "ace/.dashboard-scratchpad.md" root)
-          (merge-pathnames (format nil "ace/tasks/~A/.scratchpad.md" bare-id) root)))))
+          (when meta
+            (merge-pathnames ".dashboard-scratchpad.md" meta))
+          (when tasks-root
+            (merge-pathnames (format nil "~A/.scratchpad.md" bare-id) tasks-root))))))
 
 (defun load-scratchpad (&optional task-id)
   "Load scratchpad content for a task."
@@ -313,19 +367,31 @@
 ;;; ============================================================
 
 (defun get-health-data ()
-  "All health diagnostics (cached 120s)."
+  "All health diagnostics with item lists (cached 120s)."
   (cache-get :health 120
     (lambda ()
       (with-safe-data nil
-        (list
-          :stale-tasks (length (task:find-stale-tasks))
-          :dead-ends (length (task:find-dead-ends))
-          :orphans (length (task:find-declared-orphans))
-          :stale-claims (length (task:find-stale-claims))
-          :premature (length (task:find-premature-completions))
-          :clusters (length (task:find-convergent-clusters))
-          :suggested (length (task:find-unlinked-bidirectional-refs))
-          :unexplored (length (task:find-unexplored-frontier)))))))
+        (let* ((stale (task:find-stale-tasks))
+               (dead (task:find-dead-ends))
+               (orphans (task:find-declared-orphans))
+               (claims (task:find-stale-claims))
+               (premature (task:find-premature-completions))
+               (clusters (task:find-convergent-clusters))
+               (suggested-raw (task:find-unlinked-bidirectional-refs))
+               (suggested (remove-if
+                            (lambda (s)
+                              (edge-dismissed-p (getf s :from) (getf s :to)))
+                            suggested-raw))
+               (frontier (task:find-unexplored-frontier)))
+          (list
+            :stale-tasks (length stale) :stale-items stale
+            :dead-ends (length dead) :dead-items dead
+            :orphans (length orphans) :orphan-items orphans
+            :stale-claims (length claims) :claim-items claims
+            :premature (length premature) :premature-items premature
+            :clusters (length clusters) :cluster-items clusters
+            :suggested (length suggested) :suggested-items suggested
+            :unexplored (length frontier) :frontier-items frontier))))))
 
 ;;; ============================================================
 ;;; ACTIVITY DATA
@@ -352,6 +418,242 @@
                             events)))))))
           (setf events (sort events #'> :key (lambda (e) (or (getf e :timestamp) 0))))
           (subseq events 0 (min limit (length events))))))))
+
+(defun get-all-events ()
+  "Get all events across all tasks, sorted newest first (cached 60s).
+   Unlike get-recent-events, returns the full set with no limit."
+  (cache-get :all-events 60
+    (lambda ()
+      (with-safe-data nil
+        (let ((events nil))
+          (dolist (info (task:get-cached-task-infos))
+            (let* ((id (getf info :id))
+                   (epath (task:task-events-path id)))
+              (when (and epath (probe-file epath))
+                (ignore-errors
+                  (let ((log (task:elog-load epath)))
+                    (dolist (ev (task:event-log-events log))
+                      (push (list :task id
+                                  :type (task:event-type ev)
+                                  :timestamp (task:event-timestamp ev)
+                                  :session (task:event-session ev)
+                                  :data (task:event-data ev))
+                            events)))))))
+          (sort events #'> :key (lambda (e) (or (getf e :timestamp) 0))))))))
+
+(defun filter-events-by-depot (events depot)
+  "Filter events by depot prefix on :task field. NIL depot = no filter."
+  (if depot
+      (let ((prefix (concatenate 'string depot ":")))
+        (remove-if-not
+         (lambda (e)
+           (let ((id (getf e :task)))
+             (and id (>= (length id) (length prefix))
+                  (string= prefix id :end2 (length prefix)))))
+         events))
+      events))
+
+(defun get-events-range (events offset limit &optional category)
+  "Return OFFSET..OFFSET+LIMIT slice of EVENTS, optionally filtered by CATEGORY string.
+   CATEGORY nil or \"all\" means no filter."
+  (let ((filtered (if (or (null category) (string-equal category "all"))
+                      events
+                      (remove-if-not
+                       (lambda (e) (string= category (event-category (getf e :type))))
+                       events))))
+    (when (< offset (length filtered))
+      (subseq filtered offset (min (+ offset limit) (length filtered))))))
+
+;;; ============================================================
+;;; STATS DATA
+;;; ============================================================
+
+(defun get-stats-data (&optional depot)
+  "Aggregate statistics for the stats page (cached 60s).
+   Returns plist with event counts, per-day breakdown, per-type, per-depot,
+   task status counts, top active tasks, and session summary."
+  (cache-get (list :stats depot) 60
+    (lambda ()
+      (with-safe-data nil
+        (let ((per-day (make-hash-table :test #'equal))
+              (per-type (make-hash-table :test #'eq))
+              (per-depot (make-hash-table :test #'equal))
+              (per-task (make-hash-table :test #'equal))
+              (per-day-creates (make-hash-table :test #'equal))
+              (per-day-completes (make-hash-table :test #'equal))
+              (total-events 0))
+          ;; Scan all events
+          (dolist (info (task:get-cached-task-infos))
+            (when (getf info :has-events)
+              (let* ((id (getf info :id))
+                     (task-depot (getf info :depot))
+                     (epath (task:task-events-path id)))
+                (when (and epath (probe-file epath)
+                           (or (null depot) (string-equal depot task-depot)))
+                  (ignore-errors
+                    (let ((log (task:elog-load epath)))
+                      (dolist (ev (task:event-log-events log))
+                        (incf total-events)
+                        (incf (gethash task-depot per-depot 0))
+                        (incf (gethash (task:event-type ev) per-type 0))
+                        (incf (gethash id per-task 0))
+                        (let ((ts (task:event-timestamp ev))
+                              (etype (task:event-type ev)))
+                          (when (and ts (numberp ts) (> ts 0))
+                            (multiple-value-bind (s m h day month year)
+                                (decode-universal-time ts)
+                              (declare (ignore s m h))
+                              (let ((date-key (format nil "~D-~2,'0D-~2,'0D"
+                                                      year month day)))
+                                (incf (gethash date-key per-day 0))
+                                (when (eq etype :task.create)
+                                  (incf (gethash date-key per-day-creates 0)))
+                                (when (eq etype :task.update-status)
+                                  (let ((edata (task:event-data ev)))
+                                    (when (and edata
+                                               (string= "completed"
+                                                        (getf edata :status)))
+                                      (incf (gethash date-key
+                                                     per-day-completes 0))))))))))))))))
+          ;; Task status counts (from enriched tasks)
+          (let* ((tasks (get-enriched-tasks))
+                 (filtered (if depot (filter-by-depot tasks depot) tasks))
+                 (completed (count-if (lambda (tk) (eq (getf tk :status) :completed)) filtered))
+                 (active (count-if (lambda (tk) (task-active-p tk)) filtered))
+                 (dormant (count-if (lambda (tk) (not (getf tk :has-events))) filtered)))
+            ;; Top tasks by event count
+            (let ((top-tasks nil))
+              (maphash (lambda (id count)
+                         (push (cons id count) top-tasks))
+                       per-task)
+              (setf top-tasks (subseq (sort top-tasks #'> :key #'cdr)
+                                      0 (min 10 (length top-tasks))))
+              ;; Session stats
+              (let* ((fps (ignore-errors (task:cached-session-fingerprints)))
+                     (session-count (if fps (hash-table-count fps) 0))
+                     (builders 0) (observers 0))
+                (when fps
+                  (maphash (lambda (sid fp)
+                             (declare (ignore sid))
+                             (if (eq :builder (ignore-errors
+                                                (task:classify-session-archetype fp)))
+                                 (incf builders) (incf observers)))
+                           fps))
+                ;; Events per day sorted
+                (let ((daily nil))
+                  (maphash (lambda (date count) (push (cons date count) daily)) per-day)
+                  (setf daily (sort daily #'string< :key #'car))
+                  ;; Cumulative task series
+                  (let ((acc-c 0) (acc-co 0)
+                        (cum-c nil) (cum-co nil))
+                    (dolist (entry daily)
+                      (push (cons (car entry)
+                                  (incf acc-c (gethash (car entry)
+                                                       per-day-creates 0)))
+                            cum-c)
+                      (push (cons (car entry)
+                                  (incf acc-co (gethash (car entry)
+                                                        per-day-completes 0)))
+                            cum-co))
+                    (setf cum-c (nreverse cum-c)
+                          cum-co (nreverse cum-co))
+                  ;; Event types sorted
+                  (let ((types nil))
+                    (maphash (lambda (type count) (push (cons type count) types)) per-type)
+                    (setf types (sort types #'> :key #'cdr))
+                    ;; Depot breakdown sorted
+                    (let ((depots nil))
+                      (maphash (lambda (dep count) (push (cons dep count) depots)) per-depot)
+                      (setf depots (sort depots #'> :key #'cdr))
+                      (list :total-events total-events
+                            :total-tasks (length filtered)
+                            :completed completed :active active :dormant dormant
+                            :daily daily
+                            :cumulative-creates cum-c
+                            :cumulative-completes cum-co
+                            :types types
+                            :depots depots
+                            :top-tasks top-tasks
+                            :session-count session-count
+                            :builders builders :observers observers)))))))))))))
+
+;;; ============================================================
+;;; SESSION DATA
+;;; ============================================================
+
+(defun get-session-data (&optional depot)
+  "Session inventory for the sessions page (cached 30s).
+   Returns plist with :active sessions (recent, no leave) and :history (all sessions)."
+  (cache-get (list :sessions depot) 30
+    (lambda ()
+      (with-safe-data nil
+        (let ((sessions (make-hash-table :test #'equal))
+              (now (get-universal-time)))
+          ;; Scan all events to build session profiles
+          (dolist (info (task:get-cached-task-infos))
+            (when (getf info :has-events)
+              (let* ((id (getf info :id))
+                     (task-depot (getf info :depot))
+                     (epath (task:task-events-path id)))
+                (when (and epath (probe-file epath)
+                           (or (null depot) (string-equal depot task-depot)))
+                  (ignore-errors
+                    (let ((log (task:elog-load epath)))
+                      (dolist (ev (task:event-log-events log))
+                        (let ((sid (task:event-session ev))
+                              (ts (task:event-timestamp ev))
+                              (type (task:event-type ev)))
+                          (when sid
+                            (let ((entry (gethash sid sessions)))
+                              (unless entry
+                                (setf entry (list :first-seen ts :last-seen 0
+                                                  :event-count 0
+                                                  :tasks nil
+                                                  :depots nil
+                                                  :left-at nil))
+                                (setf (gethash sid sessions) entry))
+                              (incf (getf entry :event-count))
+                              (when (< ts (getf entry :first-seen))
+                                (setf (getf entry :first-seen) ts))
+                              (when (> ts (getf entry :last-seen))
+                                (setf (getf entry :last-seen) ts))
+                              (unless (member id (getf entry :tasks) :test #'string=)
+                                (push id (getf entry :tasks)))
+                              (unless (member task-depot (getf entry :depots) :test #'string=)
+                                (push task-depot (getf entry :depots)))
+                              (when (eq type :session.leave)
+                                (setf (getf entry :left-at) ts))))))))))))
+          ;; Split into active vs history
+          (let ((active nil)
+                (history nil)
+                (threshold (- now 3600)))
+            (maphash
+              (lambda (sid data)
+                (let* ((last (getf data :last-seen))
+                       (left (getf data :left-at))
+                       (is-active (and (> last threshold)
+                                       (or (null left) (< left last))))
+                       (duration (- last (getf data :first-seen)))
+                       (entry (list :session sid
+                                    :first-seen (getf data :first-seen)
+                                    :last-seen last
+                                    :ago-seconds (- now last)
+                                    :duration duration
+                                    :event-count (getf data :event-count)
+                                    :task-count (length (getf data :tasks))
+                                    :tasks (getf data :tasks)
+                                    :depots (getf data :depots)
+                                    :left (not (null left)))))
+                  (if is-active
+                      (push entry active)
+                      (push entry history))))
+              sessions)
+            (list :active (sort active #'< :key (lambda (e) (getf e :ago-seconds)))
+                  :active-count (length active)
+                  :history (sort (subseq (sort history #'> :key (lambda (e) (getf e :last-seen)))
+                                         0 (min 50 (length history)))
+                                 #'> :key (lambda (e) (getf e :last-seen)))
+                  :total-sessions (hash-table-count sessions))))))))
 
 ;;; ============================================================
 ;;; GRAPH DATA
@@ -617,8 +919,8 @@
         (let* ((all-tasks (if depot
                               (remove-if-not
                                 (lambda (tk) (string-equal depot (getf tk :depot)))
-                                (task:get-cached-task-infos))
-                              (task:get-cached-task-infos)))
+                                (get-enriched-tasks))
+                              (get-enriched-tasks)))
                (clusters (make-hash-table :test #'equal))
                (graph (task:get-cached-multi-depot-graph))
                (forward (task:task-graph-forward graph)))

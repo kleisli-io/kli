@@ -32,15 +32,42 @@
                     (render-health-page depot)))))
 
 (lol-reactive:defroute "/activity" (:method :get)
-  "Activity stream"
+  "Activity stream with category filters and infinite scroll"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
       :title "Activity — KLI Dashboard"
       :include-tailwind nil
       :include-htmx nil
+      :head-extra (htm-str
+                    (:script (cl-who:str (activity-filter-script)))
+                    (:script (cl-who:str (lol-reactive:htmx-runtime-js))))
       :body (format nil "~A~A"
                     (render-nav "/activity" :depot depot)
                     (render-activity-page depot)))))
+
+(lol-reactive:defroute "/stats" (:method :get)
+  "Aggregate statistics with charts"
+  (let ((depot (hunchentoot:parameter "depot")))
+    (html-page
+      :title "Stats — KLI Dashboard"
+      :include-tailwind nil
+      :include-htmx nil
+      :body (format nil "~A~A"
+                    (render-nav "/stats" :depot depot)
+                    (render-stats-page depot)))))
+
+(lol-reactive:defroute "/sessions" (:method :get)
+  "Active and historical sessions"
+  (let ((depot (hunchentoot:parameter "depot")))
+    (html-page
+      :title "Sessions — KLI Dashboard"
+      :include-tailwind nil
+      :include-htmx nil
+      :head-extra (htm-str
+                    (:meta :http-equiv "refresh" :content "30"))
+      :body (format nil "~A~A"
+                    (render-nav "/sessions" :depot depot)
+                    (render-sessions-page depot)))))
 
 (lol-reactive:defroute "/task" (:method :get)
   "Task detail view"
@@ -95,6 +122,32 @@
       :body (format nil "~A~A"
                     (render-nav "/graph" :depot depot)
                     (render-graph-page depot)))))
+
+;;; ============================================================
+;;; ACTIVITY PAGINATION API
+;;; ============================================================
+
+(lol-reactive:defroute "/api/activity/events" (:method :get
+                                                :content-type "text/html")
+  "Paginated activity events as HTML fragments for infinite scroll.
+   Supports category and depot filters via query params.
+   Returns event rows + next sentinel, or empty string when exhausted."
+  (let* ((offset (parse-integer (or (hunchentoot:parameter "offset") "0") :junk-allowed t))
+         (limit (parse-integer (or (hunchentoot:parameter "limit") "50") :junk-allowed t))
+         (category (hunchentoot:parameter "category"))
+         (depot (hunchentoot:parameter "depot"))
+         (offset (or offset 0))
+         (limit (or limit 50))
+         (all-events (filter-events-by-depot (get-all-events) depot))
+         (items (get-events-range all-events offset limit category))
+         (next-offset (+ offset (length items))))
+    (if (null items)
+        ""
+        (with-output-to-string (s)
+          (dolist (ev items)
+            (write-string (render-event-row-with-date ev) s))
+          (when (= (length items) limit)
+            (write-string (render-load-more-sentinel next-offset limit category depot) s))))))
 
 ;;; ============================================================
 ;;; HTMX FRAGMENT ROUTES
@@ -373,3 +426,32 @@
                   (yason:encode-alist
                     '(("ok" . nil)
                       ("error" . "Missing task_id, target_id, old_type, or new_type"))))))))
+
+;;; ============================================================
+;;; HEALTH SUGGESTION ACTIONS
+;;; ============================================================
+
+(lol-reactive:defroute "/api/health/dismiss-edge" (:method :post
+                                                    :content-type "application/json")
+  "Dismiss a suggested edge so it no longer appears in health diagnostics."
+  (let* ((body (parse-json-body))
+         (from (cdr (assoc "from" body :test #'string=)))
+         (to (cdr (assoc "to" body :test #'string=))))
+    (if (and from to (> (length from) 0) (> (length to) 0))
+        (handler-case
+          (progn
+            (dismiss-edge-suggestion from to)
+            (yason:with-output-to-string* ()
+              (yason:encode-alist '(("ok" . t)))))
+          (error (e)
+            (lol-reactive:response 500
+              :content-type "application/json"
+              :body (yason:with-output-to-string* ()
+                      (yason:encode-alist
+                        `(("ok" . nil)
+                          ("error" . ,(princ-to-string e))))))))
+        (lol-reactive:response 400
+          :content-type "application/json"
+          :body (yason:with-output-to-string* ()
+                  (yason:encode-alist
+                    '(("ok" . nil) ("error" . "Missing from or to"))))))))

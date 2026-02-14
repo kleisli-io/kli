@@ -32,6 +32,10 @@
   (task-id nil)
   (vector-clock nil)
   (claude-pid nil)
+  ;; Agent team metadata (set via register-pid when session is a teammate)
+  (team-name nil :type (or null string))
+  (agent-name nil :type (or null string))
+  (agent-type nil :type (or null string))
   (created-at (get-universal-time) :type integer)
   (last-active (get-universal-time) :type integer))
 
@@ -94,12 +98,20 @@
       (remhash id *session-contexts*))
     (length to-remove)))
 
-(defun register-claude-pid (session-id pid)
+(defun register-claude-pid (session-id pid &key team-name agent-name agent-type)
   "Register Claude Code's PID for a session.
-   Called by SessionStart hook to correlate HTTP session with Claude process."
+   Called by SessionStart hook to correlate HTTP session with Claude process.
+   When TEAM-NAME is non-nil, also stores agent team metadata."
   (let ((ctx (get-session-context session-id)))
     (setf (ctx-claude-pid ctx) pid)
-    (format nil "Registered PID ~D for session ~A" pid session-id)))
+    (when team-name
+      (setf (ctx-team-name ctx) team-name)
+      (setf (ctx-agent-name ctx) agent-name)
+      (setf (ctx-agent-type ctx) agent-type))
+    (if team-name
+        (format nil "Registered PID ~D for session ~A (team: ~A, agent: ~A)"
+                pid session-id team-name agent-name)
+        (format nil "Registered PID ~D for session ~A" pid session-id))))
 
 (defun current-http-session-id ()
   "Get the session ID from the current HTTP request's Mcp-Session-Id header.
@@ -166,8 +178,8 @@
   (format nil "~A-~A" *session-id* (get-universal-time)))
 
 (defparameter *completed-allowed-events*
-  '(:task.update-status :session.join :task.create :pattern.activate
-    :task.fork :task.link)
+  '(:task.update-status :session.join :session.team-join :task.create
+    :pattern.activate :task.fork :task.link)
   "Event types permitted on completed tasks.
    Additive provenance (fork, link) allowed; subtractive (sever) requires reopen.")
 
@@ -364,6 +376,12 @@
       (setf (gethash "session_id" ht) *session-id*)
       (setf (gethash "claude_pid" ht) *claude-pid*)
       (setf (gethash "timestamp" ht) (get-universal-time))
+      ;; Team metadata from session context (set by P1 register-claude-pid)
+      (let ((ctx (gethash *session-id* *session-contexts*)))
+        (when (and ctx (ctx-team-name ctx))
+          (setf (gethash "team_name" ht) (ctx-team-name ctx))
+          (setf (gethash "agent_name" ht) (ctx-agent-name ctx))
+          (setf (gethash "agent_type" ht) (ctx-agent-type ctx))))
       ;; Write atomically via temp file
       (let ((temp-file (merge-pathnames
                         (format nil "~A.tmp" *session-id*)
@@ -431,6 +449,7 @@
   "Per-session behavioral fingerprint for swarm coordination."
   (session-id "" :type string)
   (task-id "" :type string)
+  (team-name nil :type (or null string))  ; team membership (nil for solo sessions)
   (tools nil :type list)           ; alist of (tool-name . count)
   (files nil :type list)           ; alist of (file-path . count)
   (obs-embedding nil)              ; mean observation vector (or nil)
@@ -490,7 +509,8 @@
   "Read all active session files (within MAX-AGE-HOURS) with live PIDs.
    Cross-references .claude/active-pids/ to filter out stale sessions from
    dead processes. Deduplicates by session-id (keeps most recent).
-   Returns list of plists: (:session-id :task-id :depot :timestamp :age-minutes)"
+   Returns list of plists with keys: :session-id :task-id :depot :timestamp
+   :age-minutes :team-name :agent-name :agent-type (last three nil for solo sessions)"
   (when task:*tasks-root*
     (let* ((live-pids (read-active-pids-from-directory))
            (sessions-dir (sessions-directory))
@@ -512,7 +532,10 @@
                               :task-id (gethash "task_id" json)
                               :depot (gethash "depot" json)
                               :timestamp ts
-                              :age-minutes (round (/ (- now ts) 60)))
+                              :age-minutes (round (/ (- now ts) 60))
+                              :team-name (gethash "team_name" json)
+                              :agent-name (gethash "agent_name" json)
+                              :agent-type (gethash "agent_type" json))
                         results))))
           (error () nil)))
       (dedup-sessions (nreverse results)))))
@@ -563,20 +586,24 @@
    Uses bidirectional edge traversal: tasks that point to us OR we point to.
 
    Returns list of plists:
-     (:session-id :task-id :relation :direction :age-minutes)
+     (:session-id :task-id :relation :direction :age-minutes
+      :team-name :agent-name :agent-type)
 
    Relation types: :same-task, :phase-of, :related-to, :depends-on, etc.
-   Direction: :incoming (they point to us) or :outgoing (we point to them)"
+   Direction: :incoming (they point to us) or :outgoing (we point to them)
+   Team fields are nil for solo sessions."
   (let* ((current-bare (task-id-bare current-task-id))
          (our-edges (read-task-outgoing-edges current-task-id))
-         (our-targets (mapcar (lambda (e) (task-id-bare (car e))) our-edges))
          (active-sessions (read-active-sessions max-age-hours))
          (results nil))
     (dolist (sess active-sessions)
       (let* ((their-task (getf sess :task-id))
              (their-bare (task-id-bare their-task))
              (session-id (getf sess :session-id))
-             (age (getf sess :age-minutes)))
+             (age (getf sess :age-minutes))
+             (team-name (getf sess :team-name))
+             (agent-name (getf sess :agent-name))
+             (agent-type (getf sess :agent-type)))
         ;; Skip our own session
         (unless (string= session-id *session-id*)
           ;; Check: same task
@@ -586,7 +613,10 @@
                         :task-id their-task
                         :relation :same-task
                         :direction :same
-                        :age-minutes age)
+                        :age-minutes age
+                        :team-name team-name
+                        :agent-name agent-name
+                        :agent-type agent-type)
                   results))
           ;; Check: we point to their task (outgoing edge)
           (let ((edge (find their-bare our-edges
@@ -597,7 +627,10 @@
                           :task-id their-task
                           :relation (intern (string-upcase (cdr edge)) :keyword)
                           :direction :outgoing
-                          :age-minutes age)
+                          :age-minutes age
+                          :team-name team-name
+                          :agent-name agent-name
+                          :agent-type agent-type)
                     results)))
           ;; Check: they point to us (incoming edge)
           (let ((their-edges (read-task-outgoing-edges their-task)))
@@ -608,7 +641,10 @@
                             :task-id their-task
                             :relation (intern (string-upcase (cdr e)) :keyword)
                             :direction :incoming
-                            :age-minutes age)
+                            :age-minutes age
+                            :team-name team-name
+                            :agent-name agent-name
+                            :agent-type agent-type)
                       results)))))))
     ;; Deduplicate by session-id (keep first occurrence)
     (remove-duplicates results :test #'equal :key (lambda (r) (getf r :session-id)))))
@@ -646,29 +682,76 @@
         ""
         (with-output-to-string (s)
           (format s "~%## Swarm Awareness~%")
-          ;; Related sessions
+          ;; Related sessions — grouped by team
           (when related-sessions
-            (format s "~%Related sessions (~D active):~%" (length related-sessions))
-            (dolist (sess related-sessions)
-              (let* ((sid (getf sess :session-id))
-                     (fp (gethash sid *session-fingerprints*))
-                     (archetype (if fp
-                                    (string-downcase (symbol-name (sfp-archetype fp)))
-                                    "session")))
-                (format s "  - ~A ~A on ~A (~A, ~A, ~Dm ago)~%"
-                        sid archetype
-                        (getf sess :task-id)
-                        (getf sess :relation)
-                        (getf sess :direction)
-                        (getf sess :age-minutes)))))
-          ;; Recent departures
+            (let ((teams (make-hash-table :test 'equal))  ; team-name -> list of sessions
+                  (solo nil))                              ; sessions without team
+              ;; Partition into teams vs solo
+              (dolist (sess related-sessions)
+                (let ((team (getf sess :team-name)))
+                  (if team
+                      (push sess (gethash team teams))
+                      (push sess solo))))
+              (let ((team-count (hash-table-count teams)))
+                (format s "~%Related sessions (~D active~@[, ~D team~:P~]):~%"
+                        (length related-sessions)
+                        (when (plusp team-count) team-count))
+                ;; Display teams as grouped units
+                (maphash
+                 (lambda (team-name members)
+                   (let* ((members (nreverse members))
+                          (tasks (remove-duplicates
+                                  (mapcar (lambda (m) (getf m :task-id)) members)
+                                  :test #'string=))
+                          (agents (mapcar (lambda (m)
+                                           (or (getf m :agent-name) "?"))
+                                         members)))
+                     (format s "  Team '~A': ~D member~:P (~{~A~^, ~}) on ~{~A~^, ~}~%"
+                             team-name (length members) agents
+                             (mapcar #'task-id-bare tasks))))
+                 teams)
+                ;; Display solo sessions as before
+                (dolist (sess (nreverse solo))
+                  (let* ((sid (getf sess :session-id))
+                         (fp (gethash sid *session-fingerprints*))
+                         (archetype (if fp
+                                        (string-downcase (symbol-name (sfp-archetype fp)))
+                                        "session")))
+                    (format s "  - ~A ~A on ~A (~A, ~A, ~Dm ago)~%"
+                            sid archetype
+                            (getf sess :task-id)
+                            (getf sess :relation)
+                            (getf sess :direction)
+                            (getf sess :age-minutes)))))))
+          ;; Recent departures — annotate teammate departures
           (when departures
             (format s "~%Recent departures (~D):~%" (length departures))
-            (dolist (dep departures)
-              (format s "  - ~A left ~Dm ago (~A)~%"
-                      (getf dep :session)
-                      (getf dep :age-minutes)
-                      (getf dep :reason)))
+            ;; Build session->team lookup from active session files and in-memory contexts
+            (let ((session-teams (make-hash-table :test 'equal)))
+              ;; From in-memory contexts (covers current process)
+              (maphash (lambda (sid ctx)
+                         (when (ctx-team-name ctx)
+                           (setf (gethash sid session-teams)
+                                 (ctx-team-name ctx))))
+                       *session-contexts*)
+              ;; From related-sessions (covers sessions discovered via files)
+              (dolist (sess related-sessions)
+                (when (getf sess :team-name)
+                  (setf (gethash (getf sess :session-id) session-teams)
+                        (getf sess :team-name))))
+              (dolist (dep departures)
+                (let* ((dep-sid (getf dep :session))
+                       (team (gethash dep-sid session-teams)))
+                  (if team
+                      (format s "  - ~A left ~Dm ago (~A, teammate in '~A')~%"
+                              dep-sid
+                              (getf dep :age-minutes)
+                              (getf dep :reason)
+                              team)
+                      (format s "  - ~A left ~Dm ago (~A)~%"
+                              dep-sid
+                              (getf dep :age-minutes)
+                              (getf dep :reason))))))
             (format s "  Consider: Check if any work needs pickup~%"))
           ;; Orphaned phases
           (when orphans
@@ -812,6 +895,7 @@
              (fp (ignore-errors
                   (compute-session-fingerprint task-id session-id))))
         (when fp
+          (setf (sfp-team-name fp) (getf sess :team-name))
           (setf (gethash session-id *session-fingerprints*) fp)
           (push fp results))))
     (nreverse results)))
@@ -949,8 +1033,9 @@
 
 (defun find-similar-sessions (session-id &key (threshold 0.3) (max-age-hours 1))
   "Find sessions with fingerprints similar to SESSION-ID.
+   Excludes same-team sessions (teammates are shown in swarm awareness instead).
    Returns two values:
-   1. List of plists (:session-id :task-id :similarity) sorted by similarity
+   1. List of plists (:session-id :task-id :similarity :team-name) sorted by similarity
    2. Warning string if similarity is degraded (e.g. embeddings unavailable)
 
    THRESHOLD guide (with default 30/30/40 tool/file/obs weights):
@@ -964,17 +1049,22 @@
          (our-fp (find session-id all-fps
                        :key #'sfp-session-id
                        :test #'string=))
+         (our-team (when our-fp (sfp-team-name our-fp)))
          (results nil)
          (degraded nil))
     (when our-fp
       (dolist (fp all-fps)
-        (unless (string= (sfp-session-id fp) session-id)
+        (unless (or (string= (sfp-session-id fp) session-id)
+                    ;; Skip same-team sessions — they appear in swarm awareness
+                    (and our-team (sfp-team-name fp)
+                         (string= our-team (sfp-team-name fp))))
           (multiple-value-bind (sim warning) (enhanced-fingerprint-similarity our-fp fp)
             (when warning (setf degraded warning))
             (when (>= sim threshold)
               (push (list :session-id (sfp-session-id fp)
                           :task-id (sfp-task-id fp)
-                          :similarity sim)
+                          :similarity sim
+                          :team-name (sfp-team-name fp))
                     results)))))
       (values (sort results #'> :key (lambda (r) (getf r :similarity)))
               degraded))))
@@ -991,8 +1081,10 @@
    Similar sessions are those with matching behavioral fingerprints
    (shared tools, files, or observation embeddings) - different from
    related sessions which are found via task graph edges.
+   Same-team sessions are excluded by find-similar-sessions; cross-team
+   sessions are annotated with their team name.
 
-   SIMILAR-SESSIONS: list of plists (:session-id :task-id :similarity)
+   SIMILAR-SESSIONS: list of plists (:session-id :task-id :similarity :team-name)
    DEGRADED: warning string from find-similar-sessions (e.g. embeddings unavailable)"
   (if (null similar-sessions)
       ""
@@ -1002,10 +1094,14 @@
           (let* ((session-id (getf entry :session-id))
                  (task-id (getf entry :task-id))
                  (similarity (getf entry :similarity))
-                 (guidance (similarity-guidance similarity)))
+                 (team-name (getf entry :team-name))
+                 (guidance (similarity-guidance similarity))
+                 (team-label (if team-name
+                                 (format nil " [team '~A']" team-name)
+                                 "")))
             (if (and task-id (not (string= task-id "")))
-                (format s "  - ~A on ~A — ~A~%" session-id task-id guidance)
-                (format s "  - ~A (no task) — ~A~%" session-id guidance)))))))
+                (format s "  - ~A~A on ~A — ~A~%" session-id team-label task-id guidance)
+                (format s "  - ~A~A (no task) — ~A~%" session-id team-label guidance)))))))
 
 ;;; ==========================================================================
 ;;; File Path Normalization
@@ -1547,7 +1643,8 @@
                           (lambda (ev) (eq :observation (task:event-type ev)))
                           events))
              (join-events (remove-if-not
-                           (lambda (ev) (eq :session.join (task:event-type ev)))
+                           (lambda (ev) (member (task:event-type ev)
+                                                '(:session.join :session.team-join)))
                            events))
              (flows nil))
         (dolist (join join-events)

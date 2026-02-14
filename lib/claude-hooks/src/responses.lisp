@@ -58,6 +58,23 @@ When INTERRUPT is supplied (even as NIL/false), it is included in output."
     ht))
 
 ;;; ---------------------------------------------------------------------------
+;;; Stop/SubagentStop Responses
+;;; ---------------------------------------------------------------------------
+
+(defun stop-continue (&key reason)
+  "Force agent continuation with REASON. For Stop/SubagentStop hooks.
+Output: {\"continue\":true,\"reason\":\"...\"}"
+  (let ((ht (make-ht "continue" t)))
+    (when reason
+      (setf (gethash "reason" ht) reason))
+    ht))
+
+(defun stop-allow ()
+  "Allow agent to stop. For Stop/SubagentStop hooks.
+Returns NIL so no JSON is emitted (empty stdout = allow stop)."
+  nil)
+
+;;; ---------------------------------------------------------------------------
 ;;; Generic Responses
 ;;; ---------------------------------------------------------------------------
 

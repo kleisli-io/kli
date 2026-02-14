@@ -35,5 +35,19 @@ Returns LEDGER."
   (claude-hooks:atomic-write-json path ledger))
 
 (defun co-app-ledger-path (cwd)
-  "Default path for co-application ledger, relative to CWD."
-  (format nil "~a/ace/playbook-co-applications.json" cwd))
+  "Default path for co-application ledger in metadata directory (.kli/ or ace/).
+   Tries depot:depot-meta-root when available, falls back to probing CWD."
+  (let ((meta-root (ignore-errors
+                     (let ((fn (find-symbol "DEPOT-META-ROOT" :depot)))
+                       (when fn (funcall fn nil))))))
+    (if meta-root
+        (namestring (merge-pathnames "playbook-co-applications.json" meta-root))
+        ;; Fallback: probe .kli/ then ace/ under CWD
+        (let ((cwd-slash (if (and (plusp (length cwd))
+                                  (char= (char cwd (1- (length cwd))) #\/))
+                             cwd
+                             (format nil "~a/" cwd))))
+          (let ((kli-path (format nil "~a.kli/playbook-co-applications.json" cwd-slash)))
+            (if (probe-file (format nil "~a.kli/" cwd-slash))
+                kli-path
+                (format nil "~aace/playbook-co-applications.json" cwd-slash)))))))

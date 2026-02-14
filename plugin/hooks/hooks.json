@@ -50,6 +50,16 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook feedback-nudge"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [

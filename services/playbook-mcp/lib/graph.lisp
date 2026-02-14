@@ -315,11 +315,11 @@
 ;;; In-process co-application recording
 
 (defun co-app-ledger-path ()
-  "Return path to co-app ledger file in depot's ace/ directory.
+  "Return path to co-app ledger file in depot's metadata directory (.kli/ or ace/).
    Returns NIL if depot not detected."
-  (let ((ace-path (detect-depot-ace-path)))
-    (when ace-path
-      (namestring (merge-pathnames "playbook-co-applications.json" ace-path)))))
+  (let ((meta-path (detect-depot-meta-path)))
+    (when meta-path
+      (namestring (merge-pathnames "playbook-co-applications.json" meta-path)))))
 
 (defun flush-co-app-ledger ()
   "Save in-memory co-app ledger to disk. No-op if path not detected."

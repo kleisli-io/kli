@@ -95,6 +95,18 @@
                   (getf data :description) ts session))
         (:session.join
          (gs-add (task-state-sessions state) session))
+        ;; Team-aware session join: records session + team metadata
+        (:session.team-join
+         (gs-add (task-state-sessions state) session)
+         (let ((team-name (getf data :team-name))
+               (agent-name (getf data :agent-name))
+               (agent-type (getf data :agent-type)))
+           (when team-name
+             (lwwm-set (task-state-metadata state)
+                       (format nil "team:~A" session)
+                       (format nil "~A|~A|~A" team-name
+                               (or agent-name "") (or agent-type ""))
+                       ts session))))
         (:artifact.create
          (let ((path (getf data :path)))
            (ors-add (task-state-artifacts state) path (etag path))))

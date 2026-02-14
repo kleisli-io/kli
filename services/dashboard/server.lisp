@@ -3,7 +3,11 @@
 (in-package :kli-dashboard)
 
 (defvar *server* nil "Hunchentoot acceptor instance.")
-(defvar *port* 9091 "Dashboard port.")
+(defvar *port*
+  (or (ignore-errors
+        (parse-integer (uiop:getenv "KLI_DASHBOARD_PORT")))
+      9091)
+  "Dashboard port. Override via KLI_DASHBOARD_PORT env var.")
 
 (defun start (&key (port *port*))
   "Start the KLI dashboard server."

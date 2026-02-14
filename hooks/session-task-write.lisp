@@ -44,19 +44,30 @@
 ;;; ---------------------------------------------------------------------------
 
 (defun compute-events-path (coord-root task-id)
-  "Compute events.jsonl path from coordination root and qualified task ID."
+  "Compute events.jsonl path from coordination root and qualified task ID.
+   Uses depot:depot-tasks-root when available, falls back to .kli/tasks/ then ace/tasks/."
   (let* ((colon-pos (position #\: task-id))
          (depot (when colon-pos (subseq task-id 0 colon-pos)))
          (bare-id (if colon-pos
                       (subseq task-id (1+ colon-pos))
                       task-id))
-         (base-dir (if depot
-                       (format nil "~A/~A/"
-                               (string-right-trim "/" (namestring
-                                                       (uiop:ensure-directory-pathname coord-root)))
-                               depot)
-                       (namestring (uiop:ensure-directory-pathname coord-root)))))
-    (format nil "~Aace/tasks/~A/events.jsonl" base-dir bare-id)))
+         ;; Try depot:depot-tasks-root first (available in kli binary)
+         (tasks-root
+           (or (ignore-errors
+                 (let ((fn (find-symbol "DEPOT-TASKS-ROOT" :depot)))
+                   (when fn (funcall fn depot))))
+               ;; Fallback: probe .kli/tasks/ then ace/tasks/ under depot dir
+               (let ((base-dir (if depot
+                                   (format nil "~A/~A/"
+                                           (string-right-trim "/" (namestring
+                                                                   (uiop:ensure-directory-pathname coord-root)))
+                                           depot)
+                                   (namestring (uiop:ensure-directory-pathname coord-root)))))
+                 (let ((kli-candidate (format nil "~A.kli/tasks/" base-dir)))
+                   (if (probe-file kli-candidate)
+                       kli-candidate
+                       (format nil "~Aace/tasks/" base-dir)))))))
+    (format nil "~A~A/events.jsonl" tasks-root bare-id)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Handler Entry Point

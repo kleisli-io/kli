@@ -1,5 +1,17 @@
 (in-package #:task-mcp)
 
+;;; Build-id (runtime lookup to avoid compile-time dep on kli package)
+
+(defun get-build-id ()
+  "Get build-id from KLI package if loaded, else return unknown."
+  (let ((pkg (find-package "KLI")))
+    (if pkg
+        (let ((sym (find-symbol "ENSURE-BUILD-ID" pkg)))
+          (if (and sym (fboundp sym))
+              (funcall sym)
+              "unknown"))
+        "unknown")))
+
 ;;; Transport selection
 
 (defun get-http-port ()
@@ -11,22 +23,22 @@
 
 (defun select-transport ()
   "Select transport based on TASK_MCP_TRANSPORT env var.
-   Values: 'http' for HTTP transport, anything else for stdio (default).
+   Values: 'stdio' for STDIO transport, anything else for http (default).
    Also sets *http-mode* for session context management."
   (let ((transport-type (uiop:getenv "TASK_MCP_TRANSPORT")))
-    (if (and transport-type (string-equal transport-type "http"))
+    (if (and transport-type (string-equal transport-type "stdio"))
+        (progn
+          (setf *http-mode* nil)
+          (format *error-output* "  Transport: stdio~%")
+          (format *error-output* "  Mode: single-session~%")
+          (mcp-framework:make-stdio-transport))
         (let ((port (get-http-port)))
           (setf *http-mode* t)
           (format *error-output* "  Transport: HTTP on port ~D~%" port)
           (format *error-output* "  Mode: multi-session (contexts isolated per Mcp-Session-Id)~%")
           ;; Register non-MCP HTTP endpoints for hook integration
           (register-http-endpoints)
-          (mcp-http:make-http-transport :port port :host "127.0.0.1"))
-        (progn
-          (setf *http-mode* nil)
-          (format *error-output* "  Transport: stdio~%")
-          (format *error-output* "  Mode: single-session~%")
-          (mcp-framework:make-stdio-transport)))))
+          (mcp-http:make-http-transport :port port :host "127.0.0.1")))))
 
 ;;; Thread-safe session isolation for HTTP mode
 ;;;
@@ -53,16 +65,30 @@
   "Register HTTP endpoints for hook integration.
    These endpoints bypass MCP session validation since hooks run before
    Claude Code has established an MCP session."
+  ;; Health check for daemon liveness detection and build-id comparison
+  (hunchentoot:define-easy-handler (health-handler :uri "/health") ()
+    (setf (hunchentoot:content-type*) "application/json")
+    (format nil "{\"status\":\"ok\",\"build_id\":~S}" (get-build-id)))
+
   (hunchentoot:define-easy-handler (register-pid-handler :uri "/register-pid")
-      (session-id pid)
+      (session-id pid team-name agent-name agent-type)
     "Register Claude Code's PID for a session.
-     Called by ace-session-start-v2 hook to enable session file correlation.
-     Query params: session-id (string), pid (integer)."
+     Called by SessionStart hook to enable session file correlation.
+     Query params: session-id (string), pid (integer),
+       team-name (string, optional), agent-name (string, optional),
+       agent-type (string, optional)."
     (setf (hunchentoot:content-type*) "application/json")
     (handler-case
-        (let ((pid-int (when pid (parse-integer pid :junk-allowed nil))))
+        (let ((pid-int (when pid (parse-integer pid :junk-allowed nil)))
+              ;; Normalize empty strings to nil
+              (team (when (and team-name (plusp (length team-name))) team-name))
+              (agent (when (and agent-name (plusp (length agent-name))) agent-name))
+              (atype (when (and agent-type (plusp (length agent-type))) agent-type)))
           (if (and session-id (plusp (length session-id)) pid-int (plusp pid-int))
-              (let ((result (register-claude-pid session-id pid-int)))
+              (let ((result (register-claude-pid session-id pid-int
+                                                :team-name team
+                                                :agent-name agent
+                                                :agent-type atype)))
                 (format nil "{\"success\": true, \"message\": ~S}" result))
               (progn
                 (setf (hunchentoot:return-code*) 400)
@@ -129,7 +155,27 @@
                     (task:event-id event) *current-task-id*)))
       (error (e)
         (setf (hunchentoot:return-code*) 500)
-        (format nil "{\"success\": false, \"error\": ~S}" (princ-to-string e))))))
+        (format nil "{\"success\": false, \"error\": ~S}" (princ-to-string e)))))
+
+  ;; Graceful shutdown for build-id based takeover
+  (hunchentoot:define-easy-handler (shutdown-handler :uri "/shutdown")
+      (build-id)
+    "Gracefully shut down the daemon for version takeover.
+     Localhost-only (Hunchentoot binds 127.0.0.1).
+     Query param BUILD-ID is optional, used for audit logging."
+    (setf (hunchentoot:content-type*) "application/json")
+    (format *error-output*
+            "~&[task-mcp] Shutdown requested (my=~A, requester=~A)~%"
+            (get-build-id) (or build-id "?"))
+    ;; Schedule exit after response flushes
+    (bt:make-thread
+     (lambda ()
+       (sleep 0.5)
+       (format *error-output* "~&[task-mcp] Exiting for graceful takeover.~%")
+       (uiop:quit 0))
+     :name "shutdown-exit")
+    (format nil "{\"status\":\"shutting_down\",\"build_id\":~S}"
+            (get-build-id))))
 
 ;;; Server lifecycle
 

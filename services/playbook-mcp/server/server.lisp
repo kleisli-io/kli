@@ -24,17 +24,23 @@
 
 (defun initialize-edges-path ()
   "Set *manual-edges-path* to git-tracked manual edges file.
-   Default is ace/playbook-manual-edges.json (git-tracked).
+   Default is <meta-root>/playbook-manual-edges.json.
    Override via PLAYBOOK_EDGES_PATH environment variable."
   (let ((path (or (uiop:getenv "PLAYBOOK_EDGES_PATH")
+                  (let ((meta (detect-depot-meta-path)))
+                    (when meta
+                      (namestring (merge-pathnames "playbook-manual-edges.json" meta))))
                   "ace/playbook-manual-edges.json")))
     (setf *manual-edges-path* path)))
 
 (defun initialize-temporal-path ()
   "Set *temporal-data-path* and load existing temporal data.
-   Default is ace/playbook-temporal.json.
+   Default is <meta-root>/playbook-temporal.json.
    Override via PLAYBOOK_TEMPORAL_PATH environment variable."
   (let ((path (or (uiop:getenv "PLAYBOOK_TEMPORAL_PATH")
+                  (let ((meta (detect-depot-meta-path)))
+                    (when meta
+                      (namestring (merge-pathnames "playbook-temporal.json" meta))))
                   "ace/playbook-temporal.json")))
     (setf *temporal-data-path* path)
     (when (probe-file path)
@@ -43,13 +49,27 @@
           (format *error-output* "Loaded temporal data for ~D patterns from ~A~%"
                   count path))))))
 
+(defun detect-depot-meta-path ()
+  "Detect the depot's metadata directory (.kli/ or ace/) path.
+   Tries depot:depot-meta-root first (available in kli binary),
+   then falls back to probing .kli/ and ace/ under depot root.
+   Returns path string or NIL if no depot found."
+  (or (ignore-errors
+        (let ((fn (find-symbol "DEPOT-META-ROOT" :depot)))
+          (when fn (funcall fn nil))))
+      (let ((depot-root (mcp-find-depot-root)))
+        (when depot-root
+          (let ((kli-dir (namestring (merge-pathnames ".kli/" depot-root))))
+            (if (uiop:directory-exists-p kli-dir)
+                kli-dir
+                (let ((ace-dir (namestring (merge-pathnames "ace/" depot-root))))
+                  (when (uiop:directory-exists-p ace-dir)
+                    ace-dir))))))))
+
 (defun detect-depot-ace-path ()
-  "Detect the depot's ace/ directory path from depot root.
-   Uses DEPOT_ROOT env, .depot marker, or git root fallback.
-   Returns NIL if no depot found."
-  (let ((depot-root (mcp-find-depot-root)))
-    (when depot-root
-      (namestring (merge-pathnames "ace/" depot-root)))))
+  "Deprecated: use detect-depot-meta-path instead.
+   Kept for backward compatibility."
+  (detect-depot-meta-path))
 
 (defun initialize-server ()
   "Initialize the playbook server.
@@ -67,17 +87,17 @@
 
   ;; Clean up orphaned data (ledger pairs and embeddings for deleted patterns)
   ;; Then load co-app ledger and embedding cache before rebuilding graph
-  (let ((ace-path (detect-depot-ace-path)))
-    (when ace-path
-      (post-load-cleanup ace-path)
+  (let ((meta-path (detect-depot-meta-path)))
+    (when meta-path
+      (post-load-cleanup meta-path)
       ;; Load co-app ledger so rebuild-graph produces co-app edges
-      (let ((ledger-path (namestring (merge-pathnames "playbook-co-applications.json" ace-path))))
+      (let ((ledger-path (namestring (merge-pathnames "playbook-co-applications.json" meta-path))))
         (when (probe-file ledger-path)
           (load-co-app-ledger ledger-path)
           (format *error-output* "Loaded co-app ledger: ~D pairs from ~A~%"
                   (hash-table-count *co-app-ledger*) ledger-path)))
       ;; Load embedding cache so patterns have embeddings without hitting ollama
-      (let ((cache-path (namestring (merge-pathnames ".playbook-cache/embeddings.json" ace-path))))
+      (let ((cache-path (namestring (merge-pathnames ".playbook-cache/embeddings.json" meta-path))))
         (when (probe-file cache-path)
           (load-embedding-cache cache-path)
           (format *error-output* "Loaded embedding cache: ~D entries from ~A~%"

@@ -13,6 +13,20 @@
 (in-package #:kli-hook)
 
 ;;; ---------------------------------------------------------------------------
+;;; Build-id (runtime lookup — kli package compiled after hooks)
+;;; ---------------------------------------------------------------------------
+
+(defun get-build-id ()
+  "Get build-id from KLI package if loaded, else return unknown."
+  (let ((pkg (find-package "KLI")))
+    (if pkg
+        (let ((sym (find-symbol "ENSURE-BUILD-ID" pkg)))
+          (if (and sym (fboundp sym))
+              (funcall sym)
+              "unknown"))
+        "unknown")))
+
+;;; ---------------------------------------------------------------------------
 ;;; Path Helpers (session-specific, not in shared libraries)
 ;;; ---------------------------------------------------------------------------
 
@@ -131,19 +145,124 @@
     count))
 
 ;;; ---------------------------------------------------------------------------
+;;; Daemon Lifecycle (ensure task-mcp HTTP daemon is running)
+;;; ---------------------------------------------------------------------------
+
+(defun task-mcp-health (&optional (port *task-mcp-port*))
+  "Check daemon health and build version.
+   Returns (values alive-p build-id).
+   ALIVE-P is T if daemon responds on /health with 2xx.
+   BUILD-ID is the daemon's build identifier string, or NIL."
+  (handler-case
+      (multiple-value-bind (body status)
+          (dex:get (format nil "http://127.0.0.1:~D/health" port)
+                   :connect-timeout 1 :read-timeout 1)
+        (if (and status (< status 300))
+            (values t (ignore-errors
+                       (let ((json (yason:parse body)))
+                         (when (hash-table-p json)
+                           (gethash "build_id" json)))))
+            (values nil nil)))
+    (error () (values nil nil))))
+
+(defun task-mcp-alive-p (&optional (port *task-mcp-port*))
+  "Check if task-mcp HTTP daemon is alive via /health endpoint."
+  (task-mcp-health port))
+
+(defun request-daemon-shutdown (&optional (port *task-mcp-port*))
+  "Request old daemon to shut down gracefully.
+   Returns T if shutdown was acknowledged."
+  (handler-case
+      (multiple-value-bind (body status)
+          (dex:post (format nil "http://127.0.0.1:~D/shutdown?build-id=~A"
+                            port (get-build-id))
+                    :connect-timeout 2 :read-timeout 2)
+        (declare (ignore body))
+        (and status (< status 300)))
+    (error () nil)))
+
+(defun wait-for-port-release (&optional (port *task-mcp-port*) (attempts 25))
+  "Wait for port to become available (old daemon exited).
+   Polls every 200ms, up to ATTEMPTS times (default 5s).
+   Returns T if port was released."
+  (loop repeat attempts
+        unless (task-mcp-alive-p port) return t
+        do (sleep 0.2)))
+
+(defun start-task-mcp-daemon (&optional (port *task-mcp-port*))
+  "Launch kli serve --task in background and wait for health.
+   Returns T if daemon started successfully."
+  (let ((log-file "/tmp/task-mcp-daemon.log"))
+    (handler-case
+        (progn
+          (uiop:launch-program
+           (list "kli" "serve" "--task")
+           :output log-file :error-output log-file
+           :if-output-exists :append
+           :element-type 'character)
+          ;; Wait for startup (up to 2 seconds)
+          (loop repeat 10
+                when (task-mcp-alive-p port) return t
+                do (sleep 0.2))
+          (task-mcp-alive-p port))
+      (error () nil))))
+
+(defun ensure-task-mcp-daemon (&optional (port *task-mcp-port*))
+  "Start or replace task-mcp daemon with current build.
+   Handles three cases:
+   1. Daemon alive with matching build-id → reuse
+   2. Daemon alive with different build-id → graceful takeover
+   3. No daemon running → start fresh
+   Returns T if daemon is available after this call."
+  (get-build-id)
+  (multiple-value-bind (alive-p daemon-build-id) (task-mcp-health port)
+    (cond
+      ;; Same build — reuse
+      ((and alive-p daemon-build-id (string= daemon-build-id (get-build-id)))
+       t)
+      ;; Different build — takeover
+      (alive-p
+       (request-daemon-shutdown port)
+       (unless (wait-for-port-release port)
+         (return-from ensure-task-mcp-daemon nil))
+       (start-task-mcp-daemon port))
+      ;; Not running — start fresh
+      (t
+       (start-task-mcp-daemon port)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; PID Registration with task-mcp
 ;;; ---------------------------------------------------------------------------
 
-(defun register-pid-with-task-mcp (session-id pid)
+(defun agent-team-env ()
+  "Read Claude Code agent team env vars. Returns plist or NIL.
+   Claude Code sets these on teammate processes after parsing CLI args
+   (--agent-name, --team-name, --agent-type)."
+  (let ((team-name (uiop:getenv "CLAUDE_CODE_TEAM_NAME"))
+        (agent-name (uiop:getenv "CLAUDE_CODE_AGENT_NAME"))
+        (agent-type (uiop:getenv "CLAUDE_CODE_AGENT_TYPE")))
+    (when (and team-name (plusp (length team-name)))
+      (list :team-name team-name
+            :agent-name (when (and agent-name (plusp (length agent-name))) agent-name)
+            :agent-type (when (and agent-type (plusp (length agent-type))) agent-type)))))
+
+(defun register-pid-with-task-mcp (session-id pid &optional team-env)
   "Register PID with task-mcp via HTTP POST.
-   Uses dexador instead of shelling to curl."
+   When TEAM-ENV is non-nil, includes team metadata as query params."
   (handler-case
-      (let ((url (format nil "http://127.0.0.1:~D/register-pid?session-id=~A&pid=~D"
-                         *task-mcp-port* session-id pid)))
-        (multiple-value-bind (body status)
-            (dex:post url :connect-timeout 2 :read-timeout 2)
-          (declare (ignore body))
-          (and status (< status 300))))
+      (let ((base-url (format nil "http://127.0.0.1:~D/register-pid?session-id=~A&pid=~D"
+                              *task-mcp-port* session-id pid)))
+        (let ((url (if team-env
+                       (format nil "~A&team-name=~A~@[&agent-name=~A~]~@[&agent-type=~A~]"
+                               base-url
+                               (getf team-env :team-name)
+                               (getf team-env :agent-name)
+                               (getf team-env :agent-type))
+                       base-url)))
+          (multiple-value-bind (body status)
+              (dex:post url :connect-timeout 2 :read-timeout 2)
+            (declare (ignore body))
+            (and status (< status 300)))))
     (error () nil)))
 
 ;;; ---------------------------------------------------------------------------
@@ -204,29 +323,40 @@
       (unless coord-root
         (return-from session-start-handler (empty-response)))
 
+      ;; Ensure task-mcp HTTP daemon is running (starts if needed)
+      (ensure-task-mcp-daemon)
+
       ;; Clean up stale PIDs from crashed sessions
       (cleanup-stale-pids coord-root)
 
       ;; Write session lock + active-pids + latest-session
       (write-session-lock coord-root session-id)
 
-      ;; Register PID with task-mcp
-      (register-pid-with-task-mcp session-id (get-ppid))
+      ;; Detect agent team membership from env vars
+      (let ((team-env (agent-team-env)))
 
-      ;; Gather context
-      (multiple-value-bind (branch commit) (git-info)
-        (let ((parallel (count-parallel-sessions coord-root session-id))
-              (playbook-ctx (playbook-session-context input cwd)))
-          ;; Compose output
-          (session-start-context
-           (with-output-to-string (s)
-             (format s "# SessionStart: git state, parallel sessions, ACE tasks~%~%")
-             (format s "SESSION[1]{id,git_branch,git_commit}:~% ~A,~A,~A~%~%"
-                     session-id branch commit)
-             (when (and parallel (> parallel 0))
-               (format s "PARALLEL[1]{count,warning}:~% ~D,Another session active~%~%"
-                       parallel))
-             (format s "Use `task_bootstrap(task_id)` to load full task context.~%")
-             (format s "Use `task_list()` to see all tasks.~%")
-             (when playbook-ctx
-               (format s "~%Playbook: ~a.~%" playbook-ctx)))))))))
+        ;; Register PID with task-mcp (includes team metadata if present)
+        (register-pid-with-task-mcp session-id (get-ppid) team-env)
+
+        ;; Gather context
+        (multiple-value-bind (branch commit) (git-info)
+          (let ((parallel (count-parallel-sessions coord-root session-id))
+                (playbook-ctx (playbook-session-context input cwd)))
+            ;; Compose output
+            (session-start-context
+             (with-output-to-string (s)
+               (format s "# SessionStart: git state, parallel sessions, ACE tasks~%~%")
+               (format s "SESSION[1]{id,git_branch,git_commit}:~% ~A,~A,~A~%~%"
+                       session-id branch commit)
+               (when team-env
+                 (format s "TEAM[1]{team_name,agent_name,agent_type}:~% ~A,~A,~A~%~%"
+                         (getf team-env :team-name)
+                         (or (getf team-env :agent-name) "")
+                         (or (getf team-env :agent-type) "")))
+               (when (and parallel (> parallel 0))
+                 (format s "PARALLEL[1]{count,warning}:~% ~D,Another session active~%~%"
+                         parallel))
+               (format s "Use `task_bootstrap(task_id)` to load full task context.~%")
+               (format s "Use `task_list()` to see all tasks.~%")
+               (when playbook-ctx
+                 (format s "~%Playbook: ~a.~%" playbook-ctx))))))))))

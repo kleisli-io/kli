@@ -19,6 +19,7 @@
    #:depot-has-tasks-p
    ;; Task-specific depot utilities
    #:depot-tasks-root
+   #:depot-meta-root
    #:list-depots-with-tasks
    ;; Utilities
    #:strip-trailing-slash))

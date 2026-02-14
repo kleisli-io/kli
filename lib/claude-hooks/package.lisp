@@ -22,6 +22,10 @@
    #:permission-allow
    #:permission-deny
 
+   ;; Stop/SubagentStop responses
+   #:stop-continue
+   #:stop-allow
+
    ;; Generic responses
    #:context-response
    #:hook-context

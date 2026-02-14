@@ -34,7 +34,10 @@
                    (after-pattern-mutation :feedback pattern-id)
                    (let ((session-id (current-session-id)))
                      (when session-id
-                       (record-feedback session-id pattern-id type-kw)))
+                       (record-feedback session-id pattern-id type-kw)
+                       ;; Update feedback state file for Stop hook
+                       (let ((cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
+                         (write-feedback-state-file cwd session-id))))
                    (format nil "Recorded ~A for ~A" type-kw pattern-id))
                  (error "Invalid feedback type: ~A (use :helpful or :harmful)" feedback-type)))
            (error "Pattern not found: ~A" pattern-id))))
@@ -86,15 +89,15 @@
          (error ":add requires :domain"))
        (unless content
          (error ":add requires :content"))
-       (let ((ace-path (detect-depot-ace-path)))
-         (if ace-path
+       (let ((meta-path (detect-depot-meta-path)))
+         (if meta-path
              (let* ((id (generate-pattern-id domain))
                     (pattern (make-pattern :id id
                                            :domain domain
                                            :content content
                                            :helpful 0
                                            :harmful 0))
-                    (target-file (merge-pathnames "playbook.md" ace-path)))
+                    (target-file (merge-pathnames "playbook.md" meta-path)))
                (append-pattern-to-file target-file pattern)
                (after-pattern-mutation :add id)
                id)
@@ -146,7 +149,9 @@
           (record-activation-and-update-graph session-id pattern-ids)
           ;; Belt+suspenders: also write to session state file for SessionEnd hook
           (let ((cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
-            (write-activation-to-mcp-state cwd pattern-ids))))
+            (write-activation-to-mcp-state cwd pattern-ids)
+            ;; Write feedback state for Stop hook to read
+            (write-feedback-state-file cwd session-id))))
       ;; Mark patterns used for temporal decay
       (dolist (id pattern-ids)
         (mark-pattern-used id)))
