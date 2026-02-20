@@ -1,0 +1,72 @@
+{
+  "nodes": {
+    "cl-deps": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1771441384,
+        "narHash": "sha256-YZgP/7T4l1F7SEDpZfMC5vPKeRlotYICqVfSTHZv0TY=",
+        "owner": "kleisli-io",
+        "repo": "cl-deps",
+        "rev": "5e334524ab3bb612da43de47627525e8535f82e8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kleisli-io",
+        "repo": "cl-deps",
+        "type": "github"
+      }
+    },
+    "lol-reactive": {
+      "inputs": {
+        "cl-deps": [
+          "cl-deps"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1770896810,
+        "narHash": "sha256-zNcAinrtrXS9y++B75tRxV+eQ3ar1CYiJYOaFvqLcPE=",
+        "owner": "kleisli-io",
+        "repo": "lol-reactive",
+        "rev": "e81bc371ec2a02b6511af3073b4ecc7989aa5303",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kleisli-io",
+        "repo": "lol-reactive",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1769018530,
+        "narHash": "sha256-MJ27Cy2NtBEV5tsK+YraYr2g851f3Fl1LpNHDzDX15c=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "88d3861acdd3d2f0e361767018218e51810df8a1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "88d3861acdd3d2f0e361767018218e51810df8a1",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "cl-deps": "cl-deps",
+        "lol-reactive": "lol-reactive",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

@@ -1,0 +1,74 @@
+{
+  "description": "kli workflow hooks — task tracking, playbook activation, session coordination",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook session-start"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|Grep|Glob|Bash|Task|WebFetch|WebSearch|LSP",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook tool-call"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__task__task_set_current|mcp__task__task_bootstrap|mcp__task__task_release",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook session-task-write"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook file-conflict"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook playbook-activate"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook feedback-nudge"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook session-leave"
+          }
+        ]
+      }
+    ]
+  }
+}

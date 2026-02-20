@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+            artifact: kli-linux-x86_64
+          - os: macos-14
+            system: aarch64-darwin
+            artifact: kli-darwin-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        if: runner.os == 'Linux'
+
+      - name: Build kli
+        run: |
+          nix build .#packages.${{ matrix.system }}.default
+          nix build .#packages.${{ matrix.system }}.kli-binary -o result-binary
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p staging/bin staging/lib staging/share/kli
+
+          # Copy the SBCL executable with embedded core image
+          cp result-binary/bin/.kli-wrapped staging/bin/kli
+          chmod +x staging/bin/kli
+
+          # Bundle shared libraries that SBCL dlopen's at image startup.
+          # These are in the Nix closure but won't exist on non-Nix systems.
+          for lib in libcrypto.so.3 libssl.so.3 libzstd.so.1; do
+            path=$(find $(nix path-info -r ./result-binary) -name "$lib" -print -quit 2>/dev/null)
+            if [ -n "$path" ]; then
+              cp "$path" staging/lib/
+            fi
+          done
+          # macOS: same but for dylibs
+          for lib in libcrypto.3.dylib libssl.3.dylib libzstd.1.dylib; do
+            path=$(find $(nix path-info -r ./result-binary) -name "$lib" -print -quit 2>/dev/null)
+            if [ -n "$path" ]; then
+              cp "$path" staging/lib/
+            fi
+          done
+
+          cp -r result/share/kli/* staging/share/kli/
+          tar -czf ${{ matrix.artifact }}.tar.gz -C staging .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum kli-*.tar.gz > checksums.txt
+
+      - name: Extract release notes
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          # Extract the section for this version from CHANGELOG.md
+          awk "/^## \[?${VERSION}\]?/{found=1; next} /^## \[?[0-9]/{if(found) exit} found" CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for ${VERSION}, using tag name." >&2
+            echo "Release ${GITHUB_REF_NAME}" > release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: |
+            kli-*
+            checksums.txt
