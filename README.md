@@ -187,7 +187,7 @@ See [full architecture docs](https://docs.kleisli.io/kli/reference/architecture)
 
 ## What kli Is Not
 
-kli is not a project management tool and does not replace GitHub Issues, Linear, or Jira. It is a task orchestration layer — for multi-session work where task structure, agent coordination, and development workflows matter. Works with vanilla Claude Code, Agent teams, and any MCP-compatible client.
+kli is not a project management tool and does not replace GitHub Issues, Linear, or Jira. It is a task orchestration layer for multi-session work where task structure, agent coordination, and development workflows matter.
 
 ## License
 
