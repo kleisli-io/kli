@@ -111,14 +111,6 @@ What distinguishes kli is the **trace**: the complete, structured record of what
 
 Coordination is stigmergic: agents deposit traces in the shared task graph and discover what others have done — indirect coordination, like termite colonies building without a foreman. Session fingerprints mark territory, file conflict detection prevents collisions, orphan phase pickup lets agents continue abandoned work. In practice, adding agents doesn't increase coordination overhead — no message routing, no broker.
 
-### Where kli is weaker
-
-- **Guided, not gated.** kli plans are concrete task DAGs with objectives, acceptance criteria, and dependencies — and TQ lets you reorganize them in single expressions. But kli doesn't enforce spec artifacts as hard gates before code. If you need that discipline, BMAD and GSD are stricter.
-- **No PRD parsing.** You can't feed kli a requirements doc and get structured tasks. Task Master does this.
-- **No external issue tracker.** kli's task graph is internal to the agent workflow. It doesn't replace GitHub Issues or Jira for human-facing project management. Beads or CCPM are better for that.
-- **Single IDE.** kli only works with Claude Code. If you use Cursor, Windsurf, or other tools, look at OpenSpec or BMAD.
-- **Early stage.** kli is pre-1.0. The other tools listed here have larger communities and more battle-testing.
-
 ## Installation
 
 ### One-line install
