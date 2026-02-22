@@ -185,6 +185,249 @@
                   (format nil "~{~A~^:~}" paths)))))))
     (error () nil)))
 
+;;; --- Tool CLI: schema-driven arg parsing and help ---
+
+(defun coerce-arg-value (value type)
+  "Coerce string VALUE to JSON Schema TYPE."
+  (cond
+    ((string= type "integer") (parse-integer value))
+    ((string= type "number") (read-from-string value))
+    ((string= type "boolean")
+     (cond ((member value '("true" "1" "yes") :test #'string-equal) t)
+           ((member value '("false" "0" "no") :test #'string-equal) nil)
+           (t (error "Invalid boolean: ~A" value))))
+    (t value)))
+
+(defun parse-tool-args (schema args)
+  "Parse CLI args using JSON Schema from tool registry.
+   Required params are filled positionally in declaration order.
+   Optional params use --param_name value syntax.
+   Type coercion from schema (integer, number, boolean, string)."
+  (let* ((raw-props (cdr (assoc "properties" schema :test #'string=)))
+         (props (if (hash-table-p raw-props) nil raw-props))
+         (required (coerce (or (cdr (assoc "required" schema :test #'string=)) #())
+                           'list))
+         (result (make-hash-table :test 'equal))
+         (positional-targets required)
+         (remaining args))
+    (loop while remaining do
+      (let ((arg (pop remaining)))
+        (cond
+          ;; Named arg: --param_name value
+          ((and (>= (length arg) 3) (string= "--" arg :end2 2))
+           (let* ((param-name (subseq arg 2))
+                  (prop (cdr (assoc param-name props :test #'string=))))
+             (unless prop
+               (error "Unknown parameter: --~A~%Run 'kli ~A --help' for usage."
+                      param-name (or (first remaining) "TOOL")))
+             (let ((value (pop remaining))
+                   (type (cdr (assoc "type" prop :test #'string=))))
+               (setf (gethash param-name result)
+                     (coerce-arg-value value type)))))
+          ;; Positional arg: fill next required param
+          (t
+           (if positional-targets
+               (let* ((param-name (pop positional-targets))
+                      (prop (cdr (assoc param-name props :test #'string=)))
+                      (type (when prop
+                              (cdr (assoc "type" prop :test #'string=)))))
+                 (setf (gethash param-name result)
+                       (coerce-arg-value arg (or type "string"))))
+               (error "Too many positional arguments: ~A" arg))))))
+    result))
+
+(defun format-tool-help (tool-name)
+  "Generate help text for a tool from *tool-registry*. Returns string or NIL."
+  (let ((tool (mcp-framework:get-tool tool-name)))
+    (unless tool (return-from format-tool-help nil))
+    (let* ((info (funcall tool :inspect))
+           (doc (getf info :documentation))
+           (schema (funcall tool :schema))
+           (raw-props (cdr (assoc "properties" schema :test #'string=)))
+           (props (if (hash-table-p raw-props) nil raw-props))
+           (required (coerce (or (cdr (assoc "required" schema :test #'string=)) #())
+                             'list)))
+      (with-output-to-string (s)
+        (format s "Usage: kli ~A" tool-name)
+        (dolist (r required)
+          (format s " <~A>" r))
+        (dolist (prop props)
+          (unless (member (car prop) required :test #'string=)
+            (format s " [--~A <~A>]" (car prop)
+                    (cdr (assoc "type" (cdr prop) :test #'string=)))))
+        (terpri s)
+        (when doc (format s "~%~A~%" doc))
+        (when props
+          (format s "~%Parameters:~%")
+          (dolist (prop props)
+            (let* ((name (car prop))
+                   (pschema (cdr prop))
+                   (type (cdr (assoc "type" pschema :test #'string=)))
+                   (desc (cdr (assoc "description" pschema :test #'string=)))
+                   (req (member name required :test #'string=)))
+              (format s "  ~24A ~8A ~A~A~%"
+                      name type desc
+                      (if req " (required)" "")))))))))
+
+(defun format-all-tools ()
+  "Generate listing of all registered MCP tools."
+  (let ((tools (sort (mcp-framework:list-tools) #'string<)))
+    (with-output-to-string (s)
+      (format s "~%Tools (via MCP daemon):~%")
+      (dolist (name tools)
+        (let* ((tool (mcp-framework:get-tool name))
+               (info (funcall tool :inspect))
+               (doc (or (getf info :documentation) "")))
+          (format s "  ~24A ~A~%"
+                  name
+                  (if (> (length doc) 52)
+                      (concatenate 'string (subseq doc 0 49) "...")
+                      doc))))
+      (format s "~%Run 'kli <tool> --help' for details on a specific tool.~%"))))
+
+;;; --- Tool CLI: HTTP session management ---
+
+(defun cli-session-path ()
+  "Path to persisted CLI session file."
+  (let ((runtime-dir (or (uiop:getenv "XDG_RUNTIME_DIR")
+                         (format nil "/run/user/~A"
+                                 #+sbcl (sb-posix:getuid) #-sbcl 1000))))
+    (merge-pathnames "kli/cli-session"
+                     (uiop:ensure-directory-pathname runtime-dir))))
+
+(defun save-session (session-id)
+  "Persist MCP session ID for cross-invocation reuse."
+  (let ((path (cli-session-path)))
+    (ensure-directories-exist path)
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (write-string session-id out))
+    session-id))
+
+(defun load-session ()
+  "Load persisted MCP session ID, or NIL if none exists."
+  (let ((path (cli-session-path)))
+    (when (probe-file path)
+      (ignore-errors
+        (let ((sid (uiop:read-file-string path)))
+          (when (plusp (length sid)) sid))))))
+
+(defun mcp-init (&key (host "127.0.0.1") (port 8090))
+  "Initialize MCP session with daemon. Returns session-id string."
+  (let ((url (format nil "http://~A:~A/mcp" host port))
+        (body (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"kli-cli\",\"version\":\"~A\"}}}" *version*)))
+    (multiple-value-bind (body-bytes status headers)
+        (dex:post url
+                  :content body
+                  :headers '(("Content-Type" . "application/json"))
+                  :connect-timeout 3
+                  :force-binary t)
+      (declare (ignore body-bytes status))
+      (let ((session-id (gethash "mcp-session-id" headers)))
+        (unless session-id
+          (error "No Mcp-Session-Id in response — is kli daemon running?"))
+        session-id))))
+
+(defun mcp-call (tool-name args-ht session-id &key (host "127.0.0.1") (port 8090))
+  "Call MCP tool via daemon HTTP. Returns result text string."
+  (let* ((url (format nil "http://~A:~A/mcp" host port))
+         (params (make-hash-table :test 'equal))
+         (request (make-hash-table :test 'equal)))
+    (setf (gethash "name" params) tool-name
+          (gethash "arguments" params) args-ht
+          (gethash "jsonrpc" request) "2.0"
+          (gethash "id" request) 2
+          (gethash "method" request) "tools/call"
+          (gethash "params" request) params)
+    (let ((body (with-output-to-string (s) (yason:encode request s))))
+      (multiple-value-bind (body-bytes status)
+          (dex:post url
+                    :content body
+                    :headers `(("Content-Type" . "application/json")
+                               ("Mcp-Session-Id" . ,session-id))
+                    :connect-timeout 5
+                    :read-timeout 30
+                    :force-binary t)
+        (declare (ignore status))
+        (let* ((response-text (babel:octets-to-string body-bytes))
+               (parsed (yason:parse response-text)))
+          (if (gethash "error" parsed)
+              (let* ((err (gethash "error" parsed))
+                     (msg (gethash "message" err)))
+                (error "~A" msg))
+              (let ((content (gethash "content" (gethash "result" parsed))))
+                (with-output-to-string (s)
+                  (dolist (item content)
+                    (format s "~A" (gethash "text" item)))))))))))
+
+(defun ensure-session (&key (host "127.0.0.1") (port 8090))
+  "Get a valid MCP session: load persisted or init new.
+   Handles stale sessions (daemon restart) by re-initializing."
+  (let ((sid (load-session)))
+    (if sid
+        ;; Validate by sending initialized notification
+        (handler-case
+            (let ((request (make-hash-table :test 'equal)))
+              (setf (gethash "jsonrpc" request) "2.0"
+                    (gethash "id" request) 0
+                    (gethash "method" request) "notifications/initialized"
+                    (gethash "params" request) (make-hash-table :test 'equal))
+              (dex:post (format nil "http://~A:~A/mcp" host port)
+                        :content (with-output-to-string (s)
+                                   (yason:encode request s))
+                        :headers `(("Content-Type" . "application/json")
+                                   ("Mcp-Session-Id" . ,sid))
+                        :connect-timeout 3
+                        :force-binary t)
+              sid)
+          (error ()
+            (let ((new-sid (mcp-init :host host :port port)))
+              (save-session new-sid)
+              new-sid)))
+        ;; No persisted session
+        (let ((new-sid (mcp-init :host host :port port)))
+          (save-session new-sid)
+          new-sid))))
+
+;;; --- Tool CLI: dispatch ---
+
+(defun extract-flag (flag args)
+  "Extract --FLAG VALUE from ARGS. Returns (values value remaining-args).
+   If flag not found, returns (values nil args)."
+  (loop for tail on args
+        when (string= (car tail) flag)
+          return (values (cadr tail)
+                         (append (ldiff args tail) (cddr tail)))
+        finally (return (values nil args))))
+
+(defun cli-dispatch (command args)
+  "Dispatch a tool command. Returns (values tag result) or NIL if not a tool.
+   TAG is :tool-help or :result. Business logic only — no process exit."
+  (let ((tool (mcp-framework:get-tool command)))
+    (cond
+      ((null tool) nil)
+      ;; --help: in-process schema introspection, no HTTP needed
+      ((member "--help" args :test #'string=)
+       (values :tool-help (format-tool-help command)))
+      ;; Execute via HTTP to daemon
+      (t
+       (multiple-value-bind (task-id tool-args) (extract-flag "--task" args)
+         (let* ((schema (funcall tool :schema))
+                (raw-stdin (when (and (null tool-args)
+                                      (not (interactive-stream-p *standard-input*)))
+                             (uiop:slurp-stream-string *standard-input*)))
+                (stdin-text (when raw-stdin
+                              (let ((trimmed (string-right-trim
+                                             '(#\Newline #\Return) raw-stdin)))
+                                (when (plusp (length trimmed)) trimmed))))
+                (effective-args (if stdin-text (list stdin-text) tool-args))
+                (args-ht (parse-tool-args schema effective-args))
+                (sid (ensure-session)))
+           (when task-id
+             (let ((ctx-ht (make-hash-table :test 'equal)))
+               (setf (gethash "task_id" ctx-ht) task-id)
+               (mcp-call "task_set_current" ctx-ht sid)))
+           (values :result (mcp-call command args-ht sid))))))))
+
 ;;; --- CLI ---
 
 (defun print-help ()
@@ -198,6 +441,7 @@
   (format t "  hook <name>                Run Claude Code hook handler~%")
   (format t "  version                    Show version~%")
   (format t "  help                       Show this help~%")
+  (write-string (format-all-tools))
   (format t "~%Environment:~%")
   (format t "  KLI_TASKS_DIR              Task storage (default: .kli/tasks/)~%")
   (format t "  PLAYBOOK_PATHS             Colon-separated playbook file paths~%")
@@ -291,8 +535,18 @@
                  (progn (kli-hook:hook-main name) (uiop:quit 0))
                  (progn (format *error-output* "Usage: kli hook <name>~%") (uiop:quit 1)))))
           (t
-           (format *error-output* "Unknown command: ~A~%Try: kli help~%" command)
-           (uiop:quit 1)))
+           ;; Tool fallthrough: check *tool-registry* before erroring
+           (multiple-value-bind (tag result) (cli-dispatch command (rest args))
+             (case tag
+               (:tool-help
+                (write-string result)
+                (uiop:quit 0))
+               (:result
+                (write-string result)
+                (terpri)
+                (uiop:quit 0))
+               ((nil)
+                (error "Unknown command: ~A~%Try: kli help" command))))))
       (error (e)
         (format *error-output* "Fatal error: ~A~%" e)
         (uiop:quit 1)))))

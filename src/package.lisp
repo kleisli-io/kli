@@ -7,7 +7,7 @@
 
 (in-package #:kli)
 
-(defvar *version* "0.1.0")
+(defvar *version* "0.2.0")
 
 (defvar *verbose* nil
   "When true, emit informational log messages to *error-output*.

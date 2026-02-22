@@ -285,21 +285,16 @@ Use to peek at any task without switching context. See task_bootstrap to join a 
               (make-text-content "No events found for task ~A" id))))))
 
 (define-tool task_list
-    ((grouped boolean "Group tasks by topic" nil))
+    ((grouped boolean "Group tasks by topic" nil)
+     (limit integer "Max tasks to show (default 50, 0 for all)" nil))
   "List all tasks with their status."
-  (if grouped
-      ;; Grouped view: all tasks organized by topic cluster
-      (let ((infos (task:get-cached-task-infos)))
-        (make-text-content
-         (if infos
+  (let ((infos (task:get-cached-task-infos)))
+    (make-text-content
+     (if infos
+         (if grouped
              (task:format-task-list-grouped infos)
-             "No tasks found.")))
-      ;; Default: event-sourced tasks only (backwards compatible)
-      (let ((tasks (list-all-tasks)))
-        (make-text-content
-         (if tasks
-             (format-task-list tasks)
-             "No tasks found.")))))
+             (format-task-list infos :limit (or limit 50)))
+         "No tasks found."))))
 
 (defun session-team-data ()
   "Return team metadata plist for current session, or NIL if not a teammate.

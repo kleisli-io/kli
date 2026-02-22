@@ -1,6 +1,6 @@
 (defsystem "kli-mcp-http"
   :description "HTTP+SSE transport for MCP — multi-session, CORS, session lifecycle"
-  :version "0.1.0"
+  :version "0.2.0"
   :license "MIT"
   :depends-on ("kli-mcp-framework" "hunchentoot" "bordeaux-threads" "yason")
   :serial t

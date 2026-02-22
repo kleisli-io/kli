@@ -17,6 +17,8 @@ This skill uses tools from two layers that serve different purposes:
 
 Both are needed. Team tools coordinate the current session's agents. Task MCP tools read and write the shared knowledge layer that future sessions inherit.
 
+**Teammate access gap**: Teammates do NOT have MCP tool access (known limitation). Instead, teammates use the `kli` CLI via Bash: `kli <tool> --task <id>`. See the `using-kli-cli` skill for full reference. When spawning teammates, include kli CLI examples in their task descriptions so they know how to record observations and query the task graph.
+
 ## The Bridge Pattern (CRITICAL)
 
 Claude Code teams and the persistent task graph are separate systems that don't automatically share context. **Your job as team lead is to bridge them.**

@@ -1,6 +1,6 @@
 (defsystem "kli-mcp-framework"
   :description "MCP server framework — tool/resource/prompt registration, schema, hooks, evolution"
-  :version "0.1.0"
+  :version "0.2.0"
   :license "MIT"
   :depends-on ("alexandria" "bordeaux-threads" "let-over-lambda" "yason" "cl-ppcre")
   :serial t

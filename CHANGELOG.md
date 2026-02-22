@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-22
+
+### Added
+
+- CLI tool dispatch: `kli <tool> [args] --task <id>` exposes all 31 MCP tools as subcommands
+- Schema-driven argument parsing with positional/named args and per-tool `--help`
+- HTTP session management: `--task` flag sets task context before tool execution
+- `using-kli-cli` skill for teammate CLI access (MCP workaround)
+- `kli-team` skill updated with teammate access gap documentation
+
+### Fixed
+
+- `task_list` performance: ~3750x speedup (3.75s → 1-2ms) via cached formatting
+
 ## [0.1.0] - 2026-02-20
 
 Initial release.

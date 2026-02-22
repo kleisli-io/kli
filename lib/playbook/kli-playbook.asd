@@ -1,6 +1,6 @@
 (defsystem "kli-playbook"
   :description "PQ query language — safe interpreter for playbook pattern graph"
-  :version "0.1.0"
+  :version "0.2.0"
   :license "MIT"
   :depends-on ("uiop")
   :serial t

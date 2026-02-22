@@ -242,73 +242,47 @@
             (task:event-session ev)
             snippet)))
 
-(defun list-all-tasks ()
-  "Scan task directories and return enriched task summaries.
-   Each entry is a plist: id, status, display-name, event-count, phase, tags,
-   observation-count, session-count. Sorted by event count (most active first).
-   Iterates over all depots in *depot-tasks-roots*, falling back to *tasks-root*."
-  (let ((results nil))
-    (flet ((scan-root (root &optional depot-name)
-             (when (and root (probe-file root))
-               (dolist (dir (uiop:subdirectories root))
-                 (let* ((bare-id (first (last (pathname-directory dir))))
-                        (id (if depot-name
-                                (task:qualify-task-id depot-name bare-id)
-                                bare-id))
-                        (events-path (format nil "~Aevents.jsonl"
-                                             (namestring dir))))
-                   (when (probe-file events-path)
-                     (let* ((log (task:elog-load events-path))
-                            (events (reverse (task:event-log-events log)))
-                            (state (when events (task:compute-state events))))
-                       (when state
-                         (let ((meta (task:task-state-metadata state)))
-                           (push (list :id id
-                                       :status (crdt:lww-value (task:task-state-status state))
-                                       :display-name (crdt:lwwm-get meta "display-name")
-                                       :event-count (length events)
-                                       :phase (crdt:lwwm-get meta "phase")
-                                       :tags (crdt:lwwm-get meta "tags")
-                                       :obs-count (crdt:gs-count
-                                                   (task:task-state-observations state))
-                                       :session-count (crdt:gs-count
-                                                       (task:task-state-sessions state)))
-                                 results))))))))))
-      (if (> (hash-table-count task:*depot-tasks-roots*) 0)
-          (maphash (lambda (depot root)
-                     (scan-root root depot))
-                   task:*depot-tasks-roots*)
-          (scan-root task:*tasks-root*)))
-    (sort (nreverse results)
-          (lambda (a b)
-            (> (getf a :event-count) (getf b :event-count))))))
-
-(defun format-task-list (tasks)
-  "Format enriched task list as multi-line text."
-  (with-output-to-string (s)
-    (format s "Tasks (~D):~%~%" (length tasks))
-    (dolist (tk tasks)
-      (let ((id (getf tk :id))
-            (status (getf tk :status))
-            (name (getf tk :display-name))
-            (events (getf tk :event-count))
-            (phase (getf tk :phase))
-            (tags (getf tk :tags))
-            (obs (getf tk :obs-count))
-            (sessions (getf tk :session-count)))
-        ;; First line: display name or id
-        (if name
-            (format s "  ~A (~A)~%" name status)
-            (format s "  ~A (~A)~%" id status))
-        ;; Second line: id (if name shown above)
-        (when name
-          (format s "    ~A~%" id))
-        ;; Metrics line
-        (format s "    ~D events, ~D observations, ~D sessions"
-                events obs sessions)
-        (when phase (format s " | ~A" phase))
-        (format s "~%")
-        (when tags (format s "    [~A]~%" tags))
-        (format s "~%")))
-    (when *current-task-id*
-      (format s "Current: ~A~%" *current-task-id*))))
+(defun format-task-list (tasks &key (limit 50))
+  "Format cached task info plists as multi-line text.
+   Works with plists from get-cached-task-infos (graph cache).
+   Event-sourced tasks shown first, sorted by recency.
+   LIMIT controls max tasks shown (0 = all)."
+  (let* ((event-sourced (remove-if-not (lambda (tk) (getf tk :has-events)) tasks))
+         (sorted (sort (copy-list event-sourced) #'>
+                       :key (lambda (tk) (or (getf tk :latest-mod) 0))))
+         (total (length sorted))
+         (showing (if (and limit (plusp limit))
+                      (subseq sorted 0 (min limit total))
+                      sorted)))
+    (with-output-to-string (s)
+      (if (and limit (plusp limit) (> total limit))
+          (format s "Tasks (~D of ~D, use --limit 0 for all):~%~%" limit total)
+          (format s "Tasks (~D):~%~%" total))
+      (dolist (tk showing)
+        (let ((id (getf tk :id))
+              (status (getf tk :status))
+              (name (getf tk :display-name))
+              (goals-count (getf tk :goal-count))
+              (goals-done (getf tk :goals-done))
+              (tags (getf tk :tags))
+              (has-plan (getf tk :has-plan))
+              (has-handoffs (getf tk :has-handoffs))
+              (has-research (getf tk :has-research)))
+          (format s "  ~A (~(~A~))~%" (or name id) status)
+          (when name
+            (format s "    ~A~%" id))
+          ;; Artifacts line
+          (let ((artifacts nil))
+            (when has-research (push "research" artifacts))
+            (when has-handoffs (push "handoffs" artifacts))
+            (when has-plan (push "plan" artifacts))
+            (when artifacts
+              (format s "    ~{~A~^, ~}" artifacts)
+              (when (and goals-count (plusp goals-count))
+                (format s " | ~D/~D goals" goals-done goals-count))
+              (format s "~%")))
+          (when (and tags (listp tags))
+            (format s "    [~{~A~^, ~}]~%" tags))
+          (format s "~%")))
+      (when *current-task-id*
+        (format s "Current: ~A~%" *current-task-id*)))))
