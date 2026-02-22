@@ -19,7 +19,6 @@
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          lib = pkgs.lib;
 
           inherit (cl-deps.lib.${system}) buildLisp lisp;
 

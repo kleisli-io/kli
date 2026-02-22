@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1771441384,
-        "narHash": "sha256-YZgP/7T4l1F7SEDpZfMC5vPKeRlotYICqVfSTHZv0TY=",
+        "lastModified": 1771689605,
+        "narHash": "sha256-/i8e1XjaIYofn6j0j7eywzUjr0qV0Otl0cgBxAZpn4M=",
         "owner": "kleisli-io",
         "repo": "cl-deps",
-        "rev": "5e334524ab3bb612da43de47627525e8535f82e8",
+        "rev": "8b2e223846ec068d33e6ec9f658fc8d34277c904",
         "type": "github"
       },
       "original": {
@@ -30,11 +30,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1770896810,
-        "narHash": "sha256-zNcAinrtrXS9y++B75tRxV+eQ3ar1CYiJYOaFvqLcPE=",
+        "lastModified": 1771689724,
+        "narHash": "sha256-/C3lKg0u1Gct3+qfzk26CmH8IVyZf3H+DnOc8781UAE=",
         "owner": "kleisli-io",
         "repo": "lol-reactive",
-        "rev": "e81bc371ec2a02b6511af3073b4ecc7989aa5303",
+        "rev": "4af2e52d9eb3cf1c1b9cd714c440f8db13255354",
         "type": "github"
       },
       "original": {
