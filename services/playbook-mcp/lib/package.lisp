@@ -48,6 +48,22 @@
            #:save-pattern-feedback
            #:save-pattern-evolution
            #:append-pattern-to-file)
+  ;; Relevance feedback (query-scoped)
+  (:export #:relevance-entry
+           #:make-relevance-entry
+           #:relevance-entry-pattern-id
+           #:relevance-entry-domains
+           #:relevance-entry-timestamp
+           #:relevance-entry-signal
+           #:*relevance-store*
+           #:*relevance-store-lock*
+           #:record-relevance-feedback
+           #:relevance-feedback-path
+           #:save-relevance-feedback-file
+           #:load-relevance-feedback-file
+           #:merge-relevance-feedback-file
+           #:prune-relevance-feedback
+           #:save-pattern-relevance-feedback)
   ;; Edge data model
   (:export #:edge
            #:make-edge
@@ -102,7 +118,8 @@
            #:record-activation-and-update-graph)
   ;; Activation
   (:export #:spread-activation
-           #:activate-patterns)
+           #:activate-patterns
+           #:compute-relevance-penalty)
   ;; Embedding operations
   (:export #:get-embedding
            #:ensure-pattern-embedding

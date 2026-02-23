@@ -17,6 +17,9 @@
 (def-suite :feedback-state :in :playbook-mcp.tests
   :description "Tests for feedback state file I/O")
 
+(def-suite :relevance-feedback :in :playbook-mcp.tests
+  :description "Tests for query-scoped :not-relevant feedback")
+
 (defun run-all-tests ()
   "Run all playbook-mcp tests."
   (run! :playbook-mcp.tests))

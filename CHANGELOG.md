@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-23
+
+### Added
+
+- Query-scoped `:not-relevant` feedback — mark patterns as "fine but wrong for this query" without distorting global quality scores (`:helpful`/`:harmful`)
+- Relevance penalty in pattern activation — accumulated `:not-relevant` signals reduce similarity scores for matching domain contexts, with 7-day exponential decay
+- Relevance feedback sidecar storage (`playbook-relevance-feedback.json`) with atomic I/O, additive merge across depots, and pruning
+- `normalize-feedback-type` helper handling 8+ input variants including `:irrelevant` alias
+- Server startup merges relevance feedback from all `PLAYBOOK_PATHS` depots
+- Feedback nudge hook shows all 3 feedback options (`:helpful`, `:harmful`, `:not-relevant`)
+
 ## [0.2.3] - 2026-02-23
 
 ### Added

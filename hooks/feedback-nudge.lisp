@@ -65,11 +65,11 @@
 ;;; ---------------------------------------------------------------------------
 
 (defun format-feedback-reminder (pending-ids)
-  "Format a concise reminder listing pending pattern IDs."
+  "Format a concise reminder listing pending pattern IDs with 3 feedback options."
   (with-output-to-string (s)
     (format s "~D pattern~:P need feedback: ~{~A~^, ~}. "
             (length pending-ids) pending-ids)
-    (format s "Use (:feedback! :helpful \"evidence\") or (:feedback! :harmful \"reason\").")))
+    (format s "Use (:feedback! :helpful \"evidence\"), (:feedback! :harmful \"reason\"), or (:feedback! :not-relevant \"why\") if the pattern is fine but irrelevant to this task.")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Core Logic

@@ -10,6 +10,22 @@
 ;;; MUTATION HANDLER
 ;;; ============================================================
 
+(defun normalize-feedback-type (feedback-type)
+  "Normalize feedback input to a keyword: :helpful, :harmful, :not-relevant, or NIL.
+   Accepts keywords, strings, and the :irrelevant alias."
+  (cond ((or (eq feedback-type :helpful)
+             (string-equal feedback-type "helpful"))
+         :helpful)
+        ((or (eq feedback-type :harmful)
+             (string-equal feedback-type "harmful"))
+         :harmful)
+        ((or (eq feedback-type :not-relevant)
+             (eq feedback-type :irrelevant)
+             (string-equal feedback-type "not-relevant")
+             (string-equal feedback-type "irrelevant"))
+         :not-relevant)
+        (t nil)))
+
 (defun pq-mutation-handler (op pattern-id &rest args)
   "Execute a PQ mutation operation.
    OP is a keyword like :feedback, :evolve, :link, :add.
@@ -19,28 +35,33 @@
     (:feedback
      (let* ((feedback-type (first args))
             (evidence (second args))
-            (pattern (get-pattern pattern-id)))
-       (if pattern
-           (let ((type-kw (cond ((or (eq feedback-type :helpful)
-                                     (string-equal feedback-type "helpful"))
-                                 :helpful)
-                                ((or (eq feedback-type :harmful)
-                                     (string-equal feedback-type "harmful"))
-                                 :harmful)
-                                (t nil))))
-             (if type-kw
-                 (progn
-                   (save-pattern-feedback pattern-id type-kw evidence)
-                   (after-pattern-mutation :feedback pattern-id)
-                   (let ((session-id (current-session-id)))
-                     (when session-id
-                       (record-feedback session-id pattern-id type-kw)
-                       ;; Update feedback state file for Stop hook
-                       (let ((cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
-                         (write-feedback-state-file cwd session-id))))
-                   (format nil "Recorded ~A for ~A" type-kw pattern-id))
-                 (error "Invalid feedback type: ~A (use :helpful or :harmful)" feedback-type)))
-           (error "Pattern not found: ~A" pattern-id))))
+            (pattern (get-pattern pattern-id))
+            (type-kw (normalize-feedback-type feedback-type)))
+       (unless pattern
+         (error "Pattern not found: ~A" pattern-id))
+       (unless type-kw
+         (error "Invalid feedback type: ~A (use :helpful, :harmful, or :not-relevant)"
+                feedback-type))
+       (cond
+         ;; Quality path: helpful/harmful → update counters + playbook.md
+         ((member type-kw '(:helpful :harmful))
+          (save-pattern-feedback pattern-id type-kw evidence)
+          (after-pattern-mutation :feedback pattern-id))
+         ;; Relevance path: not-relevant → sidecar store (no graph staleness)
+         ((eq type-kw :not-relevant)
+          (let* ((session-id (current-session-id))
+                 (domains (when session-id
+                            (let ((session (get-session session-id)))
+                              (when session
+                                (session-state-active-domains session))))))
+            (save-pattern-relevance-feedback pattern-id domains evidence))))
+       ;; Common tail: record in session + update feedback state file
+       (let ((session-id (current-session-id)))
+         (when session-id
+           (record-feedback session-id pattern-id type-kw)
+           (let ((cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
+             (write-feedback-state-file cwd session-id))))
+       (format nil "Recorded ~A for ~A" type-kw pattern-id)))
 
     (:evolve
      (let* ((content (first args))

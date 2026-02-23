@@ -111,6 +111,17 @@
                 (when *log-verbose*
                   (format *error-output* "Merged co-app: ~D pairs from ~A~%"
                           (hash-table-count *co-app-ledger*) ledger)))))))
+      ;; Merge relevance feedback sidecar from all depots in PLAYBOOK_PATHS
+      (let ((paths-str (uiop:getenv "PLAYBOOK_PATHS")))
+        (when paths-str
+          (dolist (playbook-path (cl-ppcre:split ":" paths-str))
+            (let* ((ace-dir (uiop:pathname-directory-pathname (uiop:ensure-pathname playbook-path)))
+                   (relevance (namestring (merge-pathnames "playbook-relevance-feedback.json" ace-dir))))
+              (when (probe-file relevance)
+                (merge-relevance-feedback-file relevance)
+                (when *log-verbose*
+                  (format *error-output* "Merged relevance feedback: ~D patterns from ~A~%"
+                          (hash-table-count *relevance-store*) relevance)))))))
       ;; Load embedding cache so patterns have embeddings without hitting ollama
       (let ((cache-path (namestring (merge-pathnames ".playbook-cache/embeddings.json" meta-path))))
         (when (probe-file cache-path)

@@ -66,6 +66,45 @@
 (defvar *temporal-data-path* nil
   "Path to temporal data JSON file for persistence.")
 
+;;; Relevance penalty (query-scoped feedback)
+
+(defparameter *relevance-half-life-days* 7
+  "Half-life for temporal decay of relevance feedback (in days).")
+
+(defparameter *relevance-max-penalty* 0.5
+  "Maximum penalty from accumulated relevance feedback.")
+
+(defparameter *relevance-per-signal* 0.15
+  "Base penalty contribution per matching relevance signal.")
+
+(defun relevance-domain-overlap-p (entry-domains query-domains)
+  "Check if any domain from ENTRY-DOMAINS overlaps with QUERY-DOMAINS."
+  (some (lambda (d) (member d query-domains :test #'string-equal))
+        entry-domains))
+
+(defun relevance-temporal-weight (timestamp &optional (now (get-universal-time)))
+  "Compute temporal decay weight for a relevance signal.
+   Uses exponential decay with *relevance-half-life-days*."
+  (let* ((age-seconds (- now timestamp))
+         (age-days (/ age-seconds 86400.0))
+         (half-life *relevance-half-life-days*))
+    (expt 0.5 (/ age-days half-life))))
+
+(defun compute-relevance-penalty (pattern-id query-domains)
+  "Compute penalty for PATTERN-ID given current QUERY-DOMAINS.
+   Only signals from overlapping domain contexts contribute.
+   Returns a float in [0, *relevance-max-penalty*]."
+  (let ((entries (with-lock-held (*relevance-store-lock*)
+                   (copy-list (gethash pattern-id *relevance-store*)))))
+    (if (or (null entries) (null query-domains))
+        0.0
+        (let ((penalty 0.0))
+          (dolist (entry entries)
+            (when (relevance-domain-overlap-p (relevance-entry-domains entry) query-domains)
+              (incf penalty (* *relevance-per-signal*
+                               (relevance-temporal-weight (relevance-entry-timestamp entry))))))
+          (min penalty *relevance-max-penalty*)))))
+
 (defun mark-pattern-used (pattern-id)
   "Record that a pattern was used now. Returns the timestamp."
   (setf (gethash pattern-id *pattern-last-used*) (get-universal-time)))
@@ -435,9 +474,12 @@
                    ;; Apply boost if domain matches
                    (boosted-sim (if (and boost (member domain boost :test #'string-equal))
                                     (* sim 1.5)  ; 50% boost for matching domains
-                                    sim)))
-              (when (> boosted-sim 0.3)
-                (push (cons p boosted-sim) results)))))))
+                                    sim))
+                   ;; Apply relevance penalty from :not-relevant feedback
+                   (penalty (compute-relevance-penalty (pattern-id p) boost))
+                   (adjusted-sim (* boosted-sim (- 1.0 penalty))))
+              (when (> adjusted-sim 0.3)
+                (push (cons p adjusted-sim) results)))))))
     ;; Sort by score descending
     (setf results (sort results #'> :key #'cdr))
     ;; Filter recent patterns
