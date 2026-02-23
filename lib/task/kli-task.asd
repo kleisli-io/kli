@@ -1,6 +1,6 @@
 (defsystem "kli-task"
   :description "Event-sourced task management with CRDT merge semantics"
-  :version "0.2.0"
+  :version (:read-file-form "../../version.sexp")
   :license "MIT"
   :depends-on ("kli-crdt" "alexandria" "cl-ppcre" "yason" "uiop")
   :serial t

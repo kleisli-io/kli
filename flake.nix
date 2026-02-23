@@ -31,7 +31,6 @@
               "package.lisp"
               "vector-clock.lisp"
               "g-set.lisp"
-              "pn-counter.lisp"
               "lww-register.lisp"
               "or-set.lisp"
               "lww-map.lisp"

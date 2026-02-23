@@ -34,16 +34,6 @@
              (vc-entries vc2))
     result))
 
-(defun vc-happened-before-p (vc1 vc2)
-  "Return T if VC1 happened strictly before VC2."
-  (and (vc-<= vc1 vc2)
-       (not (vc-<= vc2 vc1))))
-
-(defun vc-concurrent-p (vc1 vc2)
-  "Return T if VC1 and VC2 are concurrent (neither dominates)."
-  (and (not (vc-<= vc1 vc2))
-       (not (vc-<= vc2 vc1))))
-
 (defun vc-equal-p (vc1 vc2)
   "Return T if two vector clocks are equal."
   (and (vc-<= vc1 vc2) (vc-<= vc2 vc1)))

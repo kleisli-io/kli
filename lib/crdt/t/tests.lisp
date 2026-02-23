@@ -43,25 +43,6 @@
     (vc-increment a "s1")
     (is (vc-equal-p (vc-merge a a) a))))
 
-(test vc-happened-before
-  (let ((a (make-vector-clock))
-        (b (make-vector-clock)))
-    (vc-increment a "s1")
-    ;; b has everything a has and more
-    (vc-increment b "s1")
-    (vc-increment b "s2")
-    (is (vc-happened-before-p a b))
-    (is (not (vc-happened-before-p b a)))))
-
-(test vc-concurrent-detection
-  (let ((a (make-vector-clock))
-        (b (make-vector-clock)))
-    (vc-increment a "s1")
-    (vc-increment b "s2")
-    (is (vc-concurrent-p a b))
-    (is (not (vc-happened-before-p a b)))
-    (is (not (vc-happened-before-p b a)))))
-
 ;;; --- G-Set ---
 
 (test gs-add-idempotent
@@ -83,31 +64,6 @@
       (is (gs-contains-p merged "a"))
       (is (gs-contains-p merged "b"))
       (is (gs-contains-p merged "c")))))
-
-;;; --- PN-Counter ---
-
-(test pnc-increment-decrement
-  (let ((pnc (make-pn-counter)))
-    (pnc-increment pnc "s1" 5)
-    (pnc-decrement pnc "s1" 2)
-    (is (= 3 (pnc-value pnc)))))
-
-(test pnc-multi-session
-  (let ((pnc (make-pn-counter)))
-    (pnc-increment pnc "s1" 3)
-    (pnc-increment pnc "s2" 2)
-    (pnc-decrement pnc "s1" 1)
-    (is (= 4 (pnc-value pnc)))))
-
-(test pnc-merge-max-per-session
-  (let ((a (make-pn-counter))
-        (b (make-pn-counter)))
-    (pnc-increment a "s1" 5)
-    (pnc-increment b "s1" 3)
-    (pnc-increment b "s2" 2)
-    (let ((merged (pnc-merge a b)))
-      ;; s1: max(5,3)=5, s2: max(0,2)=2, no neg
-      (is (= 7 (pnc-value merged))))))
 
 ;;; --- LWW-Register ---
 

@@ -327,6 +327,17 @@
           (error "No Mcp-Session-Id in response — is kli daemon running?"))
         session-id))))
 
+(defun detect-cli-depot ()
+  "Detect depot name from actual CWD for CLI HTTP header injection.
+   Uses find-depot-root-from instead of find-depot-root to bypass
+   DEPOT_ROOT env var, which may point to a different depot.
+   Returns depot name string (e.g. \"kleisli\") or NIL if not in a depot."
+  (let ((depot-root (depot:find-depot-root-from
+                     (namestring (uiop:getcwd)))))
+    (when depot-root
+      (car (last (pathname-directory
+                  (uiop:ensure-directory-pathname depot-root)))))))
+
 (defun mcp-call (tool-name args-ht session-id &key (host "127.0.0.1") (port 8090))
   "Call MCP tool via daemon HTTP. Returns result text string."
   (let* ((url (format nil "http://~A:~A/mcp" host port))
@@ -338,12 +349,15 @@
           (gethash "id" request) 2
           (gethash "method" request) "tools/call"
           (gethash "params" request) params)
-    (let ((body (with-output-to-string (s) (yason:encode request s))))
+    (let ((body (with-output-to-string (s) (yason:encode request s)))
+          (depot (detect-cli-depot)))
       (multiple-value-bind (body-bytes status)
           (dex:post url
                     :content body
                     :headers `(("Content-Type" . "application/json")
-                               ("Mcp-Session-Id" . ,session-id))
+                               ("Mcp-Session-Id" . ,session-id)
+                               ,@(when depot
+                                   `(("X-Depot" . ,depot))))
                     :connect-timeout 5
                     :read-timeout 30
                     :force-binary t)

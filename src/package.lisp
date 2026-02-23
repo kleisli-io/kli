@@ -7,7 +7,9 @@
 
 (in-package #:kli)
 
-(defvar *version* "0.2.0")
+(defvar *version*
+  (or (ignore-errors (asdf:component-version (asdf:find-system "kli")))
+      "0.2.2"))
 
 (defvar *verbose* nil
   "When true, emit informational log messages to *error-output*.

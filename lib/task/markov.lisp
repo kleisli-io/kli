@@ -2,15 +2,13 @@
 ;;;;
 ;;;; Provides probabilistic and information-theoretic metrics over tasks:
 ;;;; - Action functor: efficiency α = φ/Q
-;;;; - Event Markov kernel: P(event-type-j | event-type-i)
 ;;;; - Shannon entropy and mutual information
 ;;;; - Organization indicator (M_c phase transition)
 ;;;; - Affinity scoring with learned weights
-;;;; - Coalgebraic bisimulation quotient for sessions
-;;;; - Active inference: missing edge detection + free energy reduction
+;;;; - Session fingerprinting and archetype classification
+;;;; - Missing edge detection
 ;;;;
 ;;;; All functions operate on task events and state from the CRDT layer.
-;;;; Validated against live data: 164 tasks, 7163 events, 214 sessions.
 
 (in-package #:task)
 
@@ -30,29 +28,6 @@
          (edges (length (ors-members (task-state-edges state))))
          (phi (+ obs files edges)))
     (values (float (/ phi q)) phi q)))
-
-;;; ============================================================
-;;; Event Markov Kernel: P(event-type-j | event-type-i)
-;;; First-order transition matrix over event types within a task
-;;; ============================================================
-
-(defun compute-event-markov-kernel (events)
-  "Compute first-order Markov transition matrix from event stream.
-   Returns hash-table: (type-from . type-to) → probability."
-  (let ((transitions (make-hash-table :test 'equal))
-        (counts (make-hash-table :test 'equal))
-        (sorted (sort (copy-list events) #'< :key #'event-timestamp)))
-    (loop for (e1 e2) on sorted while e2
-          for t1 = (event-type e1)
-          for t2 = (event-type e2)
-          do (incf (gethash (cons t1 t2) transitions 0))
-             (incf (gethash t1 counts 0)))
-    (let ((kernel (make-hash-table :test 'equal)))
-      (maphash (lambda (pair count)
-                 (setf (gethash pair kernel)
-                       (float (/ count (gethash (car pair) counts 1)))))
-               transitions)
-      kernel)))
 
 ;;; ============================================================
 ;;; Shannon Channel Capacity
@@ -159,19 +134,8 @@
     score))
 
 ;;; ============================================================
-;;; Coalgebraic Bisimulation Quotient
-;;; Session fingerprinting and equivalence class computation
+;;; Session Fingerprinting and Archetype Classification
 ;;; ============================================================
-
-(defun cosine-similarity (v1 v2)
-  "Cosine similarity between two vectors. Returns value in [-1, 1]."
-  (let ((dot 0.0) (mag1 0.0) (mag2 0.0))
-    (dotimes (i (length v1))
-      (incf dot (* (aref v1 i) (aref v2 i)))
-      (incf mag1 (* (aref v1 i) (aref v1 i)))
-      (incf mag2 (* (aref v2 i) (aref v2 i))))
-    (if (or (zerop mag1) (zerop mag2)) 0.0
-        (float (/ dot (* (sqrt mag1) (sqrt mag2)))))))
 
 (defun build-session-fingerprints (all-tasks &key (min-events 10))
   "Build behavioral fingerprints for all sessions across tasks.
@@ -215,59 +179,6 @@
             (float (/ task-count 10.0))
             (float (/ (getf fp :total) 200.0)))))
 
-(defun bisimulation-quotient (fingerprints &key (threshold 0.95))
-  "Compute bisimulation quotient Agent/~ using cosine similarity threshold.
-   FINGERPRINTS is hash from build-session-fingerprints.
-   Returns plist (:total-sessions N :classes N :reduction X
-                  :class-sizes list :class-profiles list)."
-  (let ((sessions nil)
-        (parent (make-hash-table :test 'equal)))
-    (maphash (lambda (id fp)
-               (push (cons id (fingerprint-to-vector fp)) sessions)
-               (setf (gethash id parent) id))
-             fingerprints)
-    (labels ((find-root (x)
-               (if (equal x (gethash x parent)) x
-                   (let ((r (find-root (gethash x parent))))
-                     (setf (gethash x parent) r) r)))
-             (union-sets (a b)
-               (let ((ra (find-root a)) (rb (find-root b)))
-                 (unless (equal ra rb) (setf (gethash ra parent) rb)))))
-      (let ((n (length sessions)))
-        (loop for i from 0 below n
-              for (id-a . vec-a) = (nth i sessions)
-              do (loop for j from (1+ i) below n
-                       for (id-b . vec-b) = (nth j sessions)
-                       when (>= (cosine-similarity vec-a vec-b) threshold)
-                       do (union-sets id-a id-b)))
-        (let ((classes (make-hash-table :test 'equal)))
-          (dolist (s sessions)
-            (push s (gethash (find-root (car s)) classes nil)))
-          (let ((profiles nil))
-            (maphash (lambda (root members)
-                       (declare (ignore root))
-                       (let* ((size (length members))
-                              (vecs (mapcar #'cdr members))
-                              (mean-vec (make-array 6 :initial-element 0.0)))
-                         (dolist (v vecs)
-                           (dotimes (i 6) (incf (aref mean-vec i) (aref v i))))
-                         (dotimes (i 6) (setf (aref mean-vec i) (/ (aref mean-vec i) size)))
-                         (push (list :size size
-                                     :tool% (float (aref mean-vec 0))
-                                     :obs% (float (aref mean-vec 1))
-                                     :fork% (float (aref mean-vec 2))
-                                     :join% (float (aref mean-vec 3)))
-                               profiles)))
-                     classes)
-            (let ((sorted-profiles (sort profiles #'> :key (lambda (p) (getf p :size)))))
-              (list :total-sessions n
-                    :classes (hash-table-count classes)
-                    :reduction (if (plusp (hash-table-count classes))
-                                   (float (/ n (hash-table-count classes)))
-                                   0.0)
-                    :class-sizes (mapcar (lambda (p) (getf p :size)) sorted-profiles)
-                    :class-profiles sorted-profiles))))))))
-
 (defun classify-session-archetype (fp &key (builder-tool-threshold 0.30))
   "Classify a session fingerprint as :builder or :observer.
    Builders have tool% > threshold; observers do not."
@@ -276,7 +187,7 @@
     (if (> tool% builder-tool-threshold) :builder :observer)))
 
 ;;; ============================================================
-;;; Active Inference: Missing Edge Detection + Free Energy
+;;; Missing Edge Detection
 ;;; ============================================================
 
 (defun find-missing-edges (all-tasks &key (min-count 2))
@@ -328,80 +239,6 @@
                    (push (list :from (car pair) :to (cdr pair) :count count) pairs)))
                off-edges)
       (sort pairs #'> :key (lambda (x) (getf x :count))))))
-
-(defun free-energy-reduction (all-tasks)
-  "Compute coherence improvement from adding suggested missing edges.
-   ALL-TASKS is hash: task-name → (:events events :state state :depot depot-name).
-   Returns plist (:current-coherence X :new-coherence Y :improvement Z
-                  :suggested-edges N :transitions-fixed N)."
-  (let ((session-tasks (make-hash-table :test 'equal))
-        (graph-edges (make-hash-table :test 'equal))
-        (off-edge-counts (make-hash-table :test 'equal)))
-    ;; Collect flows and edges
-    (maphash (lambda (name data)
-               (let* ((events (getf data :events))
-                      (state (getf data :state)))
-                 (dolist (e events)
-                   (when (eq (event-type e) :session.join)
-                     (let ((session (event-session e)))
-                       (when session
-                         (push (cons (event-timestamp e) name)
-                               (gethash session session-tasks nil))))))
-                 (dolist (edge (ors-members (task-state-edges state)))
-                   (let* ((decoded (decode-edge edge))
-                          (target (car decoded)))
-                     (when (find #\: target)
-                       (setf target (subseq target (1+ (position #\: target)))))
-                     (setf (gethash (cons name target) graph-edges) t)
-                     (setf (gethash (cons target name) graph-edges) t)))))
-             all-tasks)
-    ;; Count transitions
-    (let ((total 0) (off 0) (would-fix 0))
-      (maphash (lambda (session tasks)
-                 (declare (ignore session))
-                 (let ((sorted (sort (copy-list tasks) #'< :key #'car)))
-                   (when (> (length sorted) 1)
-                     (let ((deduped (list (first sorted))))
-                       (dolist (tk (rest sorted))
-                         (unless (equal (cdr tk) (cdr (first deduped)))
-                           (push tk deduped)))
-                       (setf deduped (nreverse deduped))
-                       (loop for (a b) on deduped while b
-                             for from = (cdr a) for to = (cdr b)
-                             do (incf total)
-                                (unless (gethash (cons from to) graph-edges)
-                                  (incf off)
-                                  (incf (gethash (cons from to) off-edge-counts 0))))))))
-               session-tasks)
-      ;; Count how many off-transitions would be fixed by adding suggested edges
-      (maphash (lambda (session tasks)
-                 (declare (ignore session))
-                 (let ((sorted (sort (copy-list tasks) #'< :key #'car)))
-                   (when (> (length sorted) 1)
-                     (let ((deduped (list (first sorted))))
-                       (dolist (tk (rest sorted))
-                         (unless (equal (cdr tk) (cdr (first deduped)))
-                           (push tk deduped)))
-                       (setf deduped (nreverse deduped))
-                       (loop for (a b) on deduped while b
-                             for from = (cdr a) for to = (cdr b)
-                             unless (gethash (cons from to) graph-edges)
-                             when (>= (gethash (cons from to) off-edge-counts 0) 2)
-                             do (incf would-fix))))))
-               session-tasks)
-      (let ((suggested (let ((n 0))
-                         (maphash (lambda (pair count)
-                                    (declare (ignore pair))
-                                    (when (>= count 2) (incf n)))
-                                  off-edge-counts)
-                         n))
-            (current-coherence (float (/ (- total off) (max total 1))))
-            (new-coherence (float (/ (- total (- off would-fix)) (max total 1)))))
-        (list :current-coherence current-coherence
-              :new-coherence new-coherence
-              :improvement (- new-coherence current-coherence)
-              :suggested-edges suggested
-              :transitions-fixed would-fix)))))
 
 ;;; ============================================================
 ;;; Batch Loading
@@ -510,9 +347,3 @@
   (get-cached-markov-data
    :missing-edges
    (lambda () (find-missing-edges (cached-all-tasks)))))
-
-(defun cached-free-energy ()
-  "Get cached free energy reduction analysis."
-  (get-cached-markov-data
-   :free-energy
-   (lambda () (free-energy-reduction (cached-all-tasks)))))

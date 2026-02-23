@@ -77,36 +77,6 @@
       (is (>= alpha 0.0))
       (is (>= phi 0)))))
 
-;;; --- Event Markov Kernel ---
-
-(test compute-event-markov-kernel-basic
-  "Markov kernel computes transition probabilities summing to 1 per source."
-  (let* ((events (make-test-events :obs-count 3 :tool-count 5 :fork-count 1))
-         (kernel (compute-event-markov-kernel events))
-         (source-sums (make-hash-table :test 'equal)))
-    ;; Kernel should be non-empty
-    (is (plusp (hash-table-count kernel)))
-    ;; Sum probabilities per source type
-    (maphash (lambda (pair prob)
-               (incf (gethash (car pair) source-sums 0.0) prob))
-             kernel)
-    ;; Each source type's outgoing probabilities should sum to ~1.0
-    (maphash (lambda (source total)
-               (declare (ignore source))
-               (is (< (abs (- total 1.0)) 0.01)
-                   "Outgoing probabilities should sum to 1.0"))
-             source-sums)))
-
-(test compute-event-markov-kernel-empty
-  "Markov kernel on empty or single event returns empty hash."
-  (let ((kernel (compute-event-markov-kernel nil)))
-    (is (zerop (hash-table-count kernel))))
-  (let* ((events (list (make-event :id "e1" :timestamp 100 :session "s1"
-                                   :clock (make-vector-clock) :type :task.create
-                                   :data (list :name "t" :description "t"))))
-         (kernel (compute-event-markov-kernel events)))
-    (is (zerop (hash-table-count kernel)))))
-
 ;;; --- Shannon Entropy ---
 
 (test event-type-entropy-basic
@@ -225,24 +195,6 @@
     ;; Different weights should produce different scores
     (is (/= score-alpha score-edges))))
 
-;;; --- Cosine Similarity ---
-
-(test cosine-similarity-identical
-  "Identical vectors have similarity 1.0."
-  (is (< (abs (- 1.0 (cosine-similarity (vector 1.0 2.0 3.0) (vector 1.0 2.0 3.0)))) 0.001)))
-
-(test cosine-similarity-orthogonal
-  "Orthogonal vectors have similarity 0.0."
-  (is (< (abs (cosine-similarity (vector 1.0 0.0) (vector 0.0 1.0))) 0.001)))
-
-(test cosine-similarity-parallel
-  "Parallel vectors (scaled) have similarity 1.0."
-  (is (< (abs (- 1.0 (cosine-similarity (vector 1.0 2.0 3.0) (vector 2.0 4.0 6.0)))) 0.001)))
-
-(test cosine-similarity-zero-vector
-  "Zero vector returns 0.0 (no division by zero)."
-  (is (= 0.0 (cosine-similarity (vector 0.0 0.0) (vector 1.0 1.0)))))
-
 ;;; --- Session Fingerprinting ---
 
 (test fingerprint-to-vector-dimensions
@@ -280,57 +232,6 @@
                                  ht)
                   :total 35 :obs 20 :forks 0)))
     (is (eq :observer (classify-session-archetype fp)))))
-
-;;; --- Bisimulation Quotient ---
-
-(test bisimulation-quotient-identical-sessions
-  "Identical sessions collapse to one equivalence class."
-  (let ((fps (make-hash-table :test 'equal)))
-    ;; Two sessions with identical fingerprints
-    (let ((fp-template (list :tasks '("t1")
-                             :type-counts (let ((ht (make-hash-table :test 'equal)))
-                                            (setf (gethash :tool.call ht) 50
-                                                  (gethash :observation ht) 10)
-                                            ht)
-                             :total 60 :obs 10 :forks 0)))
-      (setf (gethash "s1" fps) fp-template)
-      ;; Same counts → same fingerprint → same class
-      (let ((fp2 (list :tasks '("t1")
-                       :type-counts (let ((ht (make-hash-table :test 'equal)))
-                                      (setf (gethash :tool.call ht) 50
-                                            (gethash :observation ht) 10)
-                                      ht)
-                       :total 60 :obs 10 :forks 0)))
-        (setf (gethash "s2" fps) fp2)))
-    (let ((result (bisimulation-quotient fps :threshold 0.99)))
-      (is (= 1 (getf result :classes)))
-      (is (= 2 (getf result :total-sessions)))
-      (is (= 2.0 (getf result :reduction))))))
-
-(test bisimulation-quotient-different-sessions
-  "Very different sessions form separate classes."
-  (let ((fps (make-hash-table :test 'equal)))
-    ;; Builder session: high tool%
-    (setf (gethash "builder" fps)
-          (list :tasks '("t1")
-                :type-counts (let ((ht (make-hash-table :test 'equal)))
-                               (setf (gethash :tool.call ht) 90
-                                     (gethash :observation ht) 5
-                                     (gethash :session.join ht) 5)
-                               ht)
-                :total 100 :obs 5 :forks 0))
-    ;; Observer session: high obs%
-    (setf (gethash "observer" fps)
-          (list :tasks '("t1" "t2" "t3" "t4" "t5")
-                :type-counts (let ((ht (make-hash-table :test 'equal)))
-                               (setf (gethash :tool.call ht) 2
-                                     (gethash :observation ht) 80
-                                     (gethash :session.join ht) 18)
-                               ht)
-                :total 100 :obs 80 :forks 0))
-    (let ((result (bisimulation-quotient fps :threshold 0.95)))
-      (is (= 2 (getf result :classes)))
-      (is (= 1.0 (getf result :reduction))))))
 
 ;;; --- Load All Tasks ---
 
@@ -441,6 +342,4 @@
               (is (numberp (getf feats :alpha))))
             (let ((score (affinity-score events state)))
               (is (>= score 0.0))
-              (is (<= score 1.0)))
-            (let ((kernel (compute-event-markov-kernel events)))
-              (is (hash-table-p kernel)))))))))
+              (is (<= score 1.0)))))))))

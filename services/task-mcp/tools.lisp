@@ -186,22 +186,32 @@ Use :related-to for cross-depot references."
   ;; Validate name before creating
   (let ((validation-error (validate-name-or-error name)))
     (or validation-error
-        (let ((full-name (ensure-date-prefix name)))
+        (let* ((full-name (ensure-date-prefix name))
+               ;; Resolve parent and edge type FIRST (needed for depot inheritance)
+               (parent-id (let ((raw (or (when (and from (> (length from) 0)) from)
+                                          *current-task-id*)))
+                            (when raw (resolve-task-id raw))))
+               (etype (or (when (and edge_type (> (length edge_type) 0)) edge_type)
+                          "phase-of"))
+               ;; Defense-in-depth: for phase-of edges, inherit depot from parent
+               ;; rather than relying on session-depot() which is fragile under
+               ;; concurrent sessions.  Matches TQ :fork handler (query.lisp).
+               (explicit-depot (when (and depot (> (length depot) 0)) depot))
+               (inherited-depot
+                 (when (and (null explicit-depot)
+                            (string-equal etype "phase-of")
+                            parent-id
+                            (task:qualified-id-p parent-id))
+                   (multiple-value-bind (d b) (task:parse-qualified-id parent-id)
+                     (declare (ignore b))
+                     (unless (string= d "default") d)))))
           (multiple-value-bind (target-depot qualified-id)
-              (resolve-depot-for-creation
-               (when (and depot (> (length depot) 0)) depot)
-               full-name)
+              (resolve-depot-for-creation (or inherited-depot explicit-depot) full-name)
+            ;; Validate cross-depot edge BEFORE creating directory (avoid orphans)
+            (when parent-id
+              (validate-cross-depot-edge parent-id qualified-id etype))
             (let* ((dir (task:ensure-task-directory qualified-id))
-                   ;; Resolve parent-id to qualified ID (handles unqualified IDs)
-                   (parent-id (let ((raw (or (when (and from (> (length from) 0)) from)
-                                             *current-task-id*)))
-                                (when raw (resolve-task-id raw))))
-                   (etype (or (when (and edge_type (> (length edge_type) 0)) edge_type)
-                              "phase-of"))
                    (prev *current-task-id*))
-              ;; Validate cross-depot edge semantics
-              (when parent-id
-                (validate-cross-depot-edge parent-id qualified-id etype))
               ;; Create child task
               (setf *current-task-id* qualified-id)
               (finalize-session-context)  ;; Save before emit-event
@@ -301,7 +311,8 @@ Use to peek at any task without switching context. See task_bootstrap to join a 
    HTTP mode: reads from session context registry (set by register-pid hook).
    STDIO mode: reads CLAUDE_CODE_* env vars directly (inherited from Claude)."
   (or (when *http-mode*
-        (let ((ctx (gethash *session-id* *session-contexts*)))
+        (let ((ctx (bt:with-lock-held (*session-contexts-lock*)
+                     (gethash *session-id* *session-contexts*))))
           (when (and ctx (ctx-team-name ctx))
             (list :team-name (ctx-team-name ctx)
                   :agent-name (ctx-agent-name ctx)
@@ -524,13 +535,21 @@ depends-on (JSON array of task IDs), enables (JSON array), related-to (JSON arra
     ((name string "Child task name")
      (reason string "Why this subtask is needed" ""))
   "Spawn a child task from the current task.
-Uses current depot for the child (same as parent)."
+Uses parent's depot for the child (phase-of semantics)."
   ;; Validate name before creating
   (let ((validation-error (validate-name-or-error name)))
     (or validation-error
-        (let ((full-name (ensure-date-prefix name)))
+        (let* ((full-name (ensure-date-prefix name))
+               ;; Defense-in-depth: inherit depot from parent task ID directly
+               ;; instead of relying on session-depot() fallback chain.
+               ;; Matches TQ :fork handler pattern (query.lisp).
+               (parent-depot
+                 (when (task:qualified-id-p *current-task-id*)
+                   (multiple-value-bind (d b) (task:parse-qualified-id *current-task-id*)
+                     (declare (ignore b))
+                     (unless (string= d "default") d)))))
           (multiple-value-bind (target-depot qualified-id)
-              (resolve-depot-for-creation nil full-name)  ; nil = use current depot
+              (resolve-depot-for-creation parent-depot full-name)
             (let ((child-dir (task:ensure-task-directory qualified-id))
                   (parent *current-task-id*))
               ;; Create child task

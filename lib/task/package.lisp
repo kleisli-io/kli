@@ -10,6 +10,7 @@
    #:event-log #:make-event-log
    #:event-log-events #:event-log-clock #:event-log-path
    #:elog-append #:elog-append-event #:elog-save #:elog-load #:elog-merge
+   #:*elog-cache*
    ;; Edge Encoding
    #:encode-edge #:decode-edge #:edge-targets
    #:*child-bearing-edge-types*
@@ -101,19 +102,15 @@
    #:graph-to-dashboard-json
    ;; Markov Category Enrichment
    #:action-functor
-   #:compute-event-markov-kernel
    #:event-type-entropy
    #:mutual-information-bigrams
    #:organization-indicator
    #:task-features
    #:affinity-score
-   #:cosine-similarity
    #:build-session-fingerprints
    #:fingerprint-to-vector
-   #:bisimulation-quotient
    #:classify-session-archetype
    #:find-missing-edges
-   #:free-energy-reduction
    ;; Markov Batch Loading & Caching
    #:load-all-tasks
    #:*markov-cache* #:*markov-cache-ttl*
@@ -121,4 +118,4 @@
    #:clear-markov-cache #:invalidate-markov-cache
    #:cached-all-tasks #:cached-task-metrics
    #:cached-session-fingerprints
-   #:cached-missing-edges #:cached-free-energy))
+   #:cached-missing-edges))

@@ -45,6 +45,13 @@
   "Registry of session contexts, keyed by session-id.
    Used for HTTP multi-session support.")
 
+(defvar *session-contexts-lock* (bt:make-lock "session-contexts")
+  "Lock for *session-contexts* hash table.
+   SBCL hash tables are not thread-safe; concurrent gethash/setf from
+   Hunchentoot request threads can return wrong entries.  All gethash,
+   setf-gethash, maphash, and remhash on *session-contexts* must be
+   wrapped in bt:with-lock-held on this lock.")
+
 (defvar *http-mode* nil
   "T when running in HTTP transport mode, NIL for stdio.")
 
@@ -55,11 +62,12 @@
 
 (defun get-session-context (session-id)
   "Get or create session context for SESSION-ID."
-  (or (gethash session-id *session-contexts*)
-      (let ((ctx (make-session-context
-                  :id session-id
-                  :vector-clock (crdt:make-vector-clock))))
-        (setf (gethash session-id *session-contexts*) ctx))))
+  (bt:with-lock-held (*session-contexts-lock*)
+    (or (gethash session-id *session-contexts*)
+        (let ((ctx (make-session-context
+                    :id session-id
+                    :vector-clock (crdt:make-vector-clock))))
+          (setf (gethash session-id *session-contexts*) ctx)))))
 
 (defun save-session-context (session-id)
   "Save current globals to session context registry.
@@ -97,18 +105,20 @@
    Called opportunistically to prevent memory leaks."
   (let* ((cutoff (- (get-universal-time) (* max-age-hours 60 60)))
          (to-remove nil))
-    (maphash (lambda (id ctx)
-               (when (< (ctx-last-active ctx) cutoff)
-                 (push id to-remove)))
-             *session-contexts*)
-    (dolist (id to-remove)
-      (remhash id *session-contexts*))
+    (bt:with-lock-held (*session-contexts-lock*)
+      (maphash (lambda (id ctx)
+                 (when (< (ctx-last-active ctx) cutoff)
+                   (push id to-remove)))
+               *session-contexts*)
+      (dolist (id to-remove)
+        (remhash id *session-contexts*)))
     (length to-remove)))
 
 (defun register-claude-pid (session-id pid &key depot team-name agent-name agent-type)
   "Register Claude Code's PID for a session.
    Called by SessionStart hook to correlate HTTP session with Claude process.
    When DEPOT is non-nil, stores per-session depot for task creation.
+   Also pushes depot to any existing MCP sessions that lack one (bridge push).
    When TEAM-NAME is non-nil, also stores agent team metadata."
   (let ((ctx (get-session-context session-id)))
     (setf (ctx-claude-pid ctx) pid)
@@ -125,28 +135,194 @@
         (format nil "Registered PID ~D for session ~A (depot: ~A)"
                 pid session-id (or depot "inherited")))))
 
+;;; ==========================================================================
+;;; TCP Peer PID Resolution (Linux /proc-based)
+;;; ==========================================================================
+;;; Resolves which Claude Code process owns an MCP HTTP connection by tracing
+;;; the TCP connection back to its owning PID.
+;;;
+;;; Linux: remote-port → /proc/net/tcp (inode) → /proc/<pid>/fd/ (socket match)
+;;; macOS: remote-port → lsof -i TCP (PID owning connection)
+;;;
+;;; Called once per MCP session in ensure-session-context.  Result is latched
+;;; on ctx-claude-pid so subsequent requests skip the scan.  Only registered
+;;; Claude PIDs are checked (typically 1-3), so overhead is minimal.
+;;;
+;;; Correctness argument: each TCP connection is owned by exactly one PID.
+;;; Parallel sessions have different PIDs and different TCP connections,
+;;; so the mapping is unambiguous on both platforms.
+
+(defun find-client-socket-inode (client-port server-port)
+  "Find the socket inode for the CLIENT side of a localhost TCP connection.
+   Reads /proc/net/tcp for the entry where:
+     - local_port = CLIENT-PORT (the client's ephemeral port)
+     - remote_port = SERVER-PORT (our daemon port)
+     - state = 01 (ESTABLISHED)
+   Returns the inode as an integer, or NIL if not found."
+  (handler-case
+      (with-open-file (s "/proc/net/tcp" :if-does-not-exist nil)
+        (when s
+          (read-line s nil nil)  ; skip header
+          (loop for line = (read-line s nil nil)
+                while line
+                do (let* ((trimmed (string-trim '(#\Space #\Tab) line))
+                          (parts (remove "" (uiop:split-string trimmed)
+                                         :test #'string=)))
+                     ;; Fields: [0]=sl: [1]=local_addr:port [2]=rem_addr:port
+                     ;;         [3]=state ... [9]=inode
+                     (when (>= (length parts) 10)
+                       (let* ((local-str (nth 1 parts))
+                              (remote-str (nth 2 parts))
+                              (state (nth 3 parts))
+                              (colon-l (position #\: local-str :from-end t))
+                              (colon-r (position #\: remote-str :from-end t)))
+                         (when (and (string= state "01") colon-l colon-r)
+                           (let ((lport (ignore-errors
+                                          (parse-integer local-str
+                                                         :start (1+ colon-l)
+                                                         :radix 16)))
+                                 (rport (ignore-errors
+                                          (parse-integer remote-str
+                                                         :start (1+ colon-r)
+                                                         :radix 16))))
+                             (when (and (eql lport client-port)
+                                        (eql rport server-port))
+                               (return (ignore-errors
+                                         (parse-integer
+                                          (nth 9 parts)))))))))))))
+    (error () nil)))
+
+(defun pid-owns-socket-p (pid inode)
+  "Check if PID owns a socket with the given INODE.
+   Scans /proc/<pid>/fd/0 through /proc/<pid>/fd/255 for a symlink
+   matching socket:[INODE].  Returns T if found."
+  (handler-case
+      (let ((target (format nil "socket:[~D]" inode)))
+        (loop for fd from 0 below 256
+              for link = (ignore-errors
+                           (sb-posix:readlink
+                            (format nil "/proc/~D/fd/~D" pid fd)))
+              when (and link (string= link target))
+              return t))
+    (error () nil)))
+
+(defun resolve-peer-pid/linux (remote-port server-port)
+  "Linux implementation: trace TCP connection via /proc/net/tcp inodes.
+   Returns the registered Claude PID owning the connection, or NIL."
+  (let ((inode (find-client-socket-inode remote-port server-port)))
+    (when inode
+      ;; Only scan registered Claude PIDs (small set)
+      (bt:with-lock-held (*session-contexts-lock*)
+        (block found
+          (maphash
+           (lambda (sid ctx)
+             (declare (ignore sid))
+             (let ((cpid (ctx-claude-pid ctx)))
+               (when (and cpid (pid-owns-socket-p cpid inode))
+                 (return-from found cpid))))
+           *session-contexts*))))))
+
+(defun resolve-peer-pid/macos (remote-port server-port)
+  "macOS implementation: use lsof to find PID owning a TCP connection.
+   Runs: lsof -i TCP@127.0.0.1:<remote-port> -nP -sTCP:ESTABLISHED -t
+   Returns the PID if it matches a registered Claude PID, or NIL.
+   The -t flag outputs bare PIDs (one per line), -nP suppresses name
+   resolution, -sTCP:ESTABLISHED filters to active connections."
+  (declare (ignore server-port))
+  (handler-case
+      (let ((output (uiop:run-program
+                     (list "lsof" "-i"
+                           (format nil "TCP@127.0.0.1:~D" remote-port)
+                           "-nP" "-sTCP:ESTABLISHED" "-t")
+                     :output :string
+                     :error-output nil
+                     :ignore-error-status t)))
+        (when (and output (plusp (length output)))
+          ;; lsof -t outputs one PID per line; check each against registered PIDs
+          (let ((pids (loop for line in (uiop:split-string output :separator '(#\Newline))
+                            for trimmed = (string-trim '(#\Space #\Tab #\Return) line)
+                            when (plusp (length trimmed))
+                            collect (ignore-errors (parse-integer trimmed)))))
+            (bt:with-lock-held (*session-contexts-lock*)
+              (block found
+                (dolist (candidate-pid pids)
+                  (when candidate-pid
+                    (maphash
+                     (lambda (sid ctx)
+                       (declare (ignore sid))
+                       (when (eql (ctx-claude-pid ctx) candidate-pid)
+                         (return-from found candidate-pid)))
+                     *session-contexts*))))))))
+    (error () nil)))
+
+(defun resolve-peer-pid ()
+  "Resolve the PID of the process making the current HTTP request.
+   Dispatches to platform-specific implementation:
+   - Linux: /proc/net/tcp socket inode tracing
+   - macOS: lsof -i TCP for connection ownership
+   Returns integer PID or NIL.  Only called in HTTP mode."
+  (handler-case
+      (when *http-mode*
+        (let ((remote-port
+                (ignore-errors
+                  (funcall (find-symbol "REMOTE-PORT*" "HUNCHENTOOT"))))
+              (server-port
+                (let ((p (uiop:getenv "TASK_MCP_PORT")))
+                  (if (and p (plusp (length p)))
+                      (parse-integer p :junk-allowed t)
+                      8090))))
+          (when (and remote-port server-port)
+            (if (probe-file "/proc/net/tcp")
+                (resolve-peer-pid/linux remote-port server-port)
+                (resolve-peer-pid/macos remote-port server-port)))))
+    (error () nil)))
+
+(defun current-http-depot ()
+  "Get depot name from X-Depot header of current HTTP request.
+   Returns depot name string or NIL.  Used by CLI invocations which detect
+   their depot from CWD and send it as a per-request header."
+  (when *http-mode*
+    (ignore-errors
+     (let ((request (symbol-value (find-symbol "*REQUEST*" "HUNCHENTOOT"))))
+       (when request
+         (let ((depot (funcall (find-symbol "HEADER-IN" "HUNCHENTOOT")
+                               "X-Depot" request)))
+           (when (and depot (plusp (length depot)))
+             depot)))))))
+
 (defun session-depot ()
   "Return the depot for the current session.
-   In HTTP mode: reads per-session depot from context (set by register-pid).
-   When MCP session has no depot, bridges via PID to find the depot registered
-   by the SessionStart hook (which uses a different session ID namespace).
-   Falls back to global *current-depot* (set at daemon startup).
-   This ensures sessions in different depots create tasks in the correct depot."
-  (or (when *http-mode*
-        (let ((ctx (gethash *session-id* *session-contexts*)))
-          (when ctx
-            (or (ctx-depot ctx)
-                ;; Bridge: find depot from context registered with same PID
-                (when (ctx-claude-pid ctx)
-                  (block found
-                    (maphash (lambda (sid other-ctx)
-                               (declare (ignore sid))
-                               (when (and (ctx-depot other-ctx)
-                                          (ctx-claude-pid other-ctx)
-                                          (eql (ctx-claude-pid other-ctx)
-                                               (ctx-claude-pid ctx)))
-                                 (return-from found (ctx-depot other-ctx))))
-                             *session-contexts*)))))))
+   Priority chain:
+   0. X-Depot HTTP header (CLI per-invocation, highest priority)
+   1. Per-session ctx-depot from context (set by register-pid or latched)
+   2. PID bridge: find depot from context registered with same Claude PID
+      (MCP sessions get ctx-claude-pid set by ensure-session-context via
+      /proc/net/tcp inode tracing on Linux, lsof on macOS)
+   3. *latest-registered-depot* (last SessionStart hook, process-wide)
+   4. task:*current-depot* (daemon startup depot)
+   Levels 0-2 are HTTP-mode only."
+  (or (current-http-depot)
+      (when *http-mode*
+        (bt:with-lock-held (*session-contexts-lock*)
+          (let ((ctx (gethash *session-id* *session-contexts*)))
+            (when ctx
+              (or (ctx-depot ctx)
+                  ;; PID bridge: find depot from context with matching Claude PID.
+                  ;; MCP sessions get ctx-claude-pid resolved in ensure-session-context
+                  ;; via /proc/net/tcp → /proc/<pid>/fd/ socket inode tracing.
+                  ;; Result latched on ctx-depot so this scan runs at most once.
+                  (when (ctx-claude-pid ctx)
+                    (block found
+                      (maphash (lambda (sid other-ctx)
+                                 (declare (ignore sid))
+                                 (when (and (ctx-depot other-ctx)
+                                            (ctx-claude-pid other-ctx)
+                                            (eql (ctx-claude-pid other-ctx)
+                                                 (ctx-claude-pid ctx)))
+                                   (let ((depot (ctx-depot other-ctx)))
+                                     (setf (ctx-depot ctx) depot)
+                                     (return-from found depot))))
+                               *session-contexts*))))))))
       *latest-registered-depot*
       task:*current-depot*))
 
@@ -165,6 +341,8 @@
 (defun ensure-session-context ()
   "Ensure the correct session context is loaded for the current request.
    In HTTP mode: loads context from registry based on Mcp-Session-Id header.
+   Also resolves peer PID for MCP sessions that lack one (once per session,
+   via /proc/net/tcp socket inode tracing).
    In stdio mode: no-op (globals already correct).
 
    Call this at the start of any operation that depends on session state.
@@ -176,7 +354,20 @@
           ;; acceptor-dispatch-request) mean each request starts fresh.
           ;; The old skip optimization was racy: another thread could SETF
           ;; *session-id* between our comparison and our read of *current-task-id*.
-          (load-session-context http-session-id))
+          (load-session-context http-session-id)
+          ;; Resolve peer PID for MCP sessions that don't have one yet.
+          ;; This bridges MCP sessions to registered Claude sessions by tracing
+          ;; the TCP connection through /proc/net/tcp → /proc/<pid>/fd/.
+          ;; Once resolved and latched on ctx-claude-pid, the PID bridge in
+          ;; session-depot (Level 2a) finds the correct depot.
+          (unless *claude-pid*
+            (let ((peer-pid (resolve-peer-pid)))
+              (when peer-pid
+                (setf *claude-pid* peer-pid)
+                (bt:with-lock-held (*session-contexts-lock*)
+                  (let ((ctx (gethash http-session-id *session-contexts*)))
+                    (when ctx
+                      (setf (ctx-claude-pid ctx) peer-pid))))))))
         (or http-session-id *session-id*))
       *session-id*))
 
@@ -251,6 +442,9 @@
               :data data))
          (path (task:task-events-path *current-task-id*)))
     (task:elog-append-event path ev)
+    ;; Invalidate per-request elog cache for this task (we just appended an event)
+    (when task:*elog-cache*
+      (remhash (namestring path) task:*elog-cache*))
     ;; Invalidate graph/infos caches on structural mutations.
     ;; Non-structural events (observation, session.join, tool.call) are far more
     ;; frequent and don't affect graph topology — skip them to preserve cache.
@@ -282,15 +476,17 @@
         (after-count 0))
     (maphash (lambda (k v) (declare (ignore k v)) (incf before-count))
              (crdt:vc-entries *session-vc*))
-    (dolist (sid session-ids)
-      (let ((ctx (gethash sid *session-contexts*)))
-        (when (and ctx (ctx-vector-clock ctx))
-          (setf *session-vc* (crdt:vc-merge *session-vc* (ctx-vector-clock ctx))))))
+    (bt:with-lock-held (*session-contexts-lock*)
+      (dolist (sid session-ids)
+        (let ((ctx (gethash sid *session-contexts*)))
+          (when (and ctx (ctx-vector-clock ctx))
+            (setf *session-vc* (crdt:vc-merge *session-vc* (ctx-vector-clock ctx)))))))
     (maphash (lambda (k v) (declare (ignore k v)) (incf after-count))
              (crdt:vc-entries *session-vc*))
     ;; Update context with merged VC
-    (let ((ctx (gethash *session-id* *session-contexts*)))
-      (when ctx (setf (ctx-vector-clock ctx) *session-vc*)))
+    (bt:with-lock-held (*session-contexts-lock*)
+      (let ((ctx (gethash *session-id* *session-contexts*)))
+        (when ctx (setf (ctx-vector-clock ctx) *session-vc*))))
     (- after-count before-count)))
 
 ;;; Session file management for PostToolUse hooks
@@ -299,11 +495,10 @@
 ;;; can look up their parent's session file.
 ;;;
 ;;; PID Namespace Solution:
-;;; task-mcp runs inside bwrap with --unshare-pid, creating an isolated PID namespace.
-;;; Inside the sandbox, task-mcp sees itself as PID 2 with bwrap as PID 1.
-;;; The real Claude Code process is invisible from inside the namespace.
-;;;
-;;; Solution: The sandbox launcher (program.nix) captures PARENT_PID=$PPID before
+;;; task-mcp's sandbox uses the `daemon` combinator which OMITS --unshare-pid,
+;;; so the daemon shares the host PID namespace and can access /proc/<pid>/fd/.
+;;; PARENT_PID is still passed through as a fallback for stdio mode.
+;;; The sandbox launcher (program.nix) captures PARENT_PID=$PPID before
 ;;; entering bwrap and passes it through via --setenv. We read that env var here.
 
 (defun get-parent-pid-from-env ()
@@ -348,7 +543,9 @@
          ;; Multiple live PIDs: prefer one in current session context
          ((> (length live-pid-files) 1)
           (let* ((session-id (or *session-id* (current-http-session-id)))
-                 (ctx (when session-id (gethash session-id *session-contexts*)))
+                 (ctx (when session-id
+                        (bt:with-lock-held (*session-contexts-lock*)
+                          (gethash session-id *session-contexts*))))
                  (ctx-pid (when ctx (ctx-claude-pid ctx)))
                  (live-pids-set (make-hash-table)))
             ;; Build lookup set
@@ -414,7 +611,8 @@
       (setf (gethash "claude_pid" ht) *claude-pid*)
       (setf (gethash "timestamp" ht) (get-universal-time))
       ;; Team metadata from session context (set by P1 register-claude-pid)
-      (let ((ctx (gethash *session-id* *session-contexts*)))
+      (let ((ctx (bt:with-lock-held (*session-contexts-lock*)
+                   (gethash *session-id* *session-contexts*))))
         (when (and ctx (ctx-team-name ctx))
           (setf (gethash "team_name" ht) (ctx-team-name ctx))
           (setf (gethash "agent_name" ht) (ctx-agent-name ctx))
@@ -495,6 +693,9 @@
 
 (defvar *session-fingerprints* (make-hash-table :test 'equal)
   "Cache of session fingerprints, keyed by session-id.")
+
+(defvar *session-fingerprints-lock* (bt:make-lock "session-fingerprints")
+  "Lock for *session-fingerprints* hash table.")
 
 ;;; ==========================================================================
 ;;; Swarm Awareness: Discover Related Sessions
@@ -750,7 +951,8 @@
                 ;; Display solo sessions as before
                 (dolist (sess (nreverse solo))
                   (let* ((sid (getf sess :session-id))
-                         (fp (gethash sid *session-fingerprints*))
+                         (fp (bt:with-lock-held (*session-fingerprints-lock*)
+                               (gethash sid *session-fingerprints*)))
                          (archetype (if fp
                                         (string-downcase (symbol-name (sfp-archetype fp)))
                                         "session")))
@@ -766,11 +968,12 @@
             ;; Build session->team lookup from active session files and in-memory contexts
             (let ((session-teams (make-hash-table :test 'equal)))
               ;; From in-memory contexts (covers current process)
-              (maphash (lambda (sid ctx)
-                         (when (ctx-team-name ctx)
-                           (setf (gethash sid session-teams)
-                                 (ctx-team-name ctx))))
-                       *session-contexts*)
+              (bt:with-lock-held (*session-contexts-lock*)
+                (maphash (lambda (sid ctx)
+                           (when (ctx-team-name ctx)
+                             (setf (gethash sid session-teams)
+                                   (ctx-team-name ctx))))
+                         *session-contexts*))
               ;; From related-sessions (covers sessions discovered via files)
               (dolist (sess related-sessions)
                 (when (getf sess :team-name)
@@ -838,6 +1041,9 @@
    G-Set monotonicity guarantees obs-count only increases, so this key
    is a valid cache invalidation strategy.")
 
+(defvar *phase-embedding-cache-lock* (bt:make-lock "phase-embedding-cache")
+  "Lock for *phase-embedding-cache* hash table.")
+
 (defun get-phase-embedding-cached (task-id)
   "Get embedding for a phase's observations, cached by obs count.
    Returns nil if phase has no observations."
@@ -848,11 +1054,14 @@
          (cache-key (cons task-id obs-count)))
     (when (zerop obs-count)
       (return-from get-phase-embedding-cached nil))
-    (or (gethash cache-key *phase-embedding-cache*)
+    (or (bt:with-lock-held (*phase-embedding-cache-lock*)
+          (gethash cache-key *phase-embedding-cache*))
         (let ((emb (handler-case
                     (get-embedding (format nil "~{~A~^ | ~}" obs))
                     (error () nil))))
-          (when emb (setf (gethash cache-key *phase-embedding-cache*) emb))
+          (when emb
+            (bt:with-lock-held (*phase-embedding-cache-lock*)
+              (setf (gethash cache-key *phase-embedding-cache*) emb)))
           emb))))
 
 (defun count-to-alist (table)
@@ -912,13 +1121,15 @@
 (defun get-session-fingerprint (session-id &optional task-id)
   "Get cached fingerprint or compute fresh if stale (>5min).
    TASK-ID required if not cached."
-  (let ((cached (gethash session-id *session-fingerprints*)))
+  (let ((cached (bt:with-lock-held (*session-fingerprints-lock*)
+                  (gethash session-id *session-fingerprints*))))
     (if (and cached
              (< (- (get-universal-time) (sfp-timestamp cached)) 300))
         cached
         (when task-id
           (let ((fp (compute-session-fingerprint task-id session-id)))
-            (setf (gethash session-id *session-fingerprints*) fp)
+            (bt:with-lock-held (*session-fingerprints-lock*)
+              (setf (gethash session-id *session-fingerprints*) fp))
             fp)))))
 
 (defun compute-active-fingerprints (&optional (max-age-hours 1))
@@ -933,7 +1144,8 @@
                   (compute-session-fingerprint task-id session-id))))
         (when fp
           (setf (sfp-team-name fp) (getf sess :team-name))
-          (setf (gethash session-id *session-fingerprints*) fp)
+          (bt:with-lock-held (*session-fingerprints-lock*)
+            (setf (gethash session-id *session-fingerprints*) fp))
           (push fp results))))
     (nreverse results)))
 

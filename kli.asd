@@ -1,6 +1,6 @@
 (defsystem "kli"
   :description "Event-sourced task graphs, pattern learning, and swarm coordination for Claude Code"
-  :version "0.2.0"
+  :version (:read-file-form "version.sexp")
   :author "Kleisli.IO"
   :license "MIT"
   :depends-on ("kli-crdt"

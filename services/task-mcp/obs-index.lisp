@@ -33,13 +33,18 @@
 (defvar *obs-quality* (make-hash-table :test 'eql)
   "Observation quality scores, keyed by text-hash. Default 0.5.")
 
+(defvar *obs-quality-lock* (bt:make-lock "obs-quality")
+  "Lock for *obs-quality* hash table.")
+
 (defun obs-quality (text-hash)
   "Get quality score for observation. Default 0.5."
-  (gethash text-hash *obs-quality* 0.5d0))
+  (bt:with-lock-held (*obs-quality-lock*)
+    (gethash text-hash *obs-quality* 0.5d0)))
 
 (defun (setf obs-quality) (value text-hash)
   "Set quality score for observation."
-  (setf (gethash text-hash *obs-quality*) value))
+  (bt:with-lock-held (*obs-quality-lock*)
+    (setf (gethash text-hash *obs-quality*) value)))
 
 ;;; Graph operations
 
@@ -63,7 +68,7 @@
         (let ((sims nil))
           (maphash (lambda (other-hash other-emb)
                      (unless (= other-hash hash)
-                       (push (cons other-hash (cosine-sim emb other-emb)) sims)))
+                       (push (cons other-hash (vec-dot emb other-emb)) sims)))
                    (obs-graph-embeddings graph))
           ;; Set forward edges (top-k nearest)
           (let ((top-k (subseq (sort sims #'> :key #'cdr)
@@ -81,7 +86,7 @@
   (bt:with-lock-held ((obs-graph-lock graph))
     (let ((sims nil))
       (maphash (lambda (hash emb)
-                 (push (cons hash (cosine-sim query-embedding emb)) sims))
+                 (push (cons hash (vec-dot query-embedding emb)) sims))
                (obs-graph-embeddings graph))
       (subseq (sort sims #'> :key #'cdr)
               0 (min k (length sims))))))
@@ -183,16 +188,49 @@
 
 (defun index-task-observations (task-id)
   "Index all observations from a task's event log. Idempotent.
+   Uses ollama-embed-batch for efficiency (single API call for all texts).
    Returns count of newly indexed observations."
   (let* ((path (task:task-events-path task-id))
          (log (task:elog-load path))
          (events (reverse (task:event-log-events log)))
-         (count 0))
+         (pending nil))  ; (event . text) pairs needing indexing
+    ;; Collect un-indexed observation events
     (dolist (ev events)
       (when (eq (task:event-type ev) :observation)
-        (when (index-observation-event ev task-id)
-          (incf count))))
-    count))
+        (let* ((text (getf (task:event-data ev) :text))
+               (hash (sxhash text)))
+          (unless (gethash hash (obs-graph-records *obs-graph*))
+            (push (cons ev text) pending)))))
+    (when (null pending)
+      (return-from index-task-observations 0))
+    (setf pending (nreverse pending))
+    ;; Batch embed all texts in one API call
+    (let* ((texts (mapcar #'cdr pending))
+           (embeddings (ollama-embed-batch texts))
+           (count 0))
+      ;; Populate embedding cache with batch results
+      (when embeddings
+        (bt:with-lock-held (*embedding-cache-lock*)
+          (loop for text in texts
+                for emb in embeddings
+                when emb
+                do (setf (gethash text *embedding-cache*) emb)
+                   (incf *embedding-cache-dirty*)))
+        ;; Persist to disk after batch indexing
+        (maybe-save-embedding-cache))
+      ;; Create records and add to graph
+      (loop for (ev . text) in pending
+            for emb in (or embeddings (make-list (length pending)))
+            do (let ((record (make-obs-record
+                              :text text
+                              :text-hash (sxhash text)
+                              :task-id task-id
+                              :session (task:event-session ev)
+                              :timestamp (task:event-timestamp ev)
+                              :embedding emb)))
+                 (obs-graph-add *obs-graph* record)
+                 (incf count)))
+      count)))
 
 (defun obs-graph-stats ()
   "Return stats about the observation graph."

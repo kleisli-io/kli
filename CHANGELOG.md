@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-02-23
+
+### Added
+
+- Provably correct MCP depot resolution via `/proc/net/tcp` socket inode tracing (Linux)
+- macOS MCP depot resolution via `lsof` TCP connection ownership query
+- Embedding persistence: save/load cache to disk across daemon restarts
+- Elog-load memoization: per-request caching prevents redundant disk reads
+
+### Fixed
+
+- MCP sessions resolve to correct depot with parallel Claude sessions (was heuristic, now kernel-authoritative on Linux, lsof-authoritative on macOS)
+- `task_fork` and `spawn` inherit depot from parent task ID (defense-in-depth)
+- Forward declaration for `*log-verbose*` in embeddings.lisp (build order fix)
+
+### Removed
+
+- Level 2b heuristic depot bridge (replaced by `/proc`-based PID resolution)
+- Bridge-push in `register-claude-pid` (no longer needed)
+
+## [0.2.1] - 2026-02-23
+
+### Added
+
+- TQ comparison predicates: `>`, `<`, `>=` in `:where` clauses (e.g., `(:where (> :obs-count 10))`)
+- TQ `:skip N` step for pagination
+- TQ `:edges` step for graph edge inspection per node
+- Batch embedding via `ollama-embed-batch` for observation indexing (single API call)
+- `vec-normalize` and pre-normalized embedding storage (dot product = cosine similarity)
+
+### Fixed
+
+- Embedding cache collision risk: keyed by full text string instead of sxhash fixnum
+- TQ `format-query-result` handles `:edges` output format
+
+### Removed
+
+- PN-Counter CRDT (zero production references)
+- Dead Markov functions: `compute-event-markov-kernel`, `bisimulation-quotient`, `free-energy-reduction`, `cosine-similarity`, `cached-free-energy`
+- Dead vector clock functions: `vc-happened-before-p`, `vc-concurrent-p`
+
 ## [0.2.0] - 2026-02-22
 
 ### Added

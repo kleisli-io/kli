@@ -75,14 +75,6 @@
       :iterations iterations :warmup 10
       :body (vc-merge vc1 vc2))))
 
-(defun bench-vc-happened-before (n-sessions &key (iterations 200))
-  "Benchmark happened-before check on N-SESSION vector clocks."
-  (let ((vc1 (make-populated-vc n-sessions))
-        (vc2 (make-populated-vc n-sessions)))
-    (run-benchmark (format nil "vc-happened-before ~D dims" n-sessions)
-      :iterations iterations :warmup 10
-      :body (vc-happened-before-p vc1 vc2))))
-
 ;;; G-Set benchmarks
 
 (defun bench-gs-add (n &key (iterations 100))
@@ -117,8 +109,7 @@
       (push (bench-ors-merge n) results))
     ;; Vector Clock
     (dolist (d *vc-dimensions*)
-      (push (bench-vc-merge d) results)
-      (push (bench-vc-happened-before d) results))
+      (push (bench-vc-merge d) results))
     ;; G-Set
     (dolist (n *crdt-scales*)
       (push (bench-gs-add n) results)

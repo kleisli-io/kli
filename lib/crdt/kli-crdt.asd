@@ -1,13 +1,12 @@
 (defsystem "kli-crdt"
   :description "CRDT primitives — join-semilattice types for conflict-free merge"
-  :version "0.2.0"
+  :version (:read-file-form "../../version.sexp")
   :license "MIT"
   :depends-on ("alexandria")
   :serial t
   :components ((:file "package")
                (:file "vector-clock")
                (:file "g-set")
-               (:file "pn-counter")
                (:file "lww-register")
                (:file "or-set")
                (:file "lww-map"))

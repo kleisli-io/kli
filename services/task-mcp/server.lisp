@@ -60,7 +60,9 @@
     ((acceptor mcp-http::mcp-acceptor) request)
   "Wrap each HTTP request with thread-local session state bindings."
   (declare (ignore request))
-  (let (;; Task session isolation
+  (let (;; Per-request elog cache (prevents redundant disk reads within a request)
+        (task:*elog-cache* (make-hash-table :test 'equal))
+        ;; Task session isolation
         (*current-task-id* *current-task-id*)
         (*session-id* *session-id*)
         (*session-vc* *session-vc*)
@@ -184,6 +186,13 @@
 (defun initialize-server ()
   "Initialize the task MCP server."
   (initialize-session)
+  ;; Load embedding cache from disk (survives daemon restarts)
+  (initialize-embedding-cache-path)
+  (when *embedding-cache-path*
+    (load-embedding-cache)
+    (when (and *log-verbose* (plusp (embedding-cache-size)))
+      (format *error-output* "  Embedding cache: ~D entries from disk~%"
+              (embedding-cache-size))))
   (when *log-verbose*
     (format *error-output* "Task MCP server initialized~%")
     (format *error-output* "  Session: ~A~%" *session-id*)

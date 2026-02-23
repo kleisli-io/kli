@@ -3,6 +3,8 @@
 
 (in-package #:task-mcp)
 
+(defvar *log-verbose*)  ; forward declaration — defined in server.lisp
+
 ;;; Configuration
 
 (defparameter *ollama-host* #(127 0 0 1)
@@ -52,11 +54,97 @@
 
 ;;; Embedding cache
 
-(defvar *embedding-cache* (make-hash-table :test 'eql)
-  "Cache of embeddings, keyed by sxhash of text.")
+(defvar *embedding-cache* (make-hash-table :test 'equal)
+  "Cache of embeddings, keyed by text string.")
 
 (defvar *embedding-cache-lock* (bt:make-lock "embedding-cache")
   "Lock for thread-safe embedding cache access.")
+
+;;; Embedding cache persistence
+
+(defvar *embedding-cache-path* nil
+  "Path where embedding cache is persisted to disk. Set during initialization.")
+
+(defvar *embedding-cache-dirty* 0
+  "Count of new embeddings since last save. Accessed under *embedding-cache-lock*.")
+
+(defparameter *embedding-save-threshold* 50
+  "Save embedding cache to disk after this many new embeddings.")
+
+(defun dvec-to-list (v)
+  "Convert a double-float vector to a list for JSON serialization."
+  (declare (type (simple-array double-float (*)) v))
+  (loop for i below (length v) collect (aref v i)))
+
+(defun embedding-cache-size ()
+  "Return number of cached embeddings."
+  (bt:with-lock-held (*embedding-cache-lock*)
+    (hash-table-count *embedding-cache*)))
+
+(defun save-embedding-cache (&optional (path *embedding-cache-path*))
+  "Save embedding cache to a JSON file (atomic write).
+   Format: {\"text-key\": [float, ...], ...}
+   No-op if path is NIL or cache is empty."
+  (when (and path (plusp (bt:with-lock-held (*embedding-cache-lock*)
+                           (hash-table-count *embedding-cache*))))
+    (let* ((abs-path (namestring (merge-pathnames path)))
+           (temp-path (format nil "~A.tmp" abs-path))
+           (json-ht (make-hash-table :test 'equal)))
+      ;; Snapshot cache under lock (convert dvecs to lists for yason)
+      (bt:with-lock-held (*embedding-cache-lock*)
+        (maphash (lambda (k v)
+                   (setf (gethash k json-ht)
+                         (if (typep v '(simple-array double-float (*)))
+                             (dvec-to-list v)
+                             v)))
+                 *embedding-cache*)
+        (setf *embedding-cache-dirty* 0))
+      ;; Write JSON atomically
+      (ensure-directories-exist (pathname abs-path))
+      (with-open-file (s temp-path :direction :output :if-exists :supersede)
+        (yason:encode json-ht s))
+      (rename-file temp-path abs-path)
+      (when *log-verbose*
+        (format *error-output* "Saved embedding cache: ~D entries to ~A~%"
+                (hash-table-count json-ht) abs-path)))))
+
+(defun load-embedding-cache (&optional (path *embedding-cache-path*))
+  "Load embedding cache from a JSON file into *embedding-cache*.
+   Converts JSON number lists back to typed double-float arrays.
+   No-op if path is NIL or file does not exist."
+  (when (and path (probe-file path))
+    (handler-case
+        (let ((data (yason:parse (alexandria:read-file-into-string
+                                  (namestring (merge-pathnames path))))))
+          (when (hash-table-p data)
+            (bt:with-lock-held (*embedding-cache-lock*)
+              (maphash (lambda (k v)
+                         (when (and (stringp k) (listp v) (plusp (length v)))
+                           (setf (gethash k *embedding-cache*)
+                                 (list-to-dvec v))))
+                       data))
+            (when *log-verbose*
+              (format *error-output* "Loaded embedding cache: ~D entries from ~A~%"
+                      (hash-table-count data) path))))
+      (error (e)
+        (format *error-output* "Failed to load embedding cache from ~A: ~A~%" path e)))))
+
+(defun maybe-save-embedding-cache ()
+  "Save embedding cache if enough new embeddings have accumulated.
+   Called after adding new embeddings to trigger periodic persistence."
+  (when (and *embedding-cache-path*
+             (>= *embedding-cache-dirty* *embedding-save-threshold*))
+    (save-embedding-cache)))
+
+(defun initialize-embedding-cache-path ()
+  "Set *embedding-cache-path* based on *tasks-root*.
+   Uses <tasks-root>/../.task-cache/embeddings.json."
+  (when task:*tasks-root*
+    (let* ((tasks-dir (pathname task:*tasks-root*))
+           (parent (make-pathname :directory (butlast (pathname-directory tasks-dir))
+                                  :defaults tasks-dir))
+           (cache-path (merge-pathnames ".task-cache/embeddings.json" parent)))
+      (setf *embedding-cache-path* (namestring cache-path)))))
 
 ;;; Raw HTTP client (localhost only, no TLS)
 
@@ -167,7 +255,7 @@
                     (format *error-output* "Ollama error: ~A~%" error-msg)
                     nil)
                   (let ((raw (first (gethash "embeddings" parsed))))
-                    (when raw (list-to-dvec raw)))))
+                    (when raw (vec-normalize (list-to-dvec raw))))))
           (error (e)
             (format *error-output* "Ollama parse error: ~A~%" e)
             nil))))))
@@ -191,7 +279,8 @@
                   (progn
                     (format *error-output* "Ollama batch error: ~A~%" error-msg)
                     nil)
-                  (mapcar #'list-to-dvec (gethash "embeddings" parsed))))
+                  (mapcar (lambda (raw) (vec-normalize (list-to-dvec raw)))
+                          (gethash "embeddings" parsed))))
           (error (e)
             (format *error-output* "Ollama batch parse error: ~A~%" e)
             nil))))))
@@ -201,19 +290,25 @@
 (defun get-embedding (text)
   "Get embedding for TEXT, using cache. Thread-safe.
    Two-phase lock: check cache → release → embed → re-acquire → store.
-   Prevents lock contention when Ollama is slow or down."
-  (let ((key (sxhash text)))
-    ;; Phase 1: Check cache
-    (let ((cached (bt:with-lock-held (*embedding-cache-lock*)
-                    (gethash key *embedding-cache*))))
-      (or cached
-          ;; Phase 2: Embed without lock, then store
-          (let ((embedding (ollama-embed text)))
-            (when embedding
-              (bt:with-lock-held (*embedding-cache-lock*)
-                ;; Another thread may have cached it while we were embedding
-                (or (gethash key *embedding-cache*)
-                    (setf (gethash key *embedding-cache*) embedding)))))))))
+   Prevents lock contention when Ollama is slow or down.
+   Triggers periodic disk persistence after new embeddings accumulate."
+  ;; Phase 1: Check cache (keyed by full text string — no sxhash collisions)
+  (let ((cached (bt:with-lock-held (*embedding-cache-lock*)
+                  (gethash text *embedding-cache*))))
+    (or cached
+        ;; Phase 2: Embed without lock, then store
+        (let ((embedding (ollama-embed text)))
+          (when embedding
+            (bt:with-lock-held (*embedding-cache-lock*)
+              ;; Another thread may have cached it while we were embedding
+              (or (gethash text *embedding-cache*)
+                  (progn
+                    (setf (gethash text *embedding-cache*) embedding)
+                    (incf *embedding-cache-dirty*)
+                    embedding)))
+            ;; Periodic save outside lock
+            (maybe-save-embedding-cache)
+            embedding)))))
 
 ;;; Vector math (typed arrays for ~40-86x speedup over lists)
 
@@ -232,8 +327,21 @@
            (optimize (speed 3) (safety 0)))
   (the double-float (sqrt (the (double-float 0.0d0) (vec-dot v v)))))
 
+(defun vec-normalize (v)
+  "Return a new unit-length vector (L2 normalized). Returns zero vector if magnitude is zero."
+  (declare (type (simple-array double-float (*)) v)
+           (optimize (speed 3) (safety 1)))
+  (let ((mag (vec-mag v)))
+    (if (zerop mag)
+        (make-array (length v) :element-type 'double-float :initial-element 0.0d0)
+        (let ((result (make-array (length v) :element-type 'double-float)))
+          (dotimes (i (length v) result)
+            (setf (aref result i) (/ (aref v i) mag)))))))
+
 (defun cosine-sim (v1 v2)
-  "Cosine similarity between two double-float vectors. Returns value in [-1, 1]."
+  "Cosine similarity between two double-float vectors. Returns value in [-1, 1].
+   NOTE: For pre-normalized vectors (from ollama-embed / ollama-embed-batch),
+   use vec-dot instead — it gives the same result without recomputing magnitudes."
   (declare (type (simple-array double-float (*)) v1 v2)
            (optimize (speed 3) (safety 1)))
   (let ((dot 0.0d0) (m1 0.0d0) (m2 0.0d0))

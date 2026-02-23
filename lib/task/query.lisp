@@ -44,10 +44,15 @@
    #:ids-step
    #:count-step
    #:enrich-step
+   #:skip-step
+   #:edges-step
    #:group-by-step
 
    ;; Predicates (function-based, for -> macro)
    #:prop=
+   #:prop>
+   #:prop<
+   #:prop>=
    #:has-prop
    #:name-matches
    #:pred-and
@@ -461,6 +466,23 @@
   "Count nodes in NODE-SET. Returns an integer."
   (node-set-count node-set))
 
+(defun skip-step (node-set n)
+  "Skip first N nodes from NODE-SET (for pagination)."
+  (nthcdr n node-set))
+
+(defun edges-step (node-set)
+  "Get edges for each node in NODE-SET.
+   Returns alist of (id . edges) where each edge is (direction type target-id)."
+  (let ((graph (current-graph)))
+    (mapcar (lambda (entry)
+              (let* ((id (car entry))
+                     (fwd (gethash id (task:task-graph-forward graph)))
+                     (rev (gethash id (task:task-graph-reverse graph))))
+                (cons id (append
+                          (mapcar (lambda (e) (list :forward (second e) (first e))) fwd)
+                          (mapcar (lambda (e) (list :reverse (second e) (first e))) rev)))))
+            node-set)))
+
 (defun enrich-step (node-set)
   "Enrich NODE-SET with full CRDT state data and Markov metrics.
    Adds: :crdt-status, :obs-count, :edge-count, :session-count, :display-name,
@@ -550,6 +572,27 @@
     (declare (ignore id))
     (equal (getf props field) value)))
 
+(defun prop> (field value)
+  "Return predicate: numeric property FIELD > VALUE."
+  (lambda (id props)
+    (declare (ignore id))
+    (let ((v (getf props field)))
+      (and (numberp v) (> v value)))))
+
+(defun prop< (field value)
+  "Return predicate: numeric property FIELD < VALUE."
+  (lambda (id props)
+    (declare (ignore id))
+    (let ((v (getf props field)))
+      (and (numberp v) (< v value)))))
+
+(defun prop>= (field value)
+  "Return predicate: numeric property FIELD >= VALUE."
+  (lambda (id props)
+    (declare (ignore id))
+    (let ((v (getf props field)))
+      (and (numberp v) (>= v value)))))
+
 (defun has-prop (field)
   "Return predicate: property FIELD exists and is non-nil."
   (lambda (id props)
@@ -635,6 +678,8 @@
            `(-> (count-step ,start) ,@rest))
           ((eq step :enrich)
            `(-> (enrich-step ,start) ,@rest))
+          ((eq step :edges)
+           `(-> (edges-step ,start) ,@rest))
           ;; List forms
           ((and (listp step) (eq (car step) :follow))
            `(-> (follow ,start ,(second step)) ,@rest))
@@ -648,6 +693,8 @@
            `(-> (sort-by-field ,start ,(second step)) ,@rest))
           ((and (listp step) (eq (car step) :take))
            `(-> (take-n ,start ,(second step)) ,@rest))
+          ((and (listp step) (eq (car step) :skip))
+           `(-> (skip-step ,start ,(second step)) ,@rest))
           ((and (listp step) (eq (car step) :group-by))
            `(-> (group-by-step ,start ,(second step)) ,@rest))
           (t
@@ -1060,7 +1107,10 @@
   (cond
     ((atom pred-form) nil)
     ((and (listp pred-form) (or (sym= (car pred-form) "=")
-                                 (sym= (car pred-form) "HAS")))
+                                 (sym= (car pred-form) "HAS")
+                                 (sym= (car pred-form) ">")
+                                 (sym= (car pred-form) "<")
+                                 (sym= (car pred-form) ">=")))
      (let ((field (second pred-form)))
        (when (keywordp field) (list field))))
     ((and (listp pred-form) (or (sym= (car pred-form) "AND")
@@ -1097,6 +1147,7 @@
     ((eq step :ids) (ids-step node-set))
     ((eq step :count) (count-step node-set))
     ((eq step :enrich) (enrich-step node-set))
+    ((eq step :edges) (edges-step node-set))
 
     ;; List forms with keyword car
     ((and (listp step) (eq (car step) :follow))
@@ -1115,6 +1166,8 @@
                       field)))
     ((and (listp step) (eq (car step) :take))
      (take-n node-set (second step)))
+    ((and (listp step) (eq (car step) :skip))
+     (skip-step node-set (second step)))
     ((and (listp step) (eq (car step) :group-by))
      (let ((field (second step)))
        (group-by-step (auto-enrich-for-fields node-set (list field))
@@ -1140,6 +1193,18 @@
     ;; (= :field value)
     ((and (listp pred-form) (sym= (car pred-form) "="))
      (prop= (second pred-form) (third pred-form)))
+
+    ;; (> :field value)
+    ((and (listp pred-form) (sym= (car pred-form) ">"))
+     (prop> (second pred-form) (third pred-form)))
+
+    ;; (< :field value)
+    ((and (listp pred-form) (sym= (car pred-form) "<"))
+     (prop< (second pred-form) (third pred-form)))
+
+    ;; (>= :field value)
+    ((and (listp pred-form) (sym= (car pred-form) ">="))
+     (prop>= (second pred-form) (third pred-form)))
 
     ;; (has :field)
     ((and (listp pred-form) (sym= (car pred-form) "HAS"))
@@ -1200,6 +1265,18 @@
              (format s "~%## ~A (~D)~%" key (length nodes))
              (dolist (entry nodes)
                (format s "~A~%" (format-node-entry entry))))))))
+
+    ;; Edges result: ((id . ((:forward type target) ...)) ...)
+    ((and (listp result) (every #'consp result)
+          (let ((first-val (cdar result)))
+            (and (listp first-val) (consp (car first-val))
+                 (member (caar first-val) '(:forward :reverse)))))
+     (with-output-to-string (s)
+       (format s "~D node~:P:~%" (length result))
+       (dolist (entry result)
+         (format s "~%~A:~%" (car entry))
+         (dolist (edge (cdr entry))
+           (format s "  ~A ~A -> ~A~%" (first edge) (second edge) (third edge))))))
 
     ;; Node-set
     ((and (listp result) (every #'consp result))

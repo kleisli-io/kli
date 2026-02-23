@@ -1,5 +1,14 @@
 (in-package #:task)
 
+;;; Per-request elog cache
+;;; Bound to a fresh hash-table in the HTTP request handler (server.lisp).
+;;; When non-NIL, elog-load returns cached results instead of re-reading disk.
+;;; NIL means no caching (stdio mode or outside request scope).
+
+(defvar *elog-cache* nil
+  "Per-request cache: hash-table mapping path-string -> event-log.
+   Bind to (make-hash-table :test 'equal) around each HTTP request.")
+
 (defstruct event-log
   (events nil :type list)
   (clock (make-vector-clock) :type vector-clock)
@@ -29,8 +38,8 @@
         (terpri s)))
     (rename-file tmp path)))
 
-(defun elog-load (path)
-  "Load event log from JSONL file.
+(defun elog-load-from-disk (path)
+  "Load event log from JSONL file (always reads disk).
    Skips corrupt lines with a warning instead of failing fatally."
   (let ((log (make-event-log :path path)))
     (when (probe-file path)
@@ -42,6 +51,15 @@
                    (error (e)
                      (warn "elog-load: skipping corrupt line in ~A: ~A" path e))))))
     log))
+
+(defun elog-load (path)
+  "Load event log from JSONL file. Uses per-request cache when *elog-cache* is bound.
+   Falls through to disk read when cache is NIL (stdio mode)."
+  (let ((key (namestring path)))
+    (if *elog-cache*
+        (or (gethash key *elog-cache*)
+            (setf (gethash key *elog-cache*) (elog-load-from-disk path)))
+        (elog-load-from-disk path))))
 
 (defun elog-append-event (path event)
   "Append a single event to JSONL file using O_APPEND semantics.

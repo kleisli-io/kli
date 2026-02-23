@@ -258,8 +258,11 @@
   (sqrt (dot-product v v)))
 
 (defun cosine-similarity (v1 v2)
-  "Compute cosine similarity between two vectors.
-   Returns value in range [-1, 1], where 1 is identical."
+  "Compute cosine similarity between two list vectors.
+   Returns value in range [-1, 1], where 1 is identical.
+   Package-local to PLAYBOOK-MCP — operates on list representations from Ollama.
+   The canonical typed-array version is task-mcp:cosine-sim (and task-mcp:vec-dot
+   for pre-normalized embedding vectors)."
   (let ((mag1 (vector-magnitude v1))
         (mag2 (vector-magnitude v2)))
     (if (or (zerop mag1) (zerop mag2))
