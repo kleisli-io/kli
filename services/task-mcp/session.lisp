@@ -14,6 +14,9 @@
 (defvar *claude-pid* nil
   "Claude Code's PID, obtained from PARENT_PID env var passed through bwrap.")
 
+(defvar *event-counter* 0
+  "Monotonic counter for unique event IDs within a session.")
+
 ;;; ==========================================================================
 ;;; HTTP Multi-Session Support: Session Context Registry
 ;;; ==========================================================================
@@ -38,6 +41,7 @@
   (team-name nil :type (or null string))
   (agent-name nil :type (or null string))
   (agent-type nil :type (or null string))
+  (event-counter 0 :type fixnum)
   (created-at (get-universal-time) :type integer)
   (last-active (get-universal-time) :type integer))
 
@@ -55,10 +59,14 @@
 (defvar *http-mode* nil
   "T when running in HTTP transport mode, NIL for stdio.")
 
-(defvar *latest-registered-depot* nil
-  "Most recently registered depot from register-pid.
-   Fallback when per-session depot lookup and PID bridge both fail.
-   Better than *current-depot* which is always the daemon startup depot.")
+(defvar *in-mutation* nil
+  "T during tq-mutation-handler execution.
+   Suppresses session registry reads (ensure-session-context) and writes
+   (finalize-session-context) so the mutation handler can directly control
+   *current-task-id* without polluting the shared registry with transient
+   task IDs.  The handler's unwind-protect cleanup restores the registry
+   after the mutation completes.")
+
 
 (defun get-session-context (session-id)
   "Get or create session context for SESSION-ID."
@@ -76,6 +84,7 @@
     (setf (ctx-task-id ctx) *current-task-id*)
     (setf (ctx-vector-clock ctx) *session-vc*)
     (setf (ctx-claude-pid ctx) *claude-pid*)
+    (setf (ctx-event-counter ctx) *event-counter*)
     (setf (ctx-last-active ctx) (get-universal-time))
     ctx))
 
@@ -87,6 +96,7 @@
     (setf *current-task-id* (ctx-task-id ctx))
     (setf *session-vc* (or (ctx-vector-clock ctx) (crdt:make-vector-clock)))
     (setf *claude-pid* (ctx-claude-pid ctx))
+    (setf *event-counter* (ctx-event-counter ctx))
     ctx))
 
 (defmacro with-session-context ((session-id) &body body)
@@ -123,8 +133,7 @@
   (let ((ctx (get-session-context session-id)))
     (setf (ctx-claude-pid ctx) pid)
     (when depot
-      (setf (ctx-depot ctx) depot)
-      (setf *latest-registered-depot* depot))
+      (setf (ctx-depot ctx) depot))
     (when team-name
       (setf (ctx-team-name ctx) team-name)
       (setf (ctx-agent-name ctx) agent-name)
@@ -298,8 +307,7 @@
    2. PID bridge: find depot from context registered with same Claude PID
       (MCP sessions get ctx-claude-pid set by ensure-session-context via
       /proc/net/tcp inode tracing on Linux, lsof on macOS)
-   3. *latest-registered-depot* (last SessionStart hook, process-wide)
-   4. task:*current-depot* (daemon startup depot)
+   3. task:*current-depot* (daemon startup depot)
    Levels 0-2 are HTTP-mode only."
   (or (current-http-depot)
       (when *http-mode*
@@ -323,7 +331,6 @@
                                      (setf (ctx-depot ctx) depot)
                                      (return-from found depot))))
                                *session-contexts*))))))))
-      *latest-registered-depot*
       task:*current-depot*))
 
 (defun current-http-session-id ()
@@ -350,11 +357,15 @@
   (if *http-mode*
       (let ((http-session-id (current-http-session-id)))
         (when http-session-id
-          ;; Always load — per-thread LET bindings (from :around method on
-          ;; acceptor-dispatch-request) mean each request starts fresh.
-          ;; The old skip optimization was racy: another thread could SETF
-          ;; *session-id* between our comparison and our read of *current-task-id*.
-          (load-session-context http-session-id)
+          ;; Skip reload during mutations — *current-task-id* is managed
+          ;; directly by tq-mutation-handler and must not be overwritten
+          ;; by stale or intermediate values from the shared registry.
+          (unless *in-mutation*
+            ;; Always load — per-thread LET bindings (from :around method on
+            ;; acceptor-dispatch-request) mean each request starts fresh.
+            ;; The old skip optimization was racy: another thread could SETF
+            ;; *session-id* between our comparison and our read of *current-task-id*.
+            (load-session-context http-session-id))
           ;; Resolve peer PID for MCP sessions that don't have one yet.
           ;; This bridges MCP sessions to registered Claude sessions by tracing
           ;; the TCP connection through /proc/net/tcp → /proc/<pid>/fd/.
@@ -375,9 +386,11 @@
   "Save current session context back to registry after request processing.
    In HTTP mode: persists context for this session.
    In stdio mode: no-op.
+   Suppressed during mutations (*in-mutation*) to prevent transient task IDs
+   from polluting the shared registry.
 
    Call this at the end of operations that modify session state."
-  (when (and *http-mode* *session-id*)
+  (when (and *http-mode* *session-id* (not *in-mutation*))
     (save-session-context *session-id*)))
 
 (defun initialize-session ()
@@ -402,8 +415,8 @@
     (error "No current task. Use task_set_current or task_create first.")))
 
 (defun make-event-id ()
-  "Generate a unique event ID."
-  (format nil "~A-~A" *session-id* (get-universal-time)))
+  "Generate a unique event ID with monotonic counter."
+  (format nil "~A-~A-~A" *session-id* (get-universal-time) (incf *event-counter*)))
 
 (defparameter *completed-allowed-events*
   '(:task.update-status :session.join :session.team-join :task.create

@@ -13,17 +13,18 @@
 (defun tq-mutation-handler (node-id op &rest args)
   "Execute a TQ mutation operation on NODE-ID.
    Temporarily switches *current-task-id* to node-id for emit-event.
-   Restores both the global and HTTP session registry on exit,
-   since emit-event calls finalize-session-context which would
-   otherwise persist the temporary task ID to the registry.
+   Binds *in-mutation* to suppress session registry reads/writes during
+   the mutation — emit-event uses thread-local *current-task-id* directly
+   instead of reloading from the shared registry.  This prevents transient
+   task IDs (child, parent) from polluting the registry where other
+   requests could read them.
+   Restores *current-task-id* and persists to registry on exit via
+   unwind-protect (outside *in-mutation* scope, so save is not suppressed).
    Returns :skipped for completed tasks, result string otherwise."
   (let ((prev-task *current-task-id*))
     (unwind-protect
-         (progn
+         (let ((*in-mutation* t))
            (setf *current-task-id* node-id)
-           ;; Persist to registry so emit-event's ensure-session-context
-           ;; loads back this task, not the previous one
-           (finalize-session-context)
            (case op
              ;; Status mutations
              (:complete
@@ -130,7 +131,6 @@
                                   node-id node-depot qualified-parent parent-depot)))
                       ;; Emit sever on parent's event log
                       (setf *current-task-id* qualified-parent)
-                      (finalize-session-context)
                       (emit-event :task.sever
                                   (list :target-id qualified-target
                                         :edge-type (string-downcase (symbol-name edge-type-kw))))
@@ -160,7 +160,6 @@
                 (task:ensure-task-directory qualified-id)
                 ;; Emit create event in child context
                 (setf *current-task-id* qualified-id)
-                (finalize-session-context)
                 (emit-event :task.create
                             (list :name qualified-id
                                   :bare-name full-name
@@ -169,7 +168,6 @@
                                   :parent qualified-parent))
                 ;; Emit fork event in parent context
                 (setf *current-task-id* qualified-parent)
-                (finalize-session-context)
                 (emit-event :task.fork
                             (list :child-id qualified-id :edge-type edge-type))
                 ;; Return the qualified task ID
@@ -177,10 +175,10 @@
 
              (otherwise
               (error "Unknown mutation operation: ~A" op))))
-      ;; Restore both the in-process global AND the HTTP session registry.
-      ;; emit-event calls finalize-session-context which persists *current-task-id*
-      ;; to the registry — without this restore, the registry retains the temporary
-      ;; task ID from the last emit-event call within the mutation.
+      ;; Restore *current-task-id* and persist to registry.
+      ;; *in-mutation* LET binding has ended, so save-session-context is
+      ;; NOT suppressed — the registry receives the correct pre-mutation
+      ;; task ID, not any transient intermediate value.
       (setf *current-task-id* prev-task)
       (when *http-mode*
         (save-session-context *session-id*)))))

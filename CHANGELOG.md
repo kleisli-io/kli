@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-02-23
+
+### Added
+
+- `kli status` command — one-shot task overview (state, plan progress, recent observations)
+
+### Fixed
+
+- Critical sxhash collision in observation system — obs-graph and retrieval hash tables keyed by fixnum sxhash caused silent data aliasing between different texts with the same hash; re-keyed to full text strings with `:test 'equal`
+- Race conditions in graph cache (`*graph-cache-lock*` upgraded to recursive lock, all access sites wrapped) and embedding dirty counter (read under lock)
+- Event-id 1-second collision — added monotonic `*event-counter*` for unique event IDs within a session
+- Scaffold-plan registry pollution — `tq-mutation-handler` no longer writes transient task IDs to the shared session registry during `:fork` operations; uses `*in-mutation*` flag to suppress registry reads/writes, preventing scaffold-plan from creating phases under the wrong parent task
+
+### Removed
+
+- `*latest-registered-depot*` process-wide fallback (replaced by per-session depot resolution)
+
 ## [0.2.2] - 2026-02-23
 
 ### Added

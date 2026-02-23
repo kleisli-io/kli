@@ -133,7 +133,9 @@
   "Save embedding cache if enough new embeddings have accumulated.
    Called after adding new embeddings to trigger periodic persistence."
   (when (and *embedding-cache-path*
-             (>= *embedding-cache-dirty* *embedding-save-threshold*))
+             (>= (bt:with-lock-held (*embedding-cache-lock*)
+                   *embedding-cache-dirty*)
+                 *embedding-save-threshold*))
     (save-embedding-cache)))
 
 (defun initialize-embedding-cache-path ()

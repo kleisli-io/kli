@@ -18,10 +18,10 @@
 
 (defstruct obs-graph
   "KNN observation graph with incremental updates."
-  (records (make-hash-table :test 'eql))     ; text-hash -> obs-record
-  (embeddings (make-hash-table :test 'eql))  ; text-hash -> embedding vector
-  (forward (make-hash-table :test 'eql))     ; text-hash -> ((other-hash . sim) ...)
-  (reverse-idx (make-hash-table :test 'eql)) ; text-hash -> ((other-hash . sim) ...)
+  (records (make-hash-table :test 'equal))     ; text -> obs-record
+  (embeddings (make-hash-table :test 'equal))  ; text -> embedding vector
+  (forward (make-hash-table :test 'equal))     ; text -> ((other-text . sim) ...)
+  (reverse-idx (make-hash-table :test 'equal)) ; text -> ((other-text . sim) ...)
   (k 10 :type fixnum)
   (lock (bt:make-lock "obs-graph") :type t))
 
@@ -30,8 +30,8 @@
 
 ;;; Quality tracking (external hash-table per lisp-264491)
 
-(defvar *obs-quality* (make-hash-table :test 'eql)
-  "Observation quality scores, keyed by text-hash. Default 0.5.")
+(defvar *obs-quality* (make-hash-table :test 'equal)
+  "Observation quality scores, keyed by text. Default 0.5.")
 
 (defvar *obs-quality-lock* (bt:make-lock "obs-quality")
   "Lock for *obs-quality* hash table.")
@@ -58,7 +58,7 @@
    Thread-safe. Returns text-hash."
   (bt:with-lock-held ((obs-graph-lock graph))
     (let ((k (obs-k graph))
-          (hash (obs-record-text-hash record))
+          (hash (obs-record-text record))
           (emb (obs-record-embedding record)))
       ;; Store record and embedding
       (setf (gethash hash (obs-graph-records graph)) record)
@@ -67,7 +67,7 @@
         ;; Compute similarities to all existing embeddings
         (let ((sims nil))
           (maphash (lambda (other-hash other-emb)
-                     (unless (= other-hash hash)
+                     (unless (string= other-hash hash)
                        (push (cons other-hash (vec-dot emb other-emb)) sims)))
                    (obs-graph-embeddings graph))
           ;; Set forward edges (top-k nearest)
@@ -137,7 +137,7 @@
   "Connected components on symmetrized KNN graph above threshold.
    Returns list of (cluster-id . (text-hash ...)) sorted by size descending."
   (bt:with-lock-held ((obs-graph-lock graph))
-    (let ((visited (make-hash-table :test 'eql))
+    (let ((visited (make-hash-table :test 'equal))
           (components nil)
           (comp-id 0))
       (maphash (lambda (hash _)
@@ -170,21 +170,20 @@
   "Index an observation from a task event. Embeds and adds to *obs-graph*.
    Fails gracefully if Ollama is down (skips embedding)."
   (let* ((text (getf (task:event-data event) :text))
-         (hash (sxhash text))
-         (existing (gethash hash (obs-graph-records *obs-graph*))))
+         (existing (gethash text (obs-graph-records *obs-graph*))))
     ;; Skip if already indexed
     (when existing
       (return-from index-observation-event nil))
     (let* ((emb (get-embedding text))
            (record (make-obs-record
                     :text text
-                    :text-hash hash
+                    :text-hash (sxhash text)
                     :task-id task-id
                     :session (task:event-session event)
                     :timestamp (task:event-timestamp event)
                     :embedding emb)))
       (obs-graph-add *obs-graph* record)
-      hash)))
+      text)))
 
 (defun index-task-observations (task-id)
   "Index all observations from a task's event log. Idempotent.
@@ -197,9 +196,8 @@
     ;; Collect un-indexed observation events
     (dolist (ev events)
       (when (eq (task:event-type ev) :observation)
-        (let* ((text (getf (task:event-data ev) :text))
-               (hash (sxhash text)))
-          (unless (gethash hash (obs-graph-records *obs-graph*))
+        (let ((text (getf (task:event-data ev) :text)))
+          (unless (gethash text (obs-graph-records *obs-graph*))
             (push (cons ev text) pending)))))
     (when (null pending)
       (return-from index-task-observations 0))

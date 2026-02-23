@@ -453,9 +453,13 @@
   (format t "  serve [--task|--playbook]  Start MCP server (default: task)~%")
   (format t "  dashboard                  Start task graph dashboard~%")
   (format t "  hook <name>                Run Claude Code hook handler~%")
+  (format t "  status [--task ID]         One-shot task overview~%")
   (format t "  version                    Show version~%")
   (format t "  help                       Show this help~%")
   (write-string (format-all-tools))
+  (format t "~%Aliases:~%")
+  (format t "  tq                         task_query~%")
+  (format t "  pq                         pq_query~%")
   (format t "~%Environment:~%")
   (format t "  KLI_TASKS_DIR              Task storage (default: .kli/tasks/)~%")
   (format t "  PLAYBOOK_PATHS             Colon-separated playbook file paths~%")
@@ -468,7 +472,10 @@
   "Top-level entry point for the kli binary.
    Dispatches to task-mcp or playbook-mcp based on command-line arguments."
   (let* ((args (uiop:command-line-arguments))
-         (command (first args)))
+         (command (or (cdr (assoc (first args)
+                                  '(("tq" . "task_query") ("pq" . "pq_query"))
+                                  :test #'string=))
+                      (first args))))
     ;; Initialize verbose logging early — before any command that calls
     ;; prepare-daemon, which reads *verbose* in install-debugger-hook.
     (when (getenv-nonempty "KLI_LOG")

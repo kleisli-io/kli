@@ -498,40 +498,36 @@
   "TTL for graph cache in seconds. Default 3600 seconds (1 hour).
    With mutation-based invalidation in emit-event, TTL is a safety net.")
 
-(defvar *graph-cache-lock* (bt:make-lock "graph-cache")
-  "Mutex preventing concurrent graph builds (thundering herd).")
+(defvar *graph-cache-lock* (bt:make-recursive-lock "graph-cache")
+  "Recursive mutex preventing concurrent graph builds (thundering herd).
+   Recursive because get-cached-task-infos may call get-cached-multi-depot-graph
+   while already holding the lock.")
 
 (defun get-cached-multi-depot-graph ()
   "Get cached multi-depot graph or build fresh. Uses TTL-based invalidation.
    Key is 'multi-depot' in the graph cache.
-   Lock-free fast path for cache hits; lock only held during rebuild
-   to prevent thundering herd from concurrent Hunchentoot worker threads."
-  (let* ((key "multi-depot")
-         (entry (gethash key *graph-cache*))
-         (now (get-universal-time))
-         (valid (and entry
-                     (< (- now (car entry)) *graph-cache-ttl*))))
-    (if valid
-        (cdr entry)
-        ;; Cache miss — acquire lock, double-check, rebuild if needed
-        (bt:with-lock-held (*graph-cache-lock*)
-          (let* ((entry2 (gethash key *graph-cache*))
-                 (valid2 (and entry2
-                              (< (- (get-universal-time) (car entry2))
-                                 *graph-cache-ttl*))))
-            (if valid2
-                (cdr entry2)
-                (let ((graph (build-multi-depot-task-graph)))
-                  (setf (gethash key *graph-cache*) (cons (get-universal-time) graph))
-                  graph)))))))
+   All access protected by *graph-cache-lock* (SBCL hash tables are not thread-safe)."
+  (bt:with-recursive-lock-held (*graph-cache-lock*)
+    (let* ((key "multi-depot")
+           (entry (gethash key *graph-cache*))
+           (now (get-universal-time))
+           (valid (and entry
+                       (< (- now (car entry)) *graph-cache-ttl*))))
+      (if valid
+          (cdr entry)
+          (let ((graph (build-multi-depot-task-graph)))
+            (setf (gethash key *graph-cache*) (cons (get-universal-time) graph))
+            graph)))))
 
 (defun clear-graph-cache ()
   "Clear all cached graphs."
-  (clrhash *graph-cache*))
+  (bt:with-recursive-lock-held (*graph-cache-lock*)
+    (clrhash *graph-cache*)))
 
 (defun invalidate-graph-cache (key)
   "Invalidate cache for a specific key."
-  (remhash key *graph-cache*))
+  (bt:with-recursive-lock-held (*graph-cache-lock*)
+    (remhash key *graph-cache*)))
 
 ;;; --- Task Infos Cache ---
 ;;; Caches the result of scan-all-depot-tasks so callers that only need
@@ -545,21 +541,23 @@
   "Return cached task infos, triggering a graph build if cache is cold or expired.
    This is the preferred entry point for code that needs task infos —
    it avoids redundant scans by reusing the infos computed during graph construction."
-  (let ((now (get-universal-time)))
-    (if (and *infos-cache*
-             (< (- now (car *infos-cache*)) *graph-cache-ttl*))
-        (cdr *infos-cache*)
-        ;; Graph build populates *infos-cache* as a side-effect
-        (progn
-          (get-cached-multi-depot-graph)
-          (if *infos-cache*
-              (cdr *infos-cache*)
-              ;; Fallback: direct scan (should not normally happen)
-              (scan-all-depot-tasks))))))
+  (bt:with-recursive-lock-held (*graph-cache-lock*)
+    (let ((now (get-universal-time)))
+      (if (and *infos-cache*
+               (< (- now (car *infos-cache*)) *graph-cache-ttl*))
+          (cdr *infos-cache*)
+          ;; Graph build populates *infos-cache* as a side-effect
+          (progn
+            (get-cached-multi-depot-graph)
+            (if *infos-cache*
+                (cdr *infos-cache*)
+                ;; Fallback: direct scan (should not normally happen)
+                (scan-all-depot-tasks)))))))
 
 (defun clear-infos-cache ()
   "Clear the cached task infos."
-  (setf *infos-cache* nil))
+  (bt:with-recursive-lock-held (*graph-cache-lock*)
+    (setf *infos-cache* nil)))
 
 ;;; ============================================================
 ;;; GRAPH CONSTRUCTION PIPELINE

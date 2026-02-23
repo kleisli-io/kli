@@ -11,12 +11,12 @@
    SEED-WEIGHTS: alist of (text-hash . weight).
    Returns alist of (text-hash . activation) sorted descending."
   (bt:with-lock-held ((obs-graph-lock graph))
-    (let ((activation (make-hash-table :test 'eql)))
+    (let ((activation (make-hash-table :test 'equal)))
       (dolist (pair seed-weights)
         (setf (gethash (car pair) activation)
               (coerce (cdr pair) 'double-float)))
       (dotimes (i iterations)
-        (let ((new-act (make-hash-table :test 'eql)))
+        (let ((new-act (make-hash-table :test 'equal)))
           (maphash (lambda (k v) (setf (gethash k new-act) v)) activation)
           (maphash (lambda (node act)
                      (dolist (pair (gethash node (obs-graph-forward graph)))
@@ -60,7 +60,7 @@
 (defun rrf-fuse (ranked-lists &key (k 60))
   "Reciprocal Rank Fusion across multiple ranked lists.
    Each list is an alist of (key . score), sorted by score descending."
-  (let ((scores (make-hash-table :test 'eql)))
+  (let ((scores (make-hash-table :test 'equal)))
     (dolist (ranked ranked-lists)
       (loop for (key . _score) in ranked
             for rank from 1
@@ -107,7 +107,7 @@
 (defun compute-obs-seeds (task-id graph)
   "Compute observation seed weights from task graph context.
    Own-task: 1.0, structural neighbor: 0.7, related: 0.5, other: 0.3."
-  (let ((seeds (make-hash-table :test 'eql))
+  (let ((seeds (make-hash-table :test 'equal))
         (task-graph (or graph (get-or-build-graph))))
     (bt:with-lock-held ((obs-graph-lock *obs-graph*))
       (maphash (lambda (hash record)
@@ -161,7 +161,7 @@
            (spread-from-seeds (when seeds
                                 (obs-spread *obs-graph* seeds :iterations 2)))
            (query-ranked (mapcar (lambda (pair)
-                                   (cons (sxhash (obs-record-text (car pair)))
+                                   (cons (obs-record-text (car pair))
                                          (cdr pair)))
                                  obs-results))
            (fused (rrf-fuse (remove nil (list query-ranked spread-from-seeds))))

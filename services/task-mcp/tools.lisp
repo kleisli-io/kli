@@ -771,17 +771,16 @@ Finds observations from this task and related tasks."
     ((text string "Observation text to update quality for")
      (outcome string "Feedback: 'success' or 'failure'"))
   "Record whether an observation was helpful or not. Improves future search ranking."
-  (let* ((hash (sxhash text))
-         (record (gethash hash (obs-graph-records *obs-graph*))))
+  (let* ((record (gethash text (obs-graph-records *obs-graph*))))
     (unless record
       (error "Observation not found in index. Index the task first with obs_search."))
     (let* ((outcome-kw (cond
                          ((string-equal outcome "success") :success)
                          ((string-equal outcome "failure") :failure)
                          (t (error "Outcome must be 'success' or 'failure', got: ~A" outcome))))
-           (old-quality (obs-quality hash))
+           (old-quality (obs-quality text))
            (new-quality (quality-update old-quality outcome-kw)))
-      (setf (obs-quality hash) new-quality)
+      (setf (obs-quality text) new-quality)
       (let* ((text (obs-record-text record))
              (snippet (subseq text 0 (min 100 (length text))))
              (level (cond
@@ -889,3 +888,117 @@ Use when: (1) you're about to edit 3+ files and want a single conflict scan,
     (if session-id
         (make-text-content (register-claude-pid session-id pid))
         (make-text-content "Error: No session ID available"))))
+
+(define-tool status
+    ((task_id string "Task ID (default: current)" nil))
+  "One-shot task overview: current state, plan progress, recent activity, health.
+The 'git status' equivalent for kli — shows where you are and what needs doing."
+  (let ((id (or (when (and task_id (> (length task_id) 0))
+                  (resolve-task-id task_id))
+                *current-task-id*)))
+    (cond
+      ;; No task: show recent active tasks
+      ((not id)
+       (make-text-content
+        (with-output-to-string (s)
+          (format s "No current task. Use --task <id> or set a current task first.~%~%")
+          (format s "Recent active tasks:~%")
+          (let ((infos (task:get-cached-task-infos)))
+            (when infos
+              (let* ((event-sourced (remove-if-not
+                                     (lambda (tk) (getf tk :has-events)) infos))
+                     (sorted (sort (copy-list event-sourced) #'>
+                                   :key (lambda (tk) (or (getf tk :latest-mod) 0))))
+                     (top (subseq sorted 0 (min 5 (length sorted)))))
+                (dolist (tk top)
+                  (format s "  ~A (~(~A~))~%"
+                          (or (getf tk :display-name) (getf tk :id))
+                          (getf tk :status)))))))))
+      ;; Task exists: show full status
+      (t
+       (let* ((path (task:task-events-path id))
+              (log (task:elog-load path))
+              (events (reverse (task:event-log-events log)))
+              (state (when events (task:compute-state events))))
+         (if (not state)
+             (make-text-content (format nil "Task ~A has no events." id))
+             (make-text-content
+              (with-output-to-string (s)
+                ;; Header
+                (let* ((meta (task:task-state-metadata state))
+                       (display-name (crdt:lwwm-get meta "display-name"))
+                       (desc (crdt:lww-value (task:task-state-description state)))
+                       (status (crdt:lww-value (task:task-state-status state)))
+                       (obs-count (crdt:gs-count (task:task-state-observations state)))
+                       (sess-count (length (crdt:gs-members
+                                            (task:task-state-sessions state)))))
+                  (format s "~A~%" (or display-name id))
+                  (when display-name
+                    (format s "  ~A~%" id))
+                  (format s "  ~A | ~D observations | ~D sessions~%"
+                          status obs-count sess-count)
+                  (when (and desc (> (length desc) 0))
+                    (let ((end (or (position #\Newline desc) (length desc))))
+                      (format s "  ~A~%" (subseq desc 0 (min 120 end))))))
+                ;; Plan progress
+                (let ((children (handler-case (task:task-children id)
+                                  (error () nil))))
+                  (when children
+                    (let* ((states-ht (task:load-child-states children))
+                           (frontier (handler-case (task:plan-frontier id)
+                                       (error () nil)))
+                           (frontier-set (make-hash-table :test 'equal))
+                           (done-count 0))
+                      (when frontier
+                        (dolist (f frontier) (setf (gethash f frontier-set) t)))
+                      (dolist (c children)
+                        (let ((cstate (gethash c states-ht)))
+                          (when (and cstate
+                                     (string= "completed"
+                                              (crdt:lww-value
+                                               (task:task-state-status cstate))))
+                            (incf done-count))))
+                      (format s "~%Plan: ~D/~D phases done~@[, ~D ready~]~%"
+                              done-count (length children)
+                              (when (and frontier (plusp (length frontier)))
+                                (length frontier)))
+                      (dolist (c children)
+                        (let* ((cstate (gethash c states-ht))
+                               (cstatus (if cstate
+                                            (or (crdt:lww-value
+                                                 (task:task-state-status cstate))
+                                                "?")
+                                            "?"))
+                               (short-name
+                                 (multiple-value-bind (depot bare)
+                                     (task:parse-qualified-id c)
+                                   (declare (ignore depot))
+                                   bare)))
+                          (format s "  ~A ~A~%"
+                                  (cond ((string= cstatus "completed") "[done]")
+                                        ((gethash c frontier-set) "[READY]")
+                                        (t (format nil "[~A]" cstatus)))
+                                  short-name))))))
+                ;; Recent observations (last 5)
+                (let ((obs-events (remove-if-not
+                                   (lambda (ev)
+                                     (eq (task:event-type ev) :observation))
+                                   events)))
+                  (when obs-events
+                    (let ((recent (last obs-events 5)))
+                      (format s "~%Recent observations:~%")
+                      (dolist (ob (reverse recent))
+                        (let ((text (getf (task:event-data ob) :text)))
+                          (format s "  [~A] ~A~%"
+                                  (format-relative-time
+                                   (task:event-timestamp ob))
+                                  (if (> (length text) 120)
+                                      (format nil "~A..."
+                                              (subseq text 0 117))
+                                      text)))))))
+                ;; Health summary
+                (handler-case
+                    (let ((health (task:task-health-report)))
+                      (when (and health (search "WARNING" health))
+                        (format s "~%Health: warnings detected~%")))
+                  (error ()))))))))))
