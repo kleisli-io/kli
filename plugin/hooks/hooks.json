@@ -31,6 +31,15 @@
         ]
       },
       {
+        "matcher": "mcp__task__task_complete",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kli hook task-complete-reflect"
+          }
+        ]
+      },
+      {
         "matcher": "Edit|Write",
         "hooks": [
           {

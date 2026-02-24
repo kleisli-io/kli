@@ -295,6 +295,7 @@
                 "file-conflict.lisp"
                 "playbook-activate.lisp"
                 "feedback-nudge.lisp"
+                "task-complete-reflect.lisp"
                 "dispatch.lisp"
               ]) ++ [
               ./src/package.lisp
@@ -309,9 +310,10 @@
                 (map (f: ./lib/task/t + "/${f}") [ "package.lisp" "tests.lisp" "test-query.lisp" "test-markov.lisp" ]) ++
                 (map (f: ./lib/claude-hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-json.lisp" "test-responses.lisp" "test-paths.lisp" "test-file-io.lisp" "test-prompts.lisp" "test-hook.lisp" ]) ++
                 (map (f: ./lib/playbook-hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-domains.lisp" "test-co-app.lisp" "test-session-io.lisp" ]) ++
-                (map (f: ./services/playbook-mcp/t + "/${f}") [ "package.lisp" "suite.lisp" "test-session-state.lisp" "test-http-transport.lisp" "test-session-discovery.lisp" "test-feedback-state.lisp" "test-relevance-feedback.lisp" ]);
+                (map (f: ./services/playbook-mcp/t + "/${f}") [ "package.lisp" "suite.lisp" "test-session-state.lisp" "test-http-transport.lisp" "test-session-discovery.lisp" "test-feedback-state.lisp" "test-relevance-feedback.lisp" ]) ++
+                (map (f: ./hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-task-complete-reflect.lisp" ]);
               deps = [ lisp.fiveam lisp.bordeaux-threads ];
-              expression = "(and (fiveam:run! :crdt-tests) (fiveam:run! :task-tests) (claude-hooks.tests:run-all-tests) (playbook-hooks.tests:run-all-tests) (playbook-mcp.tests:run-all-tests))";
+              expression = "(and (fiveam:run! :crdt-tests) (fiveam:run! :task-tests) (claude-hooks.tests:run-all-tests) (playbook-hooks.tests:run-all-tests) (playbook-mcp.tests:run-all-tests) (kli-hook.tests:run-all-tests))";
             };
           };
 

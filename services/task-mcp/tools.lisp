@@ -153,20 +153,28 @@ in a different depot (default: current depot)."
               (resolve-depot-for-creation
                (when (and depot (> (length depot) 0)) depot)
                full-name)
-            (let ((dir (task:ensure-task-directory qualified-id)))
-              (ensure-session-context)
-              (setf *current-task-id* qualified-id)
-              (finalize-session-context)
-              (emit-event :task.create
-                          (list :name qualified-id
-                                :bare-name full-name
-                                :depot target-depot
-                                :description description))
-              ;; Join the newly created task (session file + session.join event)
-              ;; so hooks can discover the current task via PPID lookup
-              (emit-event :session.join nil)
-              (write-session-task-file)
-              (when *http-mode* (save-session-context *session-id*))
+            (let* ((dir (task:ensure-task-directory qualified-id))
+                   (prev (progn (ensure-session-context) *current-task-id*)))
+              ;; Creation ≠ Selection: creating a task is a graph operation
+              ;; (adds node), not a state operation (moves pointer).
+              ;; Only task_set_current/task_bootstrap should change context.
+              ;; Bootstrap exception: if no current task, adopt the new one.
+              (unwind-protect
+                   (progn
+                     ;; Temporarily switch context for event emission
+                     (setf *current-task-id* qualified-id)
+                     (finalize-session-context)
+                     (emit-event :task.create
+                                 (list :name qualified-id
+                                       :bare-name full-name
+                                       :depot target-depot
+                                       :description description))
+                     (emit-event :session.join nil))
+                ;; Restore: keep new only if we had no prior task (bootstrap)
+                (setf *current-task-id* (or prev qualified-id))
+                (finalize-session-context)
+                (write-session-task-file)
+                (when *http-mode* (save-session-context *session-id*)))
               (cleanup-stale-sessions)
               (make-text-content
                (format nil "Created task ~A at ~A" qualified-id dir))))))))
@@ -212,28 +220,33 @@ Use :related-to for cross-depot references."
               (validate-cross-depot-edge parent-id qualified-id etype))
             (let* ((dir (task:ensure-task-directory qualified-id))
                    (prev *current-task-id*))
-              ;; Create child task
-              (setf *current-task-id* qualified-id)
-              (finalize-session-context)  ;; Save before emit-event
-              (emit-event :task.create
-                          (append (list :name qualified-id
-                                        :bare-name full-name
-                                        :depot target-depot
-                                        :description description)
-                                  (when parent-id (list :parent parent-id))))
-              ;; Birth certificate observation
-              (when (> (length description) 0)
-                (emit-event :observation
-                            (list :text (format nil "Birth certificate: ~A" description))))
-              ;; Create edge on parent
-              (when parent-id
-                (setf *current-task-id* parent-id)
-                (finalize-session-context)  ;; Save before emit-event
-                (emit-event :task.fork
-                            (list :child-id qualified-id :edge-type etype)))
-              ;; Restore context — fork never switches current task
-              (setf *current-task-id* prev)
-              (finalize-session-context)  ;; Save final state
+              ;; Fork never switches current task — unwind-protect ensures
+              ;; restoration even if emit-event signals (matches TQ :fork
+              ;; handler pattern at query.lisp:13-27).
+              (unwind-protect
+                   (progn
+                     ;; Create child task
+                     (setf *current-task-id* qualified-id)
+                     (finalize-session-context)
+                     (emit-event :task.create
+                                 (append (list :name qualified-id
+                                               :bare-name full-name
+                                               :depot target-depot
+                                               :description description)
+                                         (when parent-id (list :parent parent-id))))
+                     ;; Birth certificate observation
+                     (when (> (length description) 0)
+                       (emit-event :observation
+                                   (list :text (format nil "Birth certificate: ~A" description))))
+                     ;; Create edge on parent
+                     (when parent-id
+                       (setf *current-task-id* parent-id)
+                       (finalize-session-context)
+                       (emit-event :task.fork
+                                   (list :child-id qualified-id :edge-type etype))))
+                ;; Restore context — fork never switches current task
+                (setf *current-task-id* prev)
+                (finalize-session-context))
               (make-text-content
                (if parent-id
                    (format nil "Forked ~A from ~A (edge: ~A) at ~A" qualified-id parent-id etype dir)
