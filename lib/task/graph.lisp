@@ -606,11 +606,14 @@
                  *depot-tasks-roots*)
 
         ;; Layer 3: state edges (per-depot, qualified)
-        (maphash (lambda (depot-name tasks-root)
-                   (let ((depot-edges (extract-state-edges-for-depot depot-name tasks-root)))
-                     (dolist (edge depot-edges)
-                       (graph-add-edge graph (first edge) (second edge) (third edge)))))
-                 *depot-tasks-roots*)
+        ;; Disable *elog-cache* so each task's event-log becomes GC-eligible
+        ;; after extract-state-edges returns, preventing O(all-tasks) memory.
+        (let ((*elog-cache* nil))
+          (maphash (lambda (depot-name tasks-root)
+                     (let ((depot-edges (extract-state-edges-for-depot depot-name tasks-root)))
+                       (dolist (edge depot-edges)
+                         (graph-add-edge graph (first edge) (second edge) (third edge)))))
+                   *depot-tasks-roots*))
 
         graph))
 

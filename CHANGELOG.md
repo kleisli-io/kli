@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-02-28
+
+### Fixed
+
+- Heap exhaustion during cold graph build — `*elog-cache*` retained all 860 tasks' event-logs simultaneously; now disabled during `build-multi-depot-task-graph` so each task's data is GC-eligible after processing (peak memory: 161MB vs previous OOM at 1GB)
+- SBCL heap default too small — kli wrapper now sets `--dynamic-space-size 4096` (was relying on compiled-in 1GB default)
+- Multi-session attribution bugs — file-conflict hook rewritten as thin HTTP client delegating to daemon's `/file-conflict` endpoint, enforcing PID-liveness checks and session-aware scanning
+- Stale in-memory session contexts — `cleanup-inactive-sessions` wired into `task_create` and `task_bootstrap` for opportunistic GC of departed sessions
+
+### Added
+
+- `GET /file-conflict` HTTP endpoint on task-mcp daemon for hook integration with proper session attribution
+- `scan-task-enrichment` and `file-conflict-for-caller` server-side functions for PID-checked conflict detection
+
 ## [0.3.0] - 2026-02-23
 
 ### Added

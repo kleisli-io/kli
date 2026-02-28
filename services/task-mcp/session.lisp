@@ -1539,6 +1539,136 @@
         (nreverse result)))))
 
 ;;; ==========================================================================
+;;; Hook File-Conflict Endpoint
+;;; ==========================================================================
+;;; Single source of truth for file-conflict detection, called by the
+;;; PostToolUse:Edit hook via HTTP. Eliminates duplicated session logic
+;;; in the hook by centralizing liveness checks, session-aware event scanning,
+;;; and self-exclusion here.
+;;;
+;;; Session Attribution Invariant:
+;;;   Session S is attributed as editing file F iff:
+;;;     1. PID(S) ∈ active-pids/ (process is alive)       [read-active-sessions]
+;;;     2. timestamp(S) > now - max_age (session is recent) [read-active-sessions]
+;;;     3. ∃ event with session=S, file=F, recent           [scan-file-activity]
+;;;     4. S ≠ caller                                       [caller-session-id param]
+
+(defun scan-task-enrichment (task-id session-id &key (max-age-hours 1))
+  "Scan a task's events for enrichment context, filtered by SESSION-ID.
+   Returns plist: (:task-description :last-observation :edited-files)
+   where :edited-files is an alist of (normalized-path . count)."
+  (let* ((events-path (task:task-events-path task-id))
+         (now (get-universal-time))
+         (cutoff (- now (* max-age-hours 60 60)))
+         (task-desc nil)
+         (last-obs nil)
+         (file-counts (make-hash-table :test #'equal)))
+    (when (probe-file events-path)
+      (handler-case
+          (with-open-file (s events-path)
+            (loop for line = (read-line s nil)
+                  while line
+                  for data = (ignore-errors (yason:parse line))
+                  when data
+                  do (let* ((type (gethash "type" data))
+                            (ts (gethash "timestamp" data))
+                            (evt-session (gethash "session" data))
+                            (evt-data (gethash "data" data)))
+                       (when evt-data
+                         ;; Task description from birth certificate (any session)
+                         (when (and (string= type "task.create") (null task-desc))
+                           (setf task-desc (gethash "description" evt-data)))
+                         ;; Only count activity from the specific session
+                         (when (and evt-session session-id
+                                    (string= evt-session session-id))
+                           ;; Last observation
+                           (when (and (string= type "observation") ts (> ts cutoff))
+                             (let ((text (gethash "text" evt-data)))
+                               (when text (setf last-obs text))))
+                           ;; File edit counts
+                           (when (and (string= type "tool.call")
+                                      ts (> ts cutoff)
+                                      (member (gethash "tool" evt-data)
+                                              '("Edit" "Write") :test #'string=))
+                             (let* ((args (gethash "args" evt-data))
+                                    (fp (when args
+                                          (normalize-file-path
+                                           (gethash "file_path" args)))))
+                               (when fp
+                                 (incf (gethash fp file-counts 0))))))))))
+        (error () nil)))
+    ;; Truncate long observations
+    (when (and last-obs (> (length last-obs) 120))
+      (setf last-obs (concatenate 'string (subseq last-obs 0 120) "...")))
+    ;; Convert file-counts to sorted alist
+    (let ((file-alist nil))
+      (maphash (lambda (k v) (push (cons k v) file-alist)) file-counts)
+      (setf file-alist (sort file-alist #'> :key #'cdr))
+      (list :task-description task-desc
+            :last-observation last-obs
+            :edited-files file-alist))))
+
+(defun file-conflict-for-caller (file-path caller-session-id
+                                 &key (max-age-minutes 30))
+  "Check for file conflicts from the perspective of CALLER-SESSION-ID.
+   Uses read-active-sessions (PID-checked) and scan-file-activity (session-aware)
+   to enforce the Session Attribution Invariant.
+
+   Returns list of plists suitable for JSON serialization:
+     ((:session S :task T :age-minutes N :edit-count N
+       :task-description D :last-observation O :other-files ((path . count) ...))
+      ...)"
+  (let* ((norm-path (normalize-file-path file-path))
+         (max-age-hours (/ max-age-minutes 60.0))
+         ;; Invariant clauses 1+2: only alive sessions with recent timestamps
+         (sessions (read-active-sessions (ceiling max-age-hours)))
+         (conflicts nil))
+    (unless norm-path (return-from file-conflict-for-caller nil))
+    (let ((seen-tasks (make-hash-table :test 'equal)))
+      (dolist (sess sessions)
+        (let ((sid (getf sess :session-id))
+              (tid (getf sess :task-id)))
+          ;; Invariant clause 4: exclude caller
+          (when (and sid tid
+                     (not (string= sid caller-session-id))
+                     ;; Only scan each task once
+                     (not (gethash tid seen-tasks)))
+            (setf (gethash tid seen-tasks) t)
+            ;; Invariant clause 3: session-aware file activity scan
+            (let ((touches (scan-file-activity tid :max-age-hours max-age-hours)))
+              ;; Filter: events from THIS session that touch THIS file
+              (let ((file-touches
+                      (remove-if-not
+                       (lambda (touch)
+                         (and (string= (getf touch :file) norm-path)
+                              (string= (getf touch :session) sid)))
+                       touches)))
+                (when file-touches
+                  ;; Enrich with task context
+                  (let* ((enrichment (scan-task-enrichment tid sid
+                                      :max-age-hours max-age-hours))
+                         (edited-files (getf enrichment :edited-files))
+                         (edit-count (or (cdr (assoc norm-path edited-files
+                                                     :test #'string=))
+                                         (length file-touches)))
+                         (other-files (remove norm-path edited-files
+                                              :key #'car :test #'string=))
+                         (most-recent-ts (getf (car (last file-touches)) :timestamp))
+                         (age-minutes (when most-recent-ts
+                                        (round (/ (- (get-universal-time)
+                                                     most-recent-ts)
+                                                  60)))))
+                    (push (list :session sid
+                                :task tid
+                                :age-minutes age-minutes
+                                :edit-count edit-count
+                                :task-description (getf enrichment :task-description)
+                                :last-observation (getf enrichment :last-observation)
+                                :other-files other-files)
+                          conflicts)))))))))
+    (nreverse conflicts)))
+
+;;; ==========================================================================
 ;;; Session Departure Detection
 ;;; ==========================================================================
 ;;; Detect when sessions have left tasks via :session.leave events.

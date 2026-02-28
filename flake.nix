@@ -325,7 +325,8 @@
             mkdir -p $out/bin $out/share/kli
             cp -rT ${./plugin} $out/share/kli/
             makeWrapper ${kli-binary}/bin/kli $out/bin/kli \
-              --set KLI_DATA_DIR $out/share/kli
+              --set KLI_DATA_DIR $out/share/kli \
+              --set NIX_BUILDLISP_LISP_ARGS "--dynamic-space-size 4096"
           '';
 
         in {

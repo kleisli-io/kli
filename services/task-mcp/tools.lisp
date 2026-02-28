@@ -176,6 +176,7 @@ in a different depot (default: current depot)."
                 (write-session-task-file)
                 (when *http-mode* (save-session-context *session-id*)))
               (cleanup-stale-sessions)
+              (cleanup-inactive-sessions)
               (make-text-content
                (format nil "Created task ~A at ~A" qualified-id dir))))))))
 
@@ -355,8 +356,9 @@ Use to peek at any task without switching context. See task_bootstrap to join a 
     (write-session-task-file)
     ;; Persist refreshed PID (write-session-task-file may update *claude-pid*)
     (when *http-mode* (save-session-context *session-id*))
-    ;; Opportunistic cleanup of stale session files
+    ;; Opportunistic cleanup of stale session files and in-memory contexts
     (cleanup-stale-sessions)
+    (cleanup-inactive-sessions)
     resolved-id))
 
 (define-session-tool task_set_current

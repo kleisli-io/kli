@@ -182,7 +182,60 @@
                     (task:event-id event) *current-task-id*)))
       (error (e)
         (setf (hunchentoot:return-code*) 500)
-        (format nil "{\"success\": false, \"error\": ~S}" (princ-to-string e))))))
+        (format nil "{\"success\": false, \"error\": ~S}" (princ-to-string e)))))
+
+  ;; File conflict endpoint for PostToolUse:Edit hook integration
+  (hunchentoot:define-easy-handler (file-conflict-endpoint :uri "/file-conflict")
+      (session-id file-path max-age-minutes)
+    "Check for file conflicts from the perspective of a session.
+     Called by PostToolUse:Edit hook to detect concurrent edits.
+     Uses read-active-sessions (PID-checked) for liveness and
+     scan-file-activity (session-aware) for attribution.
+
+     Query params:
+       session-id (string): caller's MCP session ID (for self-exclusion)
+       file-path (string): normalized file path that was edited
+       max-age-minutes (integer, optional): conflict window (default 30)"
+    (setf (hunchentoot:content-type*) "application/json")
+    (handler-case
+        (let* ((max-age (if (and max-age-minutes (plusp (length max-age-minutes)))
+                            (parse-integer max-age-minutes :junk-allowed t)
+                            30))
+               (conflicts (file-conflict-for-caller
+                           file-path
+                           (or session-id "")
+                           :max-age-minutes max-age)))
+          (if conflicts
+              ;; Encode conflicts as JSON array
+              (with-output-to-string (s)
+                (let ((arr (mapcar
+                            (lambda (c)
+                              (let ((ht (make-hash-table :test #'equal)))
+                                (setf (gethash "session" ht) (getf c :session)
+                                      (gethash "task" ht) (getf c :task)
+                                      (gethash "age_minutes" ht) (getf c :age-minutes)
+                                      (gethash "edit_count" ht) (getf c :edit-count))
+                                (when (getf c :task-description)
+                                  (setf (gethash "task_description" ht)
+                                        (getf c :task-description)))
+                                (when (getf c :last-observation)
+                                  (setf (gethash "last_observation" ht)
+                                        (getf c :last-observation)))
+                                (when (getf c :other-files)
+                                  (setf (gethash "other_files" ht)
+                                        (mapcar (lambda (pair)
+                                                  (let ((f (make-hash-table :test #'equal)))
+                                                    (setf (gethash "path" f) (car pair)
+                                                          (gethash "count" f) (cdr pair))
+                                                    f))
+                                                (getf c :other-files))))
+                                ht))
+                            conflicts)))
+                  (yason:encode arr s)))
+              "[]"))
+      (error (e)
+        (setf (hunchentoot:return-code*) 500)
+        (format nil "{\"error\": ~S}" (princ-to-string e))))))
 
 ;;; Server lifecycle
 
