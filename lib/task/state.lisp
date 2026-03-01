@@ -113,7 +113,9 @@
         (:artifact.delete
          (ors-remove (task-state-artifacts state) (getf data :path)))
         (:observation
-         (gs-add (task-state-observations state) (getf data :text)))
+         (let ((text (getf data :text)))
+           (when text
+             (gs-add (task-state-observations state) text))))
         ;; Legacy: map :task.spawn to phase-of edge
         (:task.spawn
          (let ((edge (encode-edge (getf data :child-id) :phase-of)))

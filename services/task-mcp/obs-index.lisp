@@ -170,9 +170,10 @@
   "Index an observation from a task event. Embeds and adds to *obs-graph*.
    Fails gracefully if Ollama is down (skips embedding)."
   (let* ((text (getf (task:event-data event) :text))
-         (existing (gethash text (obs-graph-records *obs-graph*))))
-    ;; Skip if already indexed
-    (when existing
+         (existing (when text
+                     (gethash text (obs-graph-records *obs-graph*)))))
+    ;; Skip if nil text or already indexed
+    (when (or (null text) existing)
       (return-from index-observation-event nil))
     (let* ((emb (get-embedding text))
            (record (make-obs-record
@@ -197,7 +198,7 @@
     (dolist (ev events)
       (when (eq (task:event-type ev) :observation)
         (let ((text (getf (task:event-data ev) :text)))
-          (unless (gethash text (obs-graph-records *obs-graph*))
+          (when (and text (not (gethash text (obs-graph-records *obs-graph*))))
             (push (cons ev text) pending)))))
     (when (null pending)
       (return-from index-task-observations 0))
