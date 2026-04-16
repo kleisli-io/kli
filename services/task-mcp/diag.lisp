@@ -1,0 +1,299 @@
+(in-package #:task-mcp)
+
+;;; Forward references to specials defined later in the load order
+;;; (session.lisp, server.lisp).  Declaiming them special here keeps
+;;; the compiler from warning and documents the dependency.
+(declaim (special *session-contexts*
+                  *session-contexts-lock*
+                  *log-verbose*))
+
+;;; ==========================================================================
+;;; Lock tracing, session GC thread, request deadline, admin endpoints
+;;; ==========================================================================
+;;;
+;;; The diagnostic primitives in this file exist to bound two pathologies
+;;; that can wedge the task-MCP daemon:
+;;;
+;;;  1. A lock held across slow I/O (e.g. /proc walks in resolve-peer-pid)
+;;;     stalls every concurrent request whose unwind path needs the same
+;;;     lock.  The with-timed-lock macro records wait-to-acquire and hold
+;;;     durations into a bounded ring buffer so /admin/diag can surface
+;;;     long holds before they become deadlocks.
+;;;
+;;;  2. *session-contexts* grows without bound because
+;;;     cleanup-inactive-sessions only runs from task_create /
+;;;     task_bootstrap.  A long-running daemon with no bootstrap traffic
+;;;     accumulates dead-Claude contexts.  The session GC thread calls
+;;;     cleanup-inactive-sessions on a fixed interval.
+;;;
+;;; Together with a request deadline in the acceptor's :around method,
+;;; these give us three orthogonal guards: observability, proactive
+;;; cleanup, and a hard time budget.
+
+;;; --- Lock trace ring buffer ------------------------------------------------
+
+(defconstant +lock-trace-size+ 512
+  "Capacity of the lock-event ring buffer.  Fixed so writers never
+   allocate after startup and readers see a bounded snapshot.")
+
+(defvar *lock-trace*
+  (make-array +lock-trace-size+ :initial-element nil)
+  "Ring buffer of recent lock events.  Each entry is a plist with
+   keys :NAME :WAIT-MS :HOLD-MS :THREAD :AT.  NIL slots indicate
+   unwritten positions (seen only before the buffer has wrapped once).")
+
+(defvar *lock-trace-pos* (cons 0 nil)
+  "Monotonic write cursor into *LOCK-TRACE*; taken modulo
+   +LOCK-TRACE-SIZE+ at store time.  The cursor lives in CAR so
+   SB-EXT:ATOMIC-INCF can bump it without a mutex (SBCL's
+   atomic-incf supports CAR/CDR places but not plain symbol-value
+   on every version we ship).")
+
+(defvar *lock-trace-warn-ms* 500
+  "Wait or hold duration above which a lock event is also logged to
+   *ERROR-OUTPUT* at record time.  Tune by rebinding at the REPL.")
+
+(declaim (inline elapsed-ms))
+(defun elapsed-ms (since-internal)
+  "Milliseconds elapsed from SINCE-INTERNAL (a GET-INTERNAL-REAL-TIME
+   value) to now, as a non-negative integer."
+  (floor (* 1000 (- (get-internal-real-time) since-internal))
+         internal-time-units-per-second))
+
+(defun record-lock-event (name wait-ms hold-ms thread)
+  "Append a lock event to *LOCK-TRACE* and emit a warning on
+   *ERROR-OUTPUT* when wait or hold exceeds *LOCK-TRACE-WARN-MS*.
+   Lock-free: uses SB-EXT:ATOMIC-INCF on the cursor and a single
+   SVREF store."
+  (let ((entry (list :name name
+                     :wait-ms wait-ms
+                     :hold-ms hold-ms
+                     :thread thread
+                     :at (get-universal-time))))
+    (let ((idx (mod (sb-ext:atomic-incf (car *lock-trace-pos*))
+                    +lock-trace-size+)))
+      (setf (svref *lock-trace* idx) entry))
+    (when (or (> wait-ms *lock-trace-warn-ms*)
+              (> hold-ms *lock-trace-warn-ms*))
+      (format *error-output*
+              "~&;; WARNING: lock ~S wait=~Dms hold=~Dms thread=~A~%"
+              name wait-ms hold-ms thread)))
+  nil)
+
+(defmacro with-timed-lock ((lock name) &body body)
+  "Acquire LOCK, run BODY, release LOCK; record wait-to-acquire and
+   hold duration via RECORD-LOCK-EVENT.  NAME is a keyword identifying
+   the call site in traces.  Drop-in replacement for
+   BT:WITH-LOCK-HELD on locks whose contention we care about."
+  (let ((lk (gensym "LOCK-"))
+        (nm (gensym "NAME-"))
+        (ws (gensym "WAIT-START-"))
+        (acq (gensym "ACQUIRED-"))
+        (wait-ms (gensym "WAIT-MS-")))
+    `(let* ((,lk ,lock)
+            (,nm ,name)
+            (,ws (get-internal-real-time)))
+       (bt:with-lock-held (,lk)
+         (let* ((,acq (get-internal-real-time))
+                (,wait-ms (floor (* 1000 (- ,acq ,ws))
+                                 internal-time-units-per-second)))
+           (unwind-protect
+                (progn ,@body)
+             (record-lock-event
+              ,nm ,wait-ms (elapsed-ms ,acq)
+              (bt:thread-name (bt:current-thread)))))))))
+
+(defun recent-lock-events (&optional (n +lock-trace-size+))
+  "Return up to N most-recent lock events in chronological order
+   (oldest first).  Reads are snapshot-consistent up to concurrent
+   writes that overlap the read window.  Takes no locks."
+  (let* ((pos (car *lock-trace-pos*))
+         (size (min n +lock-trace-size+))
+         (result nil))
+    (loop for i from 0 below size
+          for idx = (mod (- pos 1 i) +lock-trace-size+)
+          for entry = (svref *lock-trace* idx)
+          when entry do (push entry result))
+    result))
+
+;;; --- CLOSE_WAIT counter ----------------------------------------------------
+
+(defun count-close-wait-on (port)
+  "Count TCP connections on PORT in CLOSE_WAIT state by reading
+   /proc/net/tcp.  Linux state codes are hex; 08 is TCP_CLOSE_WAIT.
+   Returns the count as an integer, or NIL when /proc is unavailable."
+  (handler-case
+      (with-open-file (s "/proc/net/tcp" :if-does-not-exist nil)
+        (when s
+          (read-line s nil nil) ; header
+          (loop with count = 0
+                for line = (read-line s nil nil)
+                while line
+                do (let* ((trimmed (string-trim '(#\Space #\Tab) line))
+                          (parts (remove "" (uiop:split-string trimmed)
+                                         :test #'string=)))
+                     (when (>= (length parts) 4)
+                       (let* ((local-str (nth 1 parts))
+                              (state (nth 3 parts))
+                              (colon (position #\: local-str :from-end t)))
+                         (when (and colon (string= state "08"))
+                           (let ((local-port
+                                   (ignore-errors
+                                    (parse-integer local-str
+                                                   :start (1+ colon)
+                                                   :radix 16
+                                                   :junk-allowed t))))
+                             (when (eql local-port port)
+                               (incf count)))))))
+                finally (return count))))
+    (error () nil)))
+
+;;; --- Periodic session GC thread -------------------------------------------
+
+(defvar *session-gc-thread* nil
+  "Handle of the background thread that runs CLEANUP-INACTIVE-SESSIONS
+   on a fixed interval.  NIL when the thread is not running.")
+
+(defvar *session-gc-stop* nil
+  "When set to T, the session GC thread exits its loop on the next
+   wakeup.  Primarily a test affordance; production tears down via
+   process exit.")
+
+(defvar *session-gc-interval-seconds* 300
+  "Seconds between successive CLEANUP-INACTIVE-SESSIONS runs in the
+   GC thread.  Bind to a small value in tests.")
+
+(defvar *session-gc-max-age-hours* 4
+  "Age threshold passed to CLEANUP-INACTIVE-SESSIONS by the GC thread.")
+
+(defun session-gc-loop ()
+  "Body of the GC thread.  Sleeps, then calls
+   CLEANUP-INACTIVE-SESSIONS inside a HANDLER-CASE so a transient
+   error doesn't take the thread out.  Exits when *SESSION-GC-STOP*
+   becomes true."
+  (loop
+    (when *session-gc-stop* (return))
+    (sleep *session-gc-interval-seconds*)
+    (when *session-gc-stop* (return))
+    (handler-case
+        (let ((removed (cleanup-inactive-sessions *session-gc-max-age-hours*)))
+          (when (and *log-verbose* (plusp removed))
+            (format *error-output*
+                    "~&;; session-gc: removed ~D inactive context(s)~%"
+                    removed)))
+      (error (e)
+        (format *error-output*
+                "~&;; WARNING: session-gc error: ~A~%" e)))))
+
+(defun start-session-gc-thread ()
+  "Spawn the session GC thread if it is not already running.
+   Returns the thread object."
+  (unless (and *session-gc-thread*
+               (bt:thread-alive-p *session-gc-thread*))
+    (setf *session-gc-stop* nil)
+    (setf *session-gc-thread*
+          (bt:make-thread #'session-gc-loop
+                          :name "task-mcp-session-gc")))
+  *session-gc-thread*)
+
+(defun stop-session-gc-thread ()
+  "Request the session GC thread to exit on its next wakeup.  Does
+   not block; use in tests to tear down the thread cleanly."
+  (setf *session-gc-stop* t))
+
+;;; --- Request deadline ------------------------------------------------------
+
+(defvar *request-deadline-seconds* 30
+  "Maximum wall-clock seconds a single request handler may run before
+   its deadline fires and the handler returns an HTTP 503.  Bind to
+   NIL to disable the deadline entirely (not recommended outside of
+   tests).")
+
+(define-condition request-deadline-exceeded (error)
+  ((path :initarg :path :reader request-deadline-path)
+   (session-id :initarg :session-id :reader request-deadline-session-id))
+  (:report
+   (lambda (c stream)
+     (format stream "request exceeded ~Ds deadline (path=~A session=~A)"
+             *request-deadline-seconds*
+             (request-deadline-path c)
+             (request-deadline-session-id c)))))
+
+(defmacro with-request-deadline ((&key path session-id) &body body)
+  "Wrap BODY in SB-SYS:WITH-DEADLINE with a timeout of
+   *REQUEST-DEADLINE-SECONDS*.  On timeout, signal
+   REQUEST-DEADLINE-EXCEEDED carrying PATH and SESSION-ID for
+   diagnostic attribution; callers translate that to HTTP 503.
+   When *REQUEST-DEADLINE-SECONDS* is NIL, BODY runs with no
+   deadline."
+  (let ((secs (gensym "SECS-")))
+    `(let ((,secs *request-deadline-seconds*))
+       (if ,secs
+           (handler-case
+               (sb-sys:with-deadline (:seconds ,secs)
+                 ,@body)
+             (sb-sys:deadline-timeout ()
+               (error 'request-deadline-exceeded
+                      :path ,path :session-id ,session-id)))
+           (progn ,@body)))))
+
+;;; --- /admin/diag + /admin/unwedge endpoints -------------------------------
+
+(defun diag-snapshot-plist ()
+  "Collect a snapshot of daemon health for /admin/diag as a plist."
+  (let* ((sessions-n
+           ;; Briefly take the lock to count contexts — an O(1)
+           ;; operation that itself goes into the trace.
+           (with-timed-lock (*session-contexts-lock* :diag-count)
+             (hash-table-count *session-contexts*)))
+         (threads (length (bt:all-threads)))
+         (close-wait (count-close-wait-on (get-http-port)))
+         (events (recent-lock-events)))
+    (list :sessions sessions-n
+          :threads threads
+          :close-wait close-wait
+          :deadline-seconds *request-deadline-seconds*
+          :gc-thread-alive
+          (and *session-gc-thread*
+               (bt:thread-alive-p *session-gc-thread*)
+               t)
+          :gc-interval-seconds *session-gc-interval-seconds*
+          :gc-max-age-hours *session-gc-max-age-hours*
+          :lock-events events)))
+
+(defun diag-json-stream (stream plist)
+  "Encode the /admin/diag PLIST to STREAM as JSON."
+  (let ((ht (make-hash-table :test 'equal))
+        (events (getf plist :lock-events)))
+    (setf (gethash "sessions" ht) (getf plist :sessions)
+          (gethash "threads" ht) (getf plist :threads)
+          (gethash "close_wait" ht) (getf plist :close-wait)
+          (gethash "deadline_seconds" ht) (getf plist :deadline-seconds)
+          (gethash "gc_thread_alive" ht) (getf plist :gc-thread-alive)
+          (gethash "gc_interval_seconds" ht) (getf plist :gc-interval-seconds)
+          (gethash "gc_max_age_hours" ht) (getf plist :gc-max-age-hours))
+    (setf (gethash "lock_events" ht)
+          (mapcar
+           (lambda (e)
+             (let ((eh (make-hash-table :test 'equal)))
+               (setf (gethash "name" eh)
+                     (string-downcase (symbol-name (getf e :name))))
+               (setf (gethash "wait_ms" eh) (getf e :wait-ms)
+                     (gethash "hold_ms" eh) (getf e :hold-ms)
+                     (gethash "thread" eh) (or (getf e :thread) "")
+                     (gethash "at" eh) (getf e :at))
+               eh))
+           events))
+    (yason:encode ht stream)))
+
+(defun register-admin-endpoints ()
+  "Register /admin/diag (GET) for daemon introspection.  Called from
+   REGISTER-HTTP-ENDPOINTS alongside /health and friends."
+  (hunchentoot:define-easy-handler (admin-diag :uri "/admin/diag") ()
+    (setf (hunchentoot:content-type*) "application/json")
+    (handler-case
+        (with-output-to-string (s)
+          (diag-json-stream s (diag-snapshot-plist)))
+      (error (e)
+        (setf (hunchentoot:return-code*) 500)
+        (format nil "{\"error\": ~S}" (princ-to-string e))))))

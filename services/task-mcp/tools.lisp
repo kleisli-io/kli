@@ -48,19 +48,48 @@
                (task-validation:validation-result-reason result)
                (task-validation:validation-result-suggestion result))))))
 
+(defun validate-required-string (label value)
+  "Validate that VALUE is a non-nil, non-empty string.
+   Returns NIL when valid, or an error MCP text-content when invalid.
+
+   The check covers three indistinguishable cases at once — JSON null,
+   missing key, and empty string — because the MCP framework cannot
+   distinguish them at the tool handler.  Mirrors validate-name-or-error
+   so tool bodies can write `(or (validate-required-string ...) ...)`."
+  (when (or (null value)
+            (and (stringp value) (zerop (length value))))
+    (make-text-content
+     (format nil "Error: ~A is required and must be a non-empty string." label))))
+
 ;;; ==========================================================================
 ;;; Task ID Resolution
 ;;; ==========================================================================
 
 (defun resolve-task-id (id)
-  "Resolve a task ID by stripping any legacy depot prefix.
-   Returns the bare task ID."
-  (task:strip-depot-prefix id))
+  "Resolve a task ID at the system boundary.
+
+   Strips any legacy depot prefix and returns the bare task ID.  Rejects
+   nil and empty strings with a structured error — this is the single
+   chokepoint that prevents nil identifiers from reaching emit-event and
+   surviving to disk as JSON nulls.
+
+   For internal callers that legitimately handle nil (e.g., already-
+   resolved IDs in lookup paths), use task:strip-depot-prefix directly,
+   which stays permissive."
+  (cond
+    ((null id)
+     (error "resolve-task-id: task identifier is nil"))
+    ((and (stringp id) (zerop (length id)))
+     (error "resolve-task-id: task identifier is empty string"))
+    (t (task:strip-depot-prefix id))))
 
 (define-tool task_create
     ((name string "Task name/ID")
      (description string "Task description" ""))
-  "Create a new task with directory and initial event."
+  "Create a new top-level task with directory and initial events.
+   Does NOT change current task (Creation ≠ Selection).
+   Use task_set_current or task_bootstrap to switch to the new task.
+   Bootstrap exception: if no current task is set, the new task is adopted."
   ;; Validate name before creating
   (let ((validation-error (validate-name-or-error name)))
     (or validation-error
@@ -90,7 +119,14 @@
           (cleanup-stale-sessions)
           (cleanup-inactive-sessions)
           (make-text-content
-           (format nil "Created task ~A at ~A" full-name dir))))))
+           (if prev
+               (format nil "Created task ~A at ~A. ~
+                            Current task unchanged (~A). ~
+                            Use task_set_current to switch."
+                       full-name dir prev)
+               (format nil "Created task ~A at ~A. ~
+                            Adopted as current (bootstrap)."
+                       full-name dir)))))))
 
 (define-session-tool task_fork
     ((name string "Child task name")
@@ -445,9 +481,11 @@ depends-on (JSON array of task IDs), enables (JSON array), related-to (JSON arra
 (define-task-tool observe
     ((text string "Observation text"))
   "Record an observation for the current task."
-  (emit-event :observation (list :text text))
-  (make-text-content
-   (format nil "Observation recorded (~D chars)" (length text))))
+  (or (validate-required-string "text" text)
+      (progn
+        (emit-event :observation (list :text text))
+        (make-text-content
+         (format nil "Observation recorded (~D chars)" (length text))))))
 
 (define-task-tool spawn
     ((name string "Child task name")
@@ -483,21 +521,25 @@ depends-on (JSON array of task IDs), enables (JSON array), related-to (JSON arra
     ((target_id string "Target task ID")
      (edge_type string "Edge type (e.g. depends-on, related-to, blocks)"))
   "Create typed edge from current task to target."
-  (let ((resolved-target (resolve-task-id target_id)))
-    (emit-event :task.link
-                (list :target-id resolved-target :edge-type edge_type))
-    (make-text-content
-     (format nil "Linked ~A -> ~A (edge: ~A)" *current-task-id* resolved-target edge_type))))
+  (or (validate-required-string "target_id" target_id)
+      (validate-required-string "edge_type" edge_type)
+      (let ((resolved-target (resolve-task-id target_id)))
+        (emit-event :task.link
+                    (list :target-id resolved-target :edge-type edge_type))
+        (make-text-content
+         (format nil "Linked ~A -> ~A (edge: ~A)" *current-task-id* resolved-target edge_type)))))
 
 (define-task-tool task_sever
     ((target_id string "Target task ID")
      (edge_type string "Edge type to sever"))
   "Sever edge from current task to target."
-  (let ((resolved-target (resolve-task-id target_id)))
-    (emit-event :task.sever
-                (list :target-id resolved-target :edge-type edge_type))
-    (make-text-content
-     (format nil "Severed ~A -> ~A (edge: ~A)" *current-task-id* resolved-target edge_type))))
+  (or (validate-required-string "target_id" target_id)
+      (validate-required-string "edge_type" edge_type)
+      (let ((resolved-target (resolve-task-id target_id)))
+        (emit-event :task.sever
+                    (list :target-id resolved-target :edge-type edge_type))
+        (make-text-content
+         (format nil "Severed ~A -> ~A (edge: ~A)" *current-task-id* resolved-target edge_type)))))
 
 (define-task-tool task_reclassify
     ((target_id string "Target task ID")

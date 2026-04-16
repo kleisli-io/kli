@@ -81,9 +81,13 @@
 
 (defmethod hunchentoot:acceptor-dispatch-request :around
     ((acceptor mcp-http::mcp-acceptor) request)
-  "Wrap each HTTP request with thread-local session state bindings."
-  (declare (ignore request))
+  "Wrap each HTTP request with thread-local session state bindings
+   and a wall-clock deadline.  The deadline protects the handler
+   thread from pathological blocking paths: on timeout we unwind
+   cleanly through the unwind-protect and return HTTP 503 rather
+   than leaking the thread and its TCP socket."
   (let* ((tables (acquire-request-tables))
+         (script-name (ignore-errors (hunchentoot:script-name request)))
          ;; Per-request caches from pool (prevents redundant disk reads/computation)
          (task:*elog-cache* (first tables))
          (*active-sessions-cache* (second tables))
@@ -104,12 +108,24 @@
     (ensure-session-context)
     (playbook::ensure-playbook-session-context)
     (unwind-protect
-         (call-next-method)
+         (handler-case
+             (with-request-deadline (:path script-name
+                                     :session-id *session-id*)
+               (call-next-method))
+           (request-deadline-exceeded (c)
+             (format *error-output*
+                     "~&;; WARNING: ~A~%" c)
+             (setf (hunchentoot:return-code*) 503)
+             (setf (hunchentoot:content-type*) "application/json")
+             (format nil "{\"error\": \"request deadline exceeded\", ~
+                          \"path\": ~S, \"deadline_seconds\": ~D}"
+                     (or script-name "")
+                     *request-deadline-seconds*)))
       ;; Persist session context on exit — captures updated vector clock,
       ;; event counter, and task ID.  Replaces per-event finalize-session-context
       ;; calls which could leak transient task IDs during mutations.
       (when *session-id*
-        (save-session-context *session-id*))
+        (ignore-errors (save-session-context *session-id*)))
       (release-request-tables tables))))
 
 ;;; HTTP API endpoints (non-MCP, for hook integration)
@@ -122,6 +138,10 @@
   (hunchentoot:define-easy-handler (health-handler :uri "/health") ()
     (setf (hunchentoot:content-type*) "application/json")
     (format nil "{\"status\":\"ok\",\"build_id\":~S}" (get-build-id)))
+
+  ;; Diagnostic endpoint: session counts, thread count, CLOSE_WAIT count,
+  ;; and a snapshot of the recent lock-event ring buffer.
+  (register-admin-endpoints)
 
   (hunchentoot:define-easy-handler (register-pid-handler :uri "/register-pid")
       (session-id pid team-name agent-name agent-type)
@@ -291,13 +311,22 @@
       (format *error-output* "  Current task: ~A~%" *current-task-id*))))
 
 (defun start-task-server (&key background)
-  "Create and start the task MCP server."
+  "Create and start the task MCP server.
+   In HTTP mode, also spawns the periodic session-context GC thread
+   so idle daemons don't accumulate dead-Claude contexts."
   (initialize-server)
   (let* ((transport (select-transport))
          (server (mcp-framework:make-server
                   :name "task-mcp"
                   :version "1.0.0"
                   :transport transport)))
+    (when *http-mode*
+      (start-session-gc-thread)
+      (when *log-verbose*
+        (format *error-output*
+                "  Session GC: every ~Ds, max-age ~Dh~%"
+                *session-gc-interval-seconds*
+                *session-gc-max-age-hours*)))
     (mcp-framework:run-server server :background background)))
 
 (defun main ()

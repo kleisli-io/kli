@@ -79,7 +79,7 @@
 
 (defun get-session-context (session-id)
   "Get or create session context for SESSION-ID."
-  (bt:with-lock-held (*session-contexts-lock*)
+  (with-timed-lock (*session-contexts-lock* :get-ctx)
     (or (gethash session-id *session-contexts*)
         (let ((ctx (make-session-context
                     :id session-id
@@ -91,7 +91,7 @@
    Called after request processing in HTTP mode.
    Lock held during struct modification to prevent interleaved writes
    from concurrent requests on the same session."
-  (bt:with-lock-held (*session-contexts-lock*)
+  (with-timed-lock (*session-contexts-lock* :save-ctx)
     (let ((ctx (or (gethash session-id *session-contexts*)
                    (let ((new (make-session-context
                                :id session-id
@@ -131,7 +131,7 @@
    Called opportunistically to prevent memory leaks."
   (let* ((cutoff (- (get-universal-time) (* max-age-hours 60 60)))
          (to-remove nil))
-    (bt:with-lock-held (*session-contexts-lock*)
+    (with-timed-lock (*session-contexts-lock* :cleanup-inactive)
       (maphash (lambda (id ctx)
                  (when (< (ctx-last-active ctx) cutoff)
                    (push id to-remove)))
@@ -216,32 +216,47 @@
 (defun pid-owns-socket-p (pid inode)
   "Check if PID owns a socket with the given INODE.
    Scans /proc/<pid>/fd/0 through /proc/<pid>/fd/255 for a symlink
-   matching socket:[INODE].  Returns T if found."
+   matching socket:[INODE].  Returns T if found.  Returns NIL
+   immediately when /proc/<pid> does not exist (dead process)."
   (handler-case
-      (let ((target (format nil "socket:[~D]" inode)))
-        (loop for fd from 0 below 256
-              for link = (ignore-errors
-                           (sb-posix:readlink
-                            (format nil "/proc/~D/fd/~D" pid fd)))
-              when (and link (string= link target))
-              return t))
+      (when (probe-file (format nil "/proc/~D" pid))
+        (let ((target (format nil "socket:[~D]" inode)))
+          (loop for fd from 0 below 256
+                for link = (ignore-errors
+                             (sb-posix:readlink
+                              (format nil "/proc/~D/fd/~D" pid fd)))
+                when (and link (string= link target))
+                return t)))
     (error () nil)))
+
+(defun snapshot-registered-pids ()
+  "Return a fresh list of all non-NIL claude PIDs currently in
+   *SESSION-CONTEXTS*.  Takes *SESSION-CONTEXTS-LOCK* for the
+   duration of the MAPHASH only; callers iterate /proc lock-free."
+  (let ((pids nil))
+    (with-timed-lock (*session-contexts-lock* :snapshot-pids)
+      (maphash (lambda (sid ctx)
+                 (declare (ignore sid))
+                 (let ((cpid (ctx-claude-pid ctx)))
+                   (when cpid (push cpid pids))))
+               *session-contexts*))
+    (delete-duplicates pids)))
 
 (defun resolve-peer-pid/linux (remote-port server-port)
   "Linux implementation: trace TCP connection via /proc/net/tcp inodes.
-   Returns the registered Claude PID owning the connection, or NIL."
+   Returns the registered Claude PID owning the connection, or NIL.
+
+   Lock discipline: snapshot the registered PID list under
+   *SESSION-CONTEXTS-LOCK*, then release the lock and probe /proc
+   lock-free.  The O(256) readlink loop per PID therefore cannot
+   block any other request's SAVE-SESSION-CONTEXT or
+   GET-SESSION-CONTEXT call.  PID-OWNS-SOCKET-P's PROBE-FILE
+   short-circuits dead PIDs in a single syscall."
   (let ((inode (find-client-socket-inode remote-port server-port)))
     (when inode
-      ;; Only scan registered Claude PIDs (small set)
-      (bt:with-lock-held (*session-contexts-lock*)
-        (block found
-          (maphash
-           (lambda (sid ctx)
-             (declare (ignore sid))
-             (let ((cpid (ctx-claude-pid ctx)))
-               (when (and cpid (pid-owns-socket-p cpid inode))
-                 (return-from found cpid))))
-           *session-contexts*))))))
+      (loop for cpid in (snapshot-registered-pids)
+            when (pid-owns-socket-p cpid inode)
+              return cpid))))
 
 (defun resolve-peer-pid/macos (remote-port server-port)
   "macOS implementation: use lsof to find PID owning a TCP connection.
@@ -259,21 +274,15 @@
                      :error-output nil
                      :ignore-error-status t)))
         (when (and output (plusp (length output)))
-          ;; lsof -t outputs one PID per line; check each against registered PIDs
-          (let ((pids (loop for line in (uiop:split-string output :separator '(#\Newline))
-                            for trimmed = (string-trim '(#\Space #\Tab #\Return) line)
-                            when (plusp (length trimmed))
-                            collect (ignore-errors (parse-integer trimmed)))))
-            (bt:with-lock-held (*session-contexts-lock*)
-              (block found
-                (dolist (candidate-pid pids)
-                  (when candidate-pid
-                    (maphash
-                     (lambda (sid ctx)
-                       (declare (ignore sid))
-                       (when (eql (ctx-claude-pid ctx) candidate-pid)
-                         (return-from found candidate-pid)))
-                     *session-contexts*))))))))
+          (let ((candidate-pids
+                  (loop for line in (uiop:split-string output :separator '(#\Newline))
+                        for trimmed = (string-trim '(#\Space #\Tab #\Return) line)
+                        when (plusp (length trimmed))
+                          collect (ignore-errors (parse-integer trimmed))))
+                (registered (snapshot-registered-pids)))
+            (loop for pid in candidate-pids
+                  when (and pid (member pid registered :test #'eql))
+                    return pid))))
     (error () nil)))
 
 (defun resolve-peer-pid ()
@@ -338,7 +347,7 @@
             (let ((peer-pid (resolve-peer-pid)))
               (when peer-pid
                 (setf *claude-pid* peer-pid)
-                (bt:with-lock-held (*session-contexts-lock*)
+                (with-timed-lock (*session-contexts-lock* :set-peer-pid)
                   (let ((ctx (gethash http-session-id *session-contexts*)))
                     (when ctx
                       (setf (ctx-claude-pid ctx) peer-pid))))))))
@@ -395,9 +404,42 @@
         (string= "completed"
                  (crdt:lww-value (task:task-state-status state)))))))
 
+(defparameter *event-required-fields*
+  '((:task.create        :name)
+    (:task.link          :target-id :edge-type)
+    (:task.sever         :target-id :edge-type)
+    (:task.fork          :child-id  :edge-type)
+    (:task.set-metadata  :key)
+    (:observation        :text))
+  "Per-event-type list of plist keys whose values must be present and non-nil
+   in the event DATA passed to EMIT-EVENT.  Event types not listed here have
+   no required fields enforced at this layer.
+
+   Rationale: the event log is a system boundary for serialized data; a JSON
+   null surviving to disk silently propagates through replay and renders as
+   the literal string \"NIL\" in derived views.  This guard catches any
+   caller — direct MCP tool, TQ mutation, or internal — that forgot to
+   validate at its own boundary.
+
+   Note: :task.set-metadata :value is intentionally exempt — a nil value is
+   the legitimate way to express 'no value bound for this key'.  Only :key is
+   required.  If a future event type needs to clear a key explicitly, prefer
+   a distinct :clear-meta event type over weakening this guard.")
+
+(defun check-required-fields (type data)
+  "Return the list of required field keys missing or nil in DATA for event TYPE.
+   Returns NIL if every required field for TYPE is present and non-nil."
+  (loop for field in (cdr (assoc type *event-required-fields*))
+        for value = (getf data field 'missing)
+        when (or (eq value 'missing) (null value))
+        collect field))
+
 (defun emit-event (type &optional data)
   "Emit an event to the current task's event log.
    Rejects mutating events when task is completed.
+   Rejects events whose required fields (per *event-required-fields*) are
+   missing or nil — this is the boundary check that prevents JSON nulls
+   from surviving to disk.
    Increments vector clock, creates event, appends to file.
    Uses append-only writes for concurrent safety — multiple sessions
    can emit events to the same task without lost updates."
@@ -406,6 +448,10 @@
              (not (member type *completed-allowed-events*)))
     (error "Task ~A is completed. Reopen with task_reopen before making changes."
            *current-task-id*))
+  (let ((missing (check-required-fields type data)))
+    (when missing
+      (error "emit-event: event type ~A missing/nil required field(s): ~{~A~^, ~}"
+             type missing)))
   (crdt:vc-increment *session-vc* *session-id*)
   (let* ((ev (task:make-event
               :id (make-event-id)
@@ -454,7 +500,7 @@
         (after-count 0))
     (maphash (lambda (k v) (declare (ignore k v)) (incf before-count))
              (crdt:vc-entries *session-vc*))
-    (bt:with-lock-held (*session-contexts-lock*)
+    (with-timed-lock (*session-contexts-lock* :merge-vc-read)
       (dolist (sid session-ids)
         (let ((ctx (gethash sid *session-contexts*)))
           (when (and ctx (ctx-vector-clock ctx))
@@ -462,7 +508,7 @@
     (maphash (lambda (k v) (declare (ignore k v)) (incf after-count))
              (crdt:vc-entries *session-vc*))
     ;; Update context with merged VC
-    (bt:with-lock-held (*session-contexts-lock*)
+    (with-timed-lock (*session-contexts-lock* :merge-vc-save)
       (let ((ctx (gethash *session-id* *session-contexts*)))
         (when ctx (setf (ctx-vector-clock ctx) *session-vc*))))
     (- after-count before-count)))
@@ -522,7 +568,7 @@
          ((> (length live-pid-files) 1)
           (let* ((session-id (or *session-id* (current-http-session-id)))
                  (ctx (when session-id
-                        (bt:with-lock-held (*session-contexts-lock*)
+                        (with-timed-lock (*session-contexts-lock* :get-claude-pid-ctx)
                           (gethash session-id *session-contexts*))))
                  (ctx-pid (when ctx (ctx-claude-pid ctx)))
                  (live-pids-set (make-hash-table)))
@@ -588,7 +634,7 @@
       (setf (gethash "claude_pid" ht) *claude-pid*)
       (setf (gethash "timestamp" ht) (get-universal-time))
       ;; Team metadata from session context (set by P1 register-claude-pid)
-      (let ((ctx (bt:with-lock-held (*session-contexts-lock*)
+      (let ((ctx (with-timed-lock (*session-contexts-lock* :team-lookup)
                    (gethash *session-id* *session-contexts*))))
         (when (and ctx (ctx-team-name ctx))
           (setf (gethash "team_name" ht) (ctx-team-name ctx))
@@ -967,7 +1013,7 @@
              ;; Build session->team lookup from active session files and in-memory contexts
              (let ((session-teams (make-hash-table :test 'equal)))
                ;; From in-memory contexts (covers current process)
-               (bt:with-lock-held (*session-contexts-lock*)
+               (with-timed-lock (*session-contexts-lock* :swarm-teams)
                  (maphash (lambda (sid ctx)
                             (when (ctx-team-name ctx)
                               (setf (gethash sid session-teams)

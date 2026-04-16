@@ -96,6 +96,7 @@
    #:scaffold-result-metadata
    #:*phase-metadata-keys*
    #:parse-phase-spec
+   #:maybe-improve-name
 
    ;; Conditions
    #:tq-error
@@ -136,8 +137,11 @@
   "Fields that only exist after enrich-step. Used to warn users.")
 
 (defparameter *phase-metadata-keys*
-  '(:objective :acceptance :steps :context :constraints :await :ephemeral)
-  "Recognized metadata keywords for scaffold-plan! phase specs.")
+  '(:display-name :objective :acceptance :steps :context :constraints :await :ephemeral)
+  "Recognized metadata keywords for scaffold-plan! phase specs.
+   :display-name is synthesised from the phase description when not
+   supplied explicitly, so every scaffolded phase carries a human-readable
+   label independent of its task-id slug.")
 
 (defun current-graph ()
   "Return the current graph, building if needed."
@@ -885,25 +889,35 @@
   (metadata nil :type list))     ; list of (local-name . key-count)
 
 (defun maybe-improve-name (local-name description)
-  "If LOCAL-NAME fails validation but DESCRIPTION exists, generate better name.
-   Returns the final name to use (possibly improved)."
+  "Return a validated task name derived from LOCAL-NAME, or signal
+   task-validation:name-improvement-failed.
+
+   If LOCAL-NAME already passes validation, it is returned unchanged.
+   Otherwise a slug is synthesised from DESCRIPTION and returned if it
+   validates. When neither LOCAL-NAME nor the synthesised slug is
+   acceptable, a structured error is signalled carrying the invalid
+   input, the description that was available, and the validation
+   reason — so callers can either let it propagate or translate it
+   into a boundary-appropriate error shape."
   (let ((validation (task-validation:validate-task-name local-name)))
-    (if (task-validation:validation-result-valid-p validation)
-        ;; Already valid - use as-is
-        local-name
-        ;; Invalid - try to generate from description
-        (if (and description (> (length description) 0))
-            (let ((generated (task-validation:suggest-name-from-description description)))
-              (if (and generated
-                       (> (length generated) 0)
-                       ;; Also validate the generated name
-                       (task-validation:validation-result-valid-p
-                        (task-validation:validate-task-name generated)))
-                  generated
-                  ;; Generation failed or invalid, use original
-                  local-name))
-            ;; No description to generate from
-            local-name))))
+    (when (task-validation:validation-result-valid-p validation)
+      (return-from maybe-improve-name local-name))
+    (let ((reason (task-validation:validation-result-reason validation)))
+      (unless (and description (stringp description) (> (length description) 0))
+        (error 'task-validation:name-improvement-failed
+               :input local-name
+               :description description
+               :reason reason))
+      (let ((generated (task-validation:suggest-name-from-description description)))
+        (unless (and generated
+                     (> (length generated) 0)
+                     (task-validation:validation-result-valid-p
+                      (task-validation:validate-task-name generated)))
+          (error 'task-validation:name-improvement-failed
+                 :input local-name
+                 :description description
+                 :reason reason))
+        generated))))
 
 (defun parse-phase-spec (spec)
   "Parse a scaffold-plan! phase spec into components.
@@ -1001,9 +1015,13 @@
             (unless (string= raw-name local-name)
               (setf (gethash raw-name name-to-id) created-id))
             (push (cons local-name created-id) (scaffold-result-created result))
-            ;; Store metadata for pass 3
-            (when metadata
-              (setf (gethash local-name name-to-meta) metadata))
+            ;; Default :display-name to the phase description when the spec
+            ;; did not supply one explicitly.  Ensures format-plan has a
+            ;; human-readable label for every phase without requiring every
+            ;; caller to write :display-name into the spec.
+            (unless (getf metadata :display-name)
+              (setf metadata (list* :display-name description metadata)))
+            (setf (gethash local-name name-to-meta) metadata)
             ;; Store dependencies for pass 2
             (dolist (dep after-deps)
               (push (list local-name (symbol-name dep) :depends-on)
@@ -1077,6 +1095,10 @@
                                          desc
                                          "phase-of")))
                (push (cons local-name created-id) (scaffold-result-created result))
+               ;; Emit :display-name metadata so format-plan has a
+               ;; human-readable label independent of the slug id.
+               (funcall *mutation-handler* created-id :set-meta :display-name desc)
+               (push (cons local-name 1) (scaffold-result-metadata result))
                ;; Wire dependency to previous
                (when prev-id
                  (funcall *mutation-handler* created-id :link prev-id :depends-on)
@@ -1087,6 +1109,8 @@
           (nreverse (scaffold-result-created result)))
     (setf (scaffold-result-edges result)
           (nreverse (scaffold-result-edges result)))
+    (setf (scaffold-result-metadata result)
+          (nreverse (scaffold-result-metadata result)))
     result))
 
 (defun interpret-pipeline (forms)

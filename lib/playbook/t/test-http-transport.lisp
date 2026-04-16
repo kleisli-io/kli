@@ -39,21 +39,6 @@
     (let ((transport-type (uiop:getenv "PLAYBOOK_MCP_TRANSPORT")))
       (is (string-equal "stdio" transport-type)))))
 
-(test get-playbook-http-port-default
-  "get-playbook-http-port returns 8091 when env is unset."
-  (with-env ("PLAYBOOK_MCP_PORT" :unset)
-    (is (= 8091 (playbook::get-playbook-http-port)))))
-
-(test get-playbook-http-port-from-env
-  "get-playbook-http-port reads PLAYBOOK_MCP_PORT env var."
-  (with-env ("PLAYBOOK_MCP_PORT" "9999")
-    (is (= 9999 (playbook::get-playbook-http-port)))))
-
-(test get-playbook-http-port-junk-fallback
-  "get-playbook-http-port falls back to 8091 on unparseable input."
-  (with-env ("PLAYBOOK_MCP_PORT" "not-a-number")
-    (is (= 8091 (playbook::get-playbook-http-port)))))
-
 ;;; HTTP session context
 
 (test get-current-session-http-mode

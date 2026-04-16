@@ -50,6 +50,7 @@
                                            (:file "embeddings")
                                            (:file "obs-index")
                                            (:file "retrieval")
+                                           (:file "diag")
                                            (:file "session")
                                            (:file "graph")
                                            (:file "query")

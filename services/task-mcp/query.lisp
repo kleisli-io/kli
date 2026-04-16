@@ -10,6 +10,15 @@
 ;;; MUTATION HANDLER
 ;;; ============================================================
 
+(defun tq-require-non-nil (op field value)
+  "Signal a structured error if VALUE is nil or an empty string.
+   OP is the mutation keyword (e.g. :observe); FIELD names the argument
+   being checked.  Produces an error that names the TQ op site so the
+   caller can locate the bad mutation in their query."
+  (when (or (null value)
+            (and (stringp value) (zerop (length value))))
+    (error "TQ ~A: required arg ~A is nil or empty" op field)))
+
 (defun tq-mutation-handler (node-id op &rest args)
   "Execute a TQ mutation operation on NODE-ID.
    Temporarily switches *current-task-id* to node-id for emit-event.
@@ -50,6 +59,7 @@
              ;; Observation
              (:observe
               (let ((text (first args)))
+                (tq-require-non-nil :observe :text text)
                 (emit-event :observation (list :text text))
                 (format nil "observed (~D chars)" (length text))))
 
@@ -57,6 +67,7 @@
              (:set-meta
               (let ((key (first args))
                     (value (second args)))
+                (tq-require-non-nil :set-meta :key key)
                 (emit-event :task.set-metadata
                             (list :key (if (keywordp key)
                                            (string-downcase (symbol-name key))
@@ -115,24 +126,32 @@
 
              ;; Scaffolding: fork creates a new task as child
              (:fork
-              (let* ((local-name (first args))
-                     (description (or (second args) ""))
-                     (edge-type (or (third args) "phase-of"))
-                     (full-name (ensure-date-prefix local-name))
-                     (resolved-parent (resolve-task-id node-id)))
-                ;; Create the child task directory
-                (task:ensure-task-directory full-name)
-                ;; Emit create event in child context
-                (setf *current-task-id* full-name)
-                (emit-event :task.create
-                            (list :name full-name
-                                  :description description
-                                  :parent resolved-parent))
-                ;; Emit fork event in parent context
-                (setf *current-task-id* resolved-parent)
-                (emit-event :task.fork
-                            (list :child-id full-name :edge-type edge-type))
-                full-name))
+              (let ((local-name (first args))
+                    (description (or (second args) ""))
+                    (edge-type (or (third args) "phase-of")))
+                (tq-require-non-nil :fork :local-name local-name)
+                ;; Improve / validate the name at the mutation boundary so
+                ;; every caller (scaffold-plan, scaffold-chain, direct
+                ;; task_query) gets the same format validation task_create
+                ;; enforces.  Signals task-validation:name-improvement-failed
+                ;; if the name is invalid and cannot be derived from
+                ;; DESCRIPTION — trust the name past this point.
+                (let* ((improved-name (tq:maybe-improve-name local-name description))
+                       (full-name (ensure-date-prefix improved-name))
+                       (resolved-parent (resolve-task-id node-id)))
+                  ;; Create the child task directory
+                  (task:ensure-task-directory full-name)
+                  ;; Emit create event in child context
+                  (setf *current-task-id* full-name)
+                  (emit-event :task.create
+                              (list :name full-name
+                                    :description description
+                                    :parent resolved-parent))
+                  ;; Emit fork event in parent context
+                  (setf *current-task-id* resolved-parent)
+                  (emit-event :task.fork
+                              (list :child-id full-name :edge-type edge-type))
+                  full-name)))
 
              (otherwise
               (error "Unknown mutation operation: ~A" op))))

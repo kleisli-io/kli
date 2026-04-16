@@ -16,6 +16,11 @@
    ;; Name generation
    #:suggest-name-from-description
    #:slugify
+   ;; Conditions
+   #:name-improvement-failed
+   #:name-improvement-failed-input
+   #:name-improvement-failed-description
+   #:name-improvement-failed-reason
    ;; Configuration (allow customization)
    #:*allowed-prefixes*
    #:*action-verbs*
@@ -72,6 +77,26 @@
   (valid-p nil :type boolean)
   (reason nil :type (or null string))
   (suggestion nil :type (or null string)))
+
+;;; Conditions
+
+(define-condition name-improvement-failed (error)
+  ((input :initarg :input :reader name-improvement-failed-input)
+   (description :initarg :description :reader name-improvement-failed-description)
+   (reason :initarg :reason :reader name-improvement-failed-reason))
+  (:documentation
+   "Signalled when a task name fails validation and no valid slug
+can be synthesised from the accompanying description. Slots carry
+enough context for callers to build a structured error response:
+INPUT is the original invalid name, DESCRIPTION is the text that
+was available for slug synthesis (possibly nil or empty), and
+REASON is the validation failure reason for INPUT.")
+  (:report (lambda (c stream)
+             (format stream
+                     "Task name ~S fails validation (~A) and could not be improved from description ~S."
+                     (name-improvement-failed-input c)
+                     (name-improvement-failed-reason c)
+                     (name-improvement-failed-description c)))))
 
 ;;; Helper Functions
 
