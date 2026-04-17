@@ -11,7 +11,9 @@
                 #:*current-task-id*
                 #:*session-id*
                 #:*session-vc*
-                #:*http-mode*)
+                #:*event-counter*
+                #:*http-mode*
+                #:*in-mutation*)
   (:import-from #:mcp-framework
                 #:call-tool
                 #:content-to-json)

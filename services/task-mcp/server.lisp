@@ -107,26 +107,35 @@
          (playbook::*http-mode* *http-mode*))
     (ensure-session-context)
     (playbook::ensure-playbook-session-context)
-    (unwind-protect
-         (handler-case
-             (with-request-deadline (:path script-name
-                                     :session-id *session-id*)
-               (call-next-method))
-           (request-deadline-exceeded (c)
-             (format *error-output*
-                     "~&;; WARNING: ~A~%" c)
-             (setf (hunchentoot:return-code*) 503)
-             (setf (hunchentoot:content-type*) "application/json")
-             (format nil "{\"error\": \"request deadline exceeded\", ~
-                          \"path\": ~S, \"deadline_seconds\": ~D}"
-                     (or script-name "")
-                     *request-deadline-seconds*)))
-      ;; Persist session context on exit — captures updated vector clock,
-      ;; event counter, and task ID.  Replaces per-event finalize-session-context
-      ;; calls which could leak transient task IDs during mutations.
-      (when *session-id*
-        (ignore-errors (save-session-context *session-id*)))
-      (release-request-tables tables))))
+    ;; Snapshot the session-persisted fields *after* ENSURE-SESSION-CONTEXT
+    ;; has loaded them from the registry.  On unwind we save only if the
+    ;; handler actually changed them, so long-lived read-only SSE streams
+    ;; cannot resurrect a stale CTX-TASK-ID over a concurrent reset.
+    (let ((snapshot-task-id *current-task-id*)
+          (snapshot-event-counter *event-counter*))
+      (unwind-protect
+           (handler-case
+               (with-request-deadline (:path script-name
+                                       :session-id *session-id*)
+                 (call-next-method))
+             (request-deadline-exceeded (c)
+               (format *error-output*
+                       "~&;; WARNING: ~A~%" c)
+               (setf (hunchentoot:return-code*) 503)
+               (setf (hunchentoot:content-type*) "application/json")
+               (format nil "{\"error\": \"request deadline exceeded\", ~
+                            \"path\": ~S, \"deadline_seconds\": ~D}"
+                       (or script-name "")
+                       *request-deadline-seconds*)))
+        ;; Persist session context on exit only when the request mutated
+        ;; it.  Always touches LAST-ACTIVE so idle-session GC still sees
+        ;; the request as a liveness signal.
+        (when *session-id*
+          (ignore-errors
+           (maybe-save-session-context *session-id*
+                                       snapshot-task-id
+                                       snapshot-event-counter)))
+        (release-request-tables tables)))))
 
 ;;; HTTP API endpoints (non-MCP, for hook integration)
 

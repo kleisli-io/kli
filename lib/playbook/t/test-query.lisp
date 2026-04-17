@@ -133,3 +133,32 @@
            (result (pq:format-query-result grouped)))
       (is (search "3 group" result))
       (is (search "lisp" result)))))
+
+;;; --- safe-read-query argument validation ---
+
+(test pq-safe-read-query-nil
+  "safe-read-query on NIL signals pq-parse-error with a human message,
+   not SBCL's raw type-binding error."
+  (handler-case
+      (progn (pq:safe-read-query nil)
+             (fail "expected pq-parse-error"))
+    (pq:pq-parse-error (c)
+      (let ((msg (pq:pq-error-message c)))
+        (is (search "nil" msg :test #'char-equal))
+        (is (not (search "when binding" msg)))))))
+
+(test pq-safe-read-query-empty
+  "safe-read-query on empty string signals pq-parse-error."
+  (handler-case
+      (progn (pq:safe-read-query "")
+             (fail "expected pq-parse-error"))
+    (pq:pq-parse-error (c)
+      (is (search "empty" (pq:pq-error-message c))))))
+
+(test pq-safe-read-query-non-string
+  "safe-read-query on a non-string signals pq-parse-error naming the type."
+  (handler-case
+      (progn (pq:safe-read-query 42)
+             (fail "expected pq-parse-error"))
+    (pq:pq-parse-error (c)
+      (is (search "string" (pq:pq-error-message c) :test #'char-equal)))))

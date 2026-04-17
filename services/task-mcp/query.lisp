@@ -295,28 +295,37 @@ These are stored as task metadata and surfaced via :enrich, plan-markdown, and p
 
 Create linear chain:
   (scaffold-chain! \"Phase 1\" \"Phase 2\" \"Phase 3\")"
-  (handler-case
-      (let* ((form (tq:safe-read-query query))
-             (result (let ((tq:*graph* (get-or-build-graph))
-                           ;; Graph now has qualified IDs, pass through directly
-                           (tq:*current-task-id* *current-task-id*)
-                           (tq:*mutation-handler* #'tq-mutation-handler)
-                           (tq:*mutation-safety-limit*
-                            (if safety_limit
-                                (if (zerop safety_limit) nil safety_limit)
-                                tq:*mutation-safety-limit*)))
-                       (tq:interpret-query form))))
-        ;; Invalidate graph cache after mutations that modify the graph
-        ;; (scaffold creates new tasks/edges, mutations modify state)
-        (when (or (tq:scaffold-result-p result)
-                  (tq:mutation-log-p result))
-          (task:clear-graph-cache))
-        (make-text-content (tq:format-query-result result)))
-    (tq:mutation-safety-exceeded (c)
-      (make-text-content "Safety limit: ~A" c))
-    (tq:tq-parse-error (c)
-      (make-text-content "Parse error: ~A" (tq:tq-error-message c)))
-    (tq:tq-error (c)
-      (make-text-content "Query error: ~A" (tq:tq-error-message c)))
-    (error (c)
-      (make-text-content "Error: ~A" c))))
+  (cond
+    ((or (null query)
+         (and (stringp query) (zerop (length query))))
+     (make-text-content
+      (format nil
+              "task_query: required argument `query` is missing or empty.~%~
+               Send it as {\"query\": \"<TQ expression>\"}, ~
+               e.g. {\"query\": \"(-> :all :count)\"}.")))
+    (t
+     (handler-case
+         (let* ((form (tq:safe-read-query query))
+                (result (let ((tq:*graph* (get-or-build-graph))
+                              ;; Graph now has qualified IDs, pass through directly
+                              (tq:*current-task-id* *current-task-id*)
+                              (tq:*mutation-handler* #'tq-mutation-handler)
+                              (tq:*mutation-safety-limit*
+                               (if safety_limit
+                                   (if (zerop safety_limit) nil safety_limit)
+                                   tq:*mutation-safety-limit*)))
+                          (tq:interpret-query form))))
+           ;; Invalidate graph cache after mutations that modify the graph
+           ;; (scaffold creates new tasks/edges, mutations modify state)
+           (when (or (tq:scaffold-result-p result)
+                     (tq:mutation-log-p result))
+             (task:clear-graph-cache))
+           (make-text-content (tq:format-query-result result)))
+       (tq:mutation-safety-exceeded (c)
+         (make-text-content "Safety limit: ~A" c))
+       (tq:tq-parse-error (c)
+         (make-text-content "Parse error: ~A" (tq:tq-error-message c)))
+       (tq:tq-error (c)
+         (make-text-content "Query error: ~A" (tq:tq-error-message c)))
+       (error (c)
+         (make-text-content "Error: ~A" c))))))

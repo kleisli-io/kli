@@ -302,8 +302,8 @@
                 (map (f: ./lib/claude-hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-json.lisp" "test-responses.lisp" "test-paths.lisp" "test-file-io.lisp" "test-prompts.lisp" "test-hook.lisp" ]) ++
                 (map (f: ./lib/playbook-hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-domains.lisp" "test-co-app.lisp" "test-session-io.lisp" ]) ++
                 (map (f: ./lib/playbook/t + "/${f}") [ "package.lisp" "suite.lisp" "test-session-state.lisp" "test-http-transport.lisp" "test-session-discovery.lisp" "test-feedback-state.lisp" "test-relevance-feedback.lisp" "test-regression.lisp" ]) ++
-                (map (f: ./services/task-mcp/t + "/${f}") [ "package.lisp" "null-boundary-test.lisp" "scaffold-test.lisp" "test-session-locks.lisp" ]) ++
-                (map (f: ./hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-task-complete-reflect.lisp" ]);
+                (map (f: ./services/task-mcp/t + "/${f}") [ "package.lisp" "null-boundary-test.lisp" "scaffold-test.lisp" "test-session-locks.lisp" "test-session-context-discipline.lisp" ]) ++
+                (map (f: ./hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-task-complete-reflect.lisp" "test-session-task-write.lisp" ]);
               deps = [ lisp.fiveam lisp.bordeaux-threads ];
               expression = "(and (fiveam:run! :crdt-tests) (fiveam:run! :task-tests) (fiveam:run! :task-mcp-tests) (claude-hooks.tests:run-all-tests) (playbook-hooks.tests:run-all-tests) (playbook.tests:run-all-tests) (kli-hook.tests:run-all-tests))";
             };

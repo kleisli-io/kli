@@ -286,14 +286,107 @@
            events))
     (yason:encode ht stream)))
 
+(defun unwedge-snapshot-plist ()
+  "Counts used by /admin/unwedge for before/after reporting.
+   Same primitives as DIAG-SNAPSHOT-PLIST minus the lock-trace tail —
+   /admin/unwedge cares about *quantitative* deltas, not the most
+   recent contention events."
+  (list :sessions
+        (with-timed-lock (*session-contexts-lock* :unwedge-count)
+          (hash-table-count *session-contexts*))
+        :threads (length (bt:all-threads))
+        :close-wait (count-close-wait-on (get-http-port))))
+
+(defparameter *unwedge-default-max-age-hours* 0.25
+  "Default MAX-AGE-HOURS handed to CLEANUP-INACTIVE-SESSIONS by
+   /admin/unwedge.  Aggressive (15 minutes) so a wedged daemon sheds
+   dead-Claude contexts that the periodic GC hasn't reached yet.
+   Override per request via ?max_age_hours=N.")
+
+(defun perform-unwedge (max-age-hours)
+  "Run the unwedge sequence and return a plist describing the work.
+
+   Steps, in order:
+     1. CLEANUP-INACTIVE-SESSIONS (registry contexts older than
+        MAX-AGE-HOURS).  Holds *SESSION-CONTEXTS-LOCK* briefly.
+     2. Drop the task graph caches (TASK:CLEAR-GRAPH-CACHE,
+        TASK:CLEAR-INFOS-CACHE, TASK:CLEAR-TASK-STATE-CACHE) so the
+        next read recomputes from disk.
+
+   Returns a plist with the BEFORE snapshot, the AFTER snapshot, the
+   number of sessions removed, the MAX-AGE-HOURS that was applied, and
+   a list of the cache names that were cleared.  No request handler
+   threads are killed — that requires the request deadline to fire
+   independently."
+  (let* ((before (unwedge-snapshot-plist))
+         (removed (cleanup-inactive-sessions max-age-hours))
+         (caches (list "graph" "infos" "task-state")))
+    (task:clear-graph-cache)
+    (task:clear-infos-cache)
+    (task:clear-task-state-cache)
+    (let ((after (unwedge-snapshot-plist)))
+      (list :before before
+            :after after
+            :sessions-removed removed
+            :max-age-hours max-age-hours
+            :caches-cleared caches))))
+
+(defun unwedge-json-stream (stream result-plist)
+  "Encode the /admin/unwedge RESULT-PLIST to STREAM as JSON."
+  (let ((ht (make-hash-table :test 'equal))
+        (before-ht (make-hash-table :test 'equal))
+        (after-ht (make-hash-table :test 'equal))
+        (before (getf result-plist :before))
+        (after (getf result-plist :after)))
+    (setf (gethash "sessions" before-ht) (getf before :sessions)
+          (gethash "threads" before-ht) (getf before :threads)
+          (gethash "close_wait" before-ht) (getf before :close-wait))
+    (setf (gethash "sessions" after-ht) (getf after :sessions)
+          (gethash "threads" after-ht) (getf after :threads)
+          (gethash "close_wait" after-ht) (getf after :close-wait))
+    (setf (gethash "before" ht) before-ht
+          (gethash "after" ht) after-ht
+          (gethash "sessions_removed" ht) (getf result-plist :sessions-removed)
+          (gethash "max_age_hours" ht) (getf result-plist :max-age-hours)
+          (gethash "caches_cleared" ht) (getf result-plist :caches-cleared))
+    (yason:encode ht stream)))
+
+(defun parse-max-age-param (raw)
+  "Decode an optional max_age_hours query parameter.
+   Accepts integer or decimal strings; returns
+   *UNWEDGE-DEFAULT-MAX-AGE-HOURS* when absent or unparseable."
+  (or (when (and raw (plusp (length raw)))
+        (let* ((trimmed (string-trim '(#\Space #\Tab #\Return #\Newline) raw))
+               (with-read (handler-case
+                              (let ((*read-default-float-format* 'double-float))
+                                (with-input-from-string (s trimmed)
+                                  (let ((v (read s)))
+                                    (when (realp v) v))))
+                            (error () nil))))
+          (when (and with-read (plusp with-read))
+            with-read)))
+      *unwedge-default-max-age-hours*))
+
 (defun register-admin-endpoints ()
-  "Register /admin/diag (GET) for daemon introspection.  Called from
-   REGISTER-HTTP-ENDPOINTS alongside /health and friends."
+  "Register /admin/diag (GET) and /admin/unwedge (any method) for daemon
+   introspection and recovery.  Called from REGISTER-HTTP-ENDPOINTS
+   alongside /health and friends."
   (hunchentoot:define-easy-handler (admin-diag :uri "/admin/diag") ()
     (setf (hunchentoot:content-type*) "application/json")
     (handler-case
         (with-output-to-string (s)
           (diag-json-stream s (diag-snapshot-plist)))
+      (error (e)
+        (setf (hunchentoot:return-code*) 500)
+        (format nil "{\"error\": ~S}" (princ-to-string e)))))
+  (hunchentoot:define-easy-handler (admin-unwedge :uri "/admin/unwedge")
+      (max_age_hours)
+    (setf (hunchentoot:content-type*) "application/json")
+    (handler-case
+        (let* ((max-age (parse-max-age-param max_age_hours))
+               (result (perform-unwedge max-age)))
+          (with-output-to-string (s)
+            (unwedge-json-stream s result)))
       (error (e)
         (setf (hunchentoot:return-code*) 500)
         (format nil "{\"error\": ~S}" (princ-to-string e))))))

@@ -333,23 +333,32 @@ Evolve a pattern:
 ## Add New Pattern
 (add! :domain :lisp :content \"Pattern content here\")
 Note: add! is a starting expression, not a pipeline step."
-  (let ((sid (current-session-id))
-        (cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
-    (maybe-auto-activate sid cwd))
-  (handler-case
-      (let* ((form (pq:safe-read-query query))
-             (result (pq:with-patterns
-                         (:patterns #'list-patterns
-                          :mutation-handler #'pq-mutation-handler
-                          :search-fn #'pq-search-fn
-                          :activate-fn #'pq-activate-fn
-                          :edges-fn #'pq-edges-fn
-                          :history-fn #'pq-history-fn)
-                       (pq:interpret-query form))))
-        (mcp-framework:make-text-content (pq:format-query-result result)))
-    (pq:pq-parse-error (c)
-      (mcp-framework:make-text-content (format nil "Parse error: ~A" (pq:pq-error-message c))))
-    (pq:pq-error (c)
-      (mcp-framework:make-text-content (format nil "Query error: ~A" (pq:pq-error-message c))))
-    (error (c)
-      (mcp-framework:make-text-content (format nil "Error: ~A" c)))))
+  (cond
+    ((or (null query)
+         (and (stringp query) (zerop (length query))))
+     (mcp-framework:make-text-content
+      (format nil
+              "pq_query: required argument `query` is missing or empty.~%~
+               Send it as {\"query\": \"<PQ expression>\"}, ~
+               e.g. {\"query\": \"(-> :all :count)\"}.")))
+    (t
+     (let ((sid (current-session-id))
+           (cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
+       (maybe-auto-activate sid cwd))
+     (handler-case
+         (let* ((form (pq:safe-read-query query))
+                (result (pq:with-patterns
+                            (:patterns #'list-patterns
+                             :mutation-handler #'pq-mutation-handler
+                             :search-fn #'pq-search-fn
+                             :activate-fn #'pq-activate-fn
+                             :edges-fn #'pq-edges-fn
+                             :history-fn #'pq-history-fn)
+                          (pq:interpret-query form))))
+           (mcp-framework:make-text-content (pq:format-query-result result)))
+       (pq:pq-parse-error (c)
+         (mcp-framework:make-text-content (format nil "Parse error: ~A" (pq:pq-error-message c))))
+       (pq:pq-error (c)
+         (mcp-framework:make-text-content (format nil "Query error: ~A" (pq:pq-error-message c))))
+       (error (c)
+         (mcp-framework:make-text-content (format nil "Error: ~A" c)))))))

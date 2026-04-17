@@ -3,7 +3,7 @@
   (:export
    ;; Vector Clock
    #:vector-clock #:make-vector-clock #:vc-entries
-   #:vc-increment #:vc-get #:vc-merge
+   #:vc-increment #:vc-get #:vc-merge #:vc-copy
    #:vc-equal-p
    ;; G-Set
    #:g-set #:make-g-set

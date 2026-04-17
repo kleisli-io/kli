@@ -58,6 +58,16 @@
 ;;; Handler Entry Point
 ;;; ---------------------------------------------------------------------------
 
+(defun session-task-write-tool-p (tool-name)
+  "Return T if TOOL-NAME identifies a tool whose response is expected
+   to contain the 'Current task set to X (session Y joined)' parseable
+   line — i.e. task_set_current or task_bootstrap.  Used to gate
+   PARSE-TASK-RESPONSE so it does not false-positive on unrelated tool
+   responses whose text happens to contain matching substrings."
+  (and tool-name
+       (or (search "task_set_current" tool-name)
+           (search "task_bootstrap" tool-name))))
+
 (defun session-task-write-handler (input)
   "PostToolUse handler: write/delete session file based on task context."
   (let ((tool-response (gethash "tool_response" input))
@@ -71,7 +81,7 @@
             ((search "task_release" tool-name)
              (delete-session-task-file coord-root))
             ;; task_set_current / task_bootstrap: write session file
-            (tool-response
+            ((and tool-response (session-task-write-tool-p tool-name))
              (let ((response-text (extract-response-text tool-response)))
                (when response-text
                  (multiple-value-bind (task-id session-id)

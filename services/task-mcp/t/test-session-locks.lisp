@@ -232,3 +232,211 @@
             task-mcp::*session-gc-max-age-hours* old-max-age
             task-mcp::*session-gc-thread* nil
             task-mcp::*session-gc-stop* nil))))
+
+;;; --- /admin/unwedge ---------------------------------------------------------
+
+(test perform-unwedge-evicts-old-keeps-fresh
+  "PERFORM-UNWEDGE must call CLEANUP-INACTIVE-SESSIONS and report the
+   delta in its plist.  We populate the registry with one stale and one
+   fresh context; PERFORM-UNWEDGE with max-age 1h evicts the stale one
+   (backdated 25h), leaves the fresh one, and reports correct
+   before/after counts.  A wide window keeps the test resilient to
+   build-host scheduling jitter."
+  (with-fresh-session-contexts ()
+    (let ((stale (register-fake-session "stale" 9001))
+          (fresh (register-fake-session "fresh-pid" 9002)))
+      (setf (task-mcp::ctx-last-active stale)
+            (- (get-universal-time) (* 25 3600)))    ; 25h ago
+      (setf (task-mcp::ctx-last-active fresh)
+            (get-universal-time))                    ; now
+      (let ((result (task-mcp::perform-unwedge 1)))
+        (is (= 1 (getf result :sessions-removed)))
+        (is (= 1 (getf result :max-age-hours)))
+        (is (equal '("graph" "infos" "task-state")
+                   (getf result :caches-cleared)))
+        (is (= 2 (getf (getf result :before) :sessions)))
+        (is (= 1 (getf (getf result :after) :sessions)))
+        (is (null (gethash "stale" task-mcp::*session-contexts*)))
+        (is (gethash "fresh-pid" task-mcp::*session-contexts*))))))
+
+(test parse-max-age-param-defaults-on-blank-or-junk
+  "PARSE-MAX-AGE-PARAM returns the default for nil, empty string, and
+   non-numeric input; otherwise the parsed positive real."
+  (let ((default task-mcp::*unwedge-default-max-age-hours*))
+    (is (eql default (task-mcp::parse-max-age-param nil)))
+    (is (eql default (task-mcp::parse-max-age-param "")))
+    (is (eql default (task-mcp::parse-max-age-param "  ")))
+    (is (eql default (task-mcp::parse-max-age-param "garbage")))
+    (is (= 2 (task-mcp::parse-max-age-param "2")))
+    (is (= 0.5d0 (task-mcp::parse-max-age-param "0.5")))
+    ;; Reject zero and negative as invalid → fall back to default.
+    (is (eql default (task-mcp::parse-max-age-param "0")))
+    (is (eql default (task-mcp::parse-max-age-param "-3")))))
+
+(test unwedge-json-stream-shape
+  "UNWEDGE-JSON-STREAM emits the contract /admin/unwedge consumers
+   depend on: top-level keys before/after/sessions_removed/max_age_hours/
+   caches_cleared, and each before/after has sessions/threads/close_wait."
+  (let* ((plist (list :before (list :sessions 5 :threads 30 :close-wait 2)
+                      :after  (list :sessions 1 :threads 28 :close-wait 0)
+                      :sessions-removed 4
+                      :max-age-hours 0.25
+                      :caches-cleared (list "graph" "infos" "task-state")))
+         (json (with-output-to-string (s)
+                 (task-mcp::unwedge-json-stream s plist)))
+         (parsed (with-input-from-string (s json) (yason:parse s))))
+    (is (= 4 (gethash "sessions_removed" parsed)))
+    (is (= 0.25 (gethash "max_age_hours" parsed)))
+    (is (equal '("graph" "infos" "task-state")
+               (gethash "caches_cleared" parsed)))
+    (let ((before (gethash "before" parsed))
+          (after (gethash "after" parsed)))
+      (is (= 5 (gethash "sessions" before)))
+      (is (= 30 (gethash "threads" before)))
+      (is (= 2 (gethash "close_wait" before)))
+      (is (= 1 (gethash "sessions" after)))
+      (is (= 28 (gethash "threads" after)))
+      (is (= 0 (gethash "close_wait" after))))))
+
+;;; --- /register-pid race vs concurrent SAVE / MAYBE-SAVE --------------------
+
+(test save-session-context-preserves-late-registered-pid
+  "SAVE-SESSION-CONTEXT must NOT overwrite CTX-CLAUDE-PID when the
+   thread-local *CLAUDE-PID* is NIL.  Models the race where a request
+   loads ctx (claude-pid=NIL) before /register-pid arrives, and then
+   unwinds after /register-pid set ctx-claude-pid=12345.  Without the
+   guard the unwind save would clobber the registration with NIL."
+  (let ((task-mcp::*session-contexts* (make-hash-table :test 'equal))
+        (task-mcp::*session-contexts-lock*
+          (bt:make-lock "test-save-pid-race")))
+    (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+      (setf (gethash "race-sid" task-mcp::*session-contexts*)
+            (task-mcp::make-session-context
+             :id "race-sid"
+             :vector-clock (crdt:make-vector-clock))))
+    ;; /register-pid lands first — write 12345 directly under the lock.
+    (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+      (setf (task-mcp::ctx-claude-pid
+             (gethash "race-sid" task-mcp::*session-contexts*))
+            12345))
+    ;; Concurrent in-flight request unwinds with *claude-pid* = NIL.
+    (let ((*current-task-id* nil)
+          (*claude-pid* nil)
+          (*event-counter* 0)
+          (*session-vc* (crdt:make-vector-clock)))
+      (task-mcp::save-session-context "race-sid"))
+    (is (eql 12345
+             (task-mcp::ctx-claude-pid
+              (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+                (gethash "race-sid" task-mcp::*session-contexts*))))
+        "save-session-context must not overwrite a registered PID with NIL")))
+
+(test maybe-save-session-context-preserves-late-registered-pid
+  "Symmetric guard for MAYBE-SAVE-SESSION-CONTEXT: when *EVENT-COUNTER*
+   advanced (full save path) but *CLAUDE-PID* is NIL, do not clobber
+   a concurrently registered PID."
+  (let ((task-mcp::*session-contexts* (make-hash-table :test 'equal))
+        (task-mcp::*session-contexts-lock*
+          (bt:make-lock "test-maybe-save-pid-race")))
+    (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+      (setf (gethash "race-sid-2" task-mcp::*session-contexts*)
+            (task-mcp::make-session-context
+             :id "race-sid-2"
+             :vector-clock (crdt:make-vector-clock))))
+    (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+      (setf (task-mcp::ctx-claude-pid
+             (gethash "race-sid-2" task-mcp::*session-contexts*))
+            54321))
+    (let ((*current-task-id* nil)
+          (*claude-pid* nil)
+          ;; event-counter advanced from 0 → 1, so the maybe-save full
+          ;; path runs (not the no-op branch).
+          (*event-counter* 1)
+          (*session-vc* (crdt:make-vector-clock)))
+      (task-mcp::maybe-save-session-context "race-sid-2" nil 0))
+    (is (eql 54321
+             (task-mcp::ctx-claude-pid
+              (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+                (gethash "race-sid-2" task-mcp::*session-contexts*))))
+        "maybe-save full-save path must not overwrite a registered PID with NIL")))
+
+;;; --- VC copy-on-load + merge-on-save ---------------------------------------
+
+(test vc-copy-returns-independent-struct
+  "VC-COPY must return a fresh VECTOR-CLOCK whose entries hash table
+   is NOT EQ to the source's.  Mutating the copy must not change the
+   original."
+  (let ((src (crdt:make-vector-clock)))
+    (crdt:vc-increment src "sid-A")
+    (crdt:vc-increment src "sid-A")
+    (let ((dst (crdt:vc-copy src)))
+      (is (not (eq (crdt:vc-entries src) (crdt:vc-entries dst)))
+          "vc-copy must allocate a fresh entries hash table")
+      (is (= 2 (crdt:vc-get dst "sid-A"))
+          "vc-copy must preserve existing entries")
+      (crdt:vc-increment dst "sid-A")
+      (is (= 2 (crdt:vc-get src "sid-A"))
+          "mutating the copy must not affect the source")
+      (is (= 3 (crdt:vc-get dst "sid-A")))
+      (crdt:vc-increment src "sid-B")
+      (is (= 0 (crdt:vc-get dst "sid-B"))
+          "mutating the source must not affect the copy"))))
+
+(test load-session-context-isolates-vc-from-registry
+  "LOAD-SESSION-CONTEXT must give the request a VC whose entries hash
+   table is independent of the registry's stored VC.  Otherwise two
+   concurrent requests on the same session would VC-INCREMENT the same
+   hash table — SBCL hash tables are not safe for concurrent writes."
+  (with-fresh-session-contexts ()
+    (let* ((registry-vc (crdt:make-vector-clock))
+           (ctx (task-mcp::make-session-context
+                 :id "sid-iso"
+                 :vector-clock registry-vc)))
+      (crdt:vc-increment registry-vc "sid-iso")
+      (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+        (setf (gethash "sid-iso" task-mcp::*session-contexts*) ctx))
+      (let ((*session-id* nil)
+            (*current-task-id* nil)
+            (*session-vc* nil)
+            (*claude-pid* nil)
+            (*event-counter* 0))
+        (task-mcp::load-session-context "sid-iso")
+        (is (not (eq registry-vc *session-vc*))
+            "*session-vc* must be a fresh struct, not the registry's struct")
+        (is (not (eq (crdt:vc-entries registry-vc)
+                     (crdt:vc-entries *session-vc*)))
+            "entries hash table must be independent")
+        (is (= 1 (crdt:vc-get *session-vc* "sid-iso"))
+            "loaded VC must preserve the registry's existing entry")
+        (crdt:vc-increment *session-vc* "sid-iso")
+        (is (= 1 (crdt:vc-get registry-vc "sid-iso"))
+            "incrementing the loaded copy must not affect the registry")))))
+
+(test save-session-context-merges-vc-monotonically
+  "SAVE-SESSION-CONTEXT must vc-merge (pointwise max) the thread-local
+   VC into the registry's stored VC.  If a concurrent request advanced
+   any entry beyond what we hold locally, the save must NOT roll it back."
+  (with-fresh-session-contexts ()
+    (let* ((registry-vc (crdt:make-vector-clock))
+           (ctx (task-mcp::make-session-context
+                 :id "sid-merge"
+                 :vector-clock registry-vc)))
+      (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+        (setf (gethash "sid-merge" task-mcp::*session-contexts*) ctx))
+      ;; Registry already advanced "other-sid" to 5 (from another request).
+      (setf (gethash "other-sid" (crdt:vc-entries registry-vc)) 5)
+      ;; Our request only knows about its own entry advance.
+      (let ((local-vc (crdt:make-vector-clock)))
+        (setf (gethash "sid-merge" (crdt:vc-entries local-vc)) 3)
+        (let ((*current-task-id* nil)
+              (*claude-pid* nil)
+              (*event-counter* 7)
+              (*session-vc* local-vc))
+          (task-mcp::save-session-context "sid-merge")))
+      (let ((merged (task-mcp::ctx-vector-clock
+                     (bt:with-lock-held (task-mcp::*session-contexts-lock*)
+                       (gethash "sid-merge" task-mcp::*session-contexts*)))))
+        (is (= 5 (crdt:vc-get merged "other-sid"))
+            "concurrent advance to other-sid must not be rolled back")
+        (is (= 3 (crdt:vc-get merged "sid-merge"))
+            "our local advance must persist")))))

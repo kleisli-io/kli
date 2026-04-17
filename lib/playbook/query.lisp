@@ -506,7 +506,19 @@
 
 (defun safe-read-query (query-string)
   "Safely read a query string into an S-expression.
-   Disables *read-eval* to prevent #. attacks."
+   Disables *read-eval* to prevent #. attacks.
+   Rejects non-string / empty input with a clear pq-parse-error
+   instead of leaking SBCL's raw type-binding error."
+  (cond
+    ((null query-string)
+     (error 'pq-parse-error
+            :message "query is nil (missing argument?)"))
+    ((not (stringp query-string))
+     (error 'pq-parse-error
+            :message (format nil "query must be a string, got ~A"
+                             (type-of query-string))))
+    ((zerop (length query-string))
+     (error 'pq-parse-error :message "query is empty")))
   (let ((*read-eval* nil)
         (*package* (find-package :pq)))
     (handler-case

@@ -43,6 +43,23 @@
     (vc-increment a "s1")
     (is (vc-equal-p (vc-merge a a) a))))
 
+(test vc-copy-is-independent
+  "VC-COPY allocates a fresh entries hash table so mutations to the
+   copy don't bleed into the source (and vice versa).  This is the
+   property task-mcp's load-session-context relies on to give each
+   request its own working clock."
+  (let ((src (make-vector-clock)))
+    (vc-increment src "s1")
+    (vc-increment src "s2")
+    (let ((dst (vc-copy src)))
+      (is (not (eq (vc-entries src) (vc-entries dst))))
+      (is (vc-equal-p src dst))
+      (vc-increment dst "s1")
+      (is (= 1 (vc-get src "s1")))
+      (is (= 2 (vc-get dst "s1")))
+      (vc-increment src "s3")
+      (is (= 0 (vc-get dst "s3"))))))
+
 ;;; --- G-Set ---
 
 (test gs-add-idempotent

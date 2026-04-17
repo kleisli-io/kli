@@ -90,7 +90,13 @@
   "Save current globals to session context registry.
    Called after request processing in HTTP mode.
    Lock held during struct modification to prevent interleaved writes
-   from concurrent requests on the same session."
+   from concurrent requests on the same session.
+
+   CTX-CLAUDE-PID is only overwritten when the thread-local
+   *CLAUDE-PID* is non-NIL.  This protects a freshly registered PID
+   (written by REGISTER-CLAUDE-PID via /register-pid) from being
+   clobbered by an in-flight request whose :around captured
+   *CLAUDE-PID* = NIL before /register-pid landed."
   (with-timed-lock (*session-contexts-lock* :save-ctx)
     (let ((ctx (or (gethash session-id *session-contexts*)
                    (let ((new (make-session-context
@@ -98,19 +104,77 @@
                                :vector-clock (crdt:make-vector-clock))))
                      (setf (gethash session-id *session-contexts*) new)))))
       (setf (ctx-task-id ctx) *current-task-id*)
-      (setf (ctx-vector-clock ctx) *session-vc*)
-      (setf (ctx-claude-pid ctx) *claude-pid*)
+      ;; Merge the thread-local VC into the registry's stored VC
+      ;; (pointwise max) so we never go backward when a concurrent
+      ;; request on the same session has already advanced any entry.
+      (setf (ctx-vector-clock ctx)
+            (if (ctx-vector-clock ctx)
+                (crdt:vc-merge (ctx-vector-clock ctx) *session-vc*)
+                *session-vc*))
+      (when *claude-pid*
+        (setf (ctx-claude-pid ctx) *claude-pid*))
       (setf (ctx-event-counter ctx) *event-counter*)
       (setf (ctx-last-active ctx) (get-universal-time))
       ctx)))
 
+(defun maybe-save-session-context (session-id snapshot-task-id snapshot-event-counter)
+  "Save session context only when this request actually mutated it.
+   Called from the HTTP :around method on unwind.
+
+   Compares the current thread-local *CURRENT-TASK-ID* and *EVENT-COUNTER*
+   to the snapshot taken right after ENSURE-SESSION-CONTEXT.  If either
+   differs, the request produced persistable session state (event emitted,
+   current task switched) and a full save is performed.  Otherwise only
+   LAST-ACTIVE is updated so CLEANUP-INACTIVE-SESSIONS sees the request
+   as a liveness signal.
+
+   This discipline prevents long-lived read-only SSE streams from
+   resurrecting stale CTX-TASK-ID values: their thread-local
+   *CURRENT-TASK-ID* is whatever LOAD-SESSION-CONTEXT read at request
+   start, and on unwind they would otherwise save that stale value back
+   over any concurrent reset."
+  (with-timed-lock (*session-contexts-lock* :maybe-save-ctx)
+    (let ((ctx (or (gethash session-id *session-contexts*)
+                   (let ((new (make-session-context
+                               :id session-id
+                               :vector-clock (crdt:make-vector-clock))))
+                     (setf (gethash session-id *session-contexts*) new)))))
+      (setf (ctx-last-active ctx) (get-universal-time))
+      (when (or (not (equal *current-task-id* snapshot-task-id))
+                (not (eql *event-counter* snapshot-event-counter)))
+        (setf (ctx-task-id ctx) *current-task-id*)
+        ;; See SAVE-SESSION-CONTEXT: pointwise-max merge so concurrent
+        ;; advances to the registry VC are not rolled back.
+        (setf (ctx-vector-clock ctx)
+              (if (ctx-vector-clock ctx)
+                  (crdt:vc-merge (ctx-vector-clock ctx) *session-vc*)
+                  *session-vc*))
+        ;; See SAVE-SESSION-CONTEXT: only overwrite CTX-CLAUDE-PID when
+        ;; the thread-local has a value, so a concurrent /register-pid
+        ;; cannot be clobbered by a request that loaded NIL pre-register.
+        (when *claude-pid*
+          (setf (ctx-claude-pid ctx) *claude-pid*))
+        (setf (ctx-event-counter ctx) *event-counter*))
+      ctx)))
+
 (defun load-session-context (session-id)
   "Load session context into globals.
-   Called before request processing in HTTP mode."
+   Called before request processing in HTTP mode.
+
+   The vector clock is COPIED into a fresh struct so concurrent
+   requests on the same MCP session each operate on an independent
+   hash table.  Otherwise two threads' VC-INCREMENT calls would race
+   on the shared *SESSION-CONTEXTS* entry's hash table — SBCL hash
+   tables are not safe for concurrent mutation.  The save path
+   merges the per-thread VC back into the registry pointwise-max
+   under the lock, preserving monotonicity across the join."
   (let ((ctx (get-session-context session-id)))
     (setf *session-id* session-id)
     (setf *current-task-id* (ctx-task-id ctx))
-    (setf *session-vc* (or (ctx-vector-clock ctx) (crdt:make-vector-clock)))
+    (setf *session-vc*
+          (if (ctx-vector-clock ctx)
+              (crdt:vc-copy (ctx-vector-clock ctx))
+              (crdt:make-vector-clock)))
     (setf *claude-pid* (ctx-claude-pid ctx))
     (setf *event-counter* (ctx-event-counter ctx))
     ctx))
@@ -507,10 +571,16 @@
             (setf *session-vc* (crdt:vc-merge *session-vc* (ctx-vector-clock ctx)))))))
     (maphash (lambda (k v) (declare (ignore k v)) (incf after-count))
              (crdt:vc-entries *session-vc*))
-    ;; Update context with merged VC
+    ;; Update context with merged VC.  Pointwise-max into the registry
+    ;; so a concurrent request that already advanced any entry is not
+    ;; rolled back by our overwrite.
     (with-timed-lock (*session-contexts-lock* :merge-vc-save)
       (let ((ctx (gethash *session-id* *session-contexts*)))
-        (when ctx (setf (ctx-vector-clock ctx) *session-vc*))))
+        (when ctx
+          (setf (ctx-vector-clock ctx)
+                (if (ctx-vector-clock ctx)
+                    (crdt:vc-merge (ctx-vector-clock ctx) *session-vc*)
+                    *session-vc*)))))
     (- after-count before-count)))
 
 ;;; Session file management for PostToolUse hooks

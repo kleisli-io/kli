@@ -8,6 +8,18 @@
   (incf (gethash session-id (vc-entries vc) 0))
   vc)
 
+(defun vc-copy (vc)
+  "Return a fresh VECTOR-CLOCK whose entries hash table is a shallow
+   copy of VC's entries.  Use to give each thread an independent
+   working clock when multiple requests share a session VC in the
+   registry — SBCL hash tables are not safe for concurrent mutation,
+   even on different keys."
+  (let* ((src (vc-entries vc))
+         (dst (make-hash-table :test (hash-table-test src)
+                               :size (max 4 (hash-table-count src)))))
+    (maphash (lambda (k v) (setf (gethash k dst) v)) src)
+    (make-vector-clock :entries dst)))
+
 (defun vc-get (vc session-id)
   "Get clock value for SESSION-ID (0 if absent)."
   (gethash session-id (vc-entries vc) 0))

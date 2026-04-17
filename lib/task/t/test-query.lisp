@@ -303,6 +303,34 @@
   (signals tq-parse-error
     (safe-read-query "(unclosed paren")))
 
+(test tq-error-parse-nil-arg
+  "safe-read-query on NIL signals tq-parse-error with a human message,
+   not SBCL's raw type-binding error."
+  (handler-case
+      (progn (safe-read-query nil)
+             (fail "expected tq-parse-error"))
+    (tq-parse-error (c)
+      (let ((msg (tq-error-message c)))
+        (is (search "nil" msg :test #'char-equal))
+        (is (not (search "when binding" msg)))))))
+
+(test tq-error-parse-empty-arg
+  "safe-read-query on empty string signals tq-parse-error."
+  (handler-case
+      (progn (safe-read-query "")
+             (fail "expected tq-parse-error"))
+    (tq-parse-error (c)
+      (is (search "empty" (tq-error-message c))))))
+
+(test tq-error-parse-non-string-arg
+  "safe-read-query on a non-string signals tq-parse-error naming the type."
+  (handler-case
+      (progn (safe-read-query 42)
+             (fail "expected tq-parse-error"))
+    (tq-parse-error (c)
+      (let ((msg (tq-error-message c)))
+        (is (search "string" msg :test #'char-equal))))))
+
 (test tq-error-mutation-without-handler
   "Mutation without *mutation-handler* signals condition."
   (with-test-graph (:nodes (("a")))
