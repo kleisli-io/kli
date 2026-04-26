@@ -17,8 +17,16 @@
 (def-suite :feedback-state :in :playbook.tests
   :description "Tests for feedback state file I/O")
 
+(def-suite :session-contract :in :playbook.tests
+  :description "Tests for the session contract: get-or-error split + write-merge")
+
 (def-suite :relevance-feedback :in :playbook.tests
   :description "Tests for query-scoped :not-relevant feedback")
+
+(def-suite :playbook-consistency :in :playbook.tests
+  :description "Tests for cross-sidecar consistency: evidence, ~
+                relevance-feedback, co-applications all reference ~
+                live patterns")
 
 (defun run-all-tests ()
   "Run all playbook tests."

@@ -105,19 +105,43 @@
          (playbook::*claimed-session* playbook::*claimed-session*)
          (playbook::*claimed-session-cwd* playbook::*claimed-session-cwd*)
          (playbook::*http-mode* *http-mode*))
-    (ensure-session-context)
-    (playbook::ensure-playbook-session-context)
-    ;; Snapshot the session-persisted fields *after* ENSURE-SESSION-CONTEXT
-    ;; has loaded them from the registry.  On unwind we save only if the
-    ;; handler actually changed them, so long-lived read-only SSE streams
-    ;; cannot resurrect a stale CTX-TASK-ID over a concurrent reset.
-    (let ((snapshot-task-id *current-task-id*)
-          (snapshot-event-counter *event-counter*))
+    ;; Snapshot vars are bound at the outer scope so the unwind-protect
+    ;; cleanup can read them, but populated inside the handler-case after
+    ;; ENSURE-SESSION-CONTEXT has loaded the registry's task-id /
+    ;; event-counter.  If ENSURE-SESSION-CONTEXT signals UNKNOWN-SESSION
+    ;; the snapshots stay NIL/0 and MAYBE-SAVE-SESSION-CONTEXT skips
+    ;; (gated by *SESSION-ID*, which load-session-context never set).
+    (let ((snapshot-task-id nil)
+          (snapshot-event-counter 0))
       (unwind-protect
            (handler-case
-               (with-request-deadline (:path script-name
-                                       :session-id *session-id*)
-                 (call-next-method))
+               (progn
+                 ;; ENSURE-SESSION-CONTEXT is now inside the handler-case
+                 ;; so UNKNOWN-SESSION (signalled when the inbound sid
+                 ;; has no context in *SESSION-CONTEXTS*) translates to
+                 ;; HTTP 404 + code=session-not-found instead of escaping
+                 ;; to hunchentoot's default 500 handler.
+                 (ensure-session-context)
+                 (playbook::ensure-playbook-session-context)
+                 (setf snapshot-task-id *current-task-id*
+                       snapshot-event-counter *event-counter*)
+                 (with-request-deadline (:method (hunchentoot:request-method*)
+                                         :path script-name
+                                         :session-id *session-id*)
+                   (call-next-method)))
+             (unknown-session (c)
+               ;; Mcp-Session-Id header named a sid not in *SESSION-CONTEXTS*.
+               ;; The framework's session-store has no TTL but task-mcp's
+               ;; cleanup-inactive-sessions evicts after 4h, so the two
+               ;; stores can diverge.  Returning 404 with a typed code
+               ;; lets the CLI drop its persisted sid and re-initialize
+               ;; rather than silently resurrecting a virgin context.
+               (setf (hunchentoot:return-code*) 404)
+               (setf (hunchentoot:content-type*) "application/json")
+               (format nil "{\"error\": \"session not found\", ~
+                            \"code\": \"session-not-found\", ~
+                            \"session_id\": ~S}"
+                       (or (unknown-session-session-id c) "")))
              (request-deadline-exceeded (c)
                (format *error-output*
                        "~&;; WARNING: ~A~%" c)
@@ -126,7 +150,30 @@
                (format nil "{\"error\": \"request deadline exceeded\", ~
                             \"path\": ~S, \"deadline_seconds\": ~D}"
                        (or script-name "")
-                       *request-deadline-seconds*)))
+                       (or (request-deadline-deadline-seconds c)
+                           *request-deadline-seconds*))))
+        ;; If the framework allocated a fresh Mcp-Session-Id during
+        ;; this request (i.e. handle-post processed an /initialize and
+        ;; called CREATE-SESSION on the framework's store), create the
+        ;; matching task-mcp context now so the next request from the
+        ;; client lands on a real ctx instead of UNKNOWN-SESSION.
+        ;;
+        ;; Hunchentoot stores outgoing header keys as keywords once
+        ;; the framework's `(setf header-out "Mcp-Session-Id" ...)`
+        ;; round-trips them, but the reader form `(header-out NAME)`
+        ;; does not normalise NAME, so we have to look at the raw
+        ;; alist to find both case variants reliably.
+        (let* ((headers (ignore-errors (hunchentoot:headers-out*)))
+               (new-sid
+                 (cdr (assoc "Mcp-Session-Id" headers
+                             :test (lambda (a b)
+                                     (string-equal a (string b))))))
+               (current-sid *session-id*))
+          (when (and new-sid
+                     (stringp new-sid)
+                     (plusp (length new-sid))
+                     (not (equal new-sid current-sid)))
+            (ignore-errors (create-session-context new-sid))))
         ;; Persist session context on exit only when the request mutated
         ;; it.  Always touches LAST-ACTIVE so idle-session GC still sees
         ;; the request as a liveness signal.
@@ -243,6 +290,14 @@
             (save-session-context session-id)
             (format nil "{\"success\": true, \"event_id\": ~S, \"task\": ~S}"
                     (task:event-id event) *current-task-id*)))
+      (unknown-session (c)
+        ;; PostToolUse hook arrived with a stale task-mcp sid.  Return
+        ;; 404 with the typed code so the hook can detect the recovery
+        ;; case explicitly rather than treating it as a server error.
+        (setf (hunchentoot:return-code*) 404)
+        (format nil "{\"success\": false, \"error\": \"session not found\", ~
+                     \"code\": \"session-not-found\", \"session_id\": ~S}"
+                (or (unknown-session-session-id c) "")))
       (error (e)
         (setf (hunchentoot:return-code*) 500)
         (format nil "{\"success\": false, \"error\": ~S}" (princ-to-string e)))))
@@ -322,7 +377,10 @@
 (defun start-task-server (&key background)
   "Create and start the task MCP server.
    In HTTP mode, also spawns the periodic session-context GC thread
-   so idle daemons don't accumulate dead-Claude contexts."
+   so idle daemons don't accumulate dead-Claude contexts, and runs a
+   one-shot pass that archives feedback-state.json files written under
+   non-UUID-shaped session directories (which the Stop hook cannot
+   find)."
   (initialize-server)
   (let* ((transport (select-transport))
          (server (mcp-framework:make-server
@@ -335,7 +393,14 @@
         (format *error-output*
                 "  Session GC: every ~Ds, max-age ~Dh~%"
                 *session-gc-interval-seconds*
-                *session-gc-max-age-hours*)))
+                *session-gc-max-age-hours*))
+      (let ((cwd (or (playbook:mcp-find-depot-root)
+                     (namestring (uiop:getcwd)))))
+        (handler-case
+            (playbook:reconcile-miskeyed-feedback-state-files cwd)
+          (error (e)
+            (format *error-output*
+                    "~&;; playbook-miskeyed-archive: scan failed: ~A~%" e)))))
     (mcp-framework:run-server server :background background)))
 
 (defun main ()

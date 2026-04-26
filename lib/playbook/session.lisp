@@ -60,6 +60,19 @@
         (funcall (find-symbol "HEADER-IN" "HUNCHENTOOT")
                  "Mcp-Session-Id" request)))))
 
+(defun current-claude-session-id ()
+  "Extract Claude-Session-Id from the current Hunchentoot request.
+   Returns the header value (string) or NIL when no request is active,
+   when hunchentoot is not loaded, or when the client did not send the
+   header.  The CLI populates the header from $CLAUDE_SESSION_ID; each
+   Claude Code shell carries its own value."
+  (ignore-errors
+    (let ((request (symbol-value (find-symbol "*REQUEST*" "HUNCHENTOOT"))))
+      (when request
+        (let ((value (funcall (find-symbol "HEADER-IN" "HUNCHENTOOT")
+                              "Claude-Session-Id" request)))
+          (when (and value (plusp (length value))) value))))))
+
 ;;; Session state struct
 
 (defstruct session-state
@@ -77,25 +90,54 @@
 ;;; PID → Claude session ID registry
 ;;; SessionStart hook calls /register-claude-session with PID + Claude session ID.
 ;;; On first MCP tool call, we look up the Claude session ID by scanning this registry.
+;;;
+;;; A single PID may map to MULTIPLE registered claude-sids when several
+;;; Claude Code shells share UNIX PID lineage (same parent shell, same
+;;; process tree).  Entries are stored newest-first so resolvers that
+;;; need a single answer can pick the most recent.  The
+;;; Claude-Session-Id HTTP header is the authoritative per-request
+;;; signal; this registry exists only as a fallback for hook callers
+;;; and older clients that do not carry the header.
 
 (defvar *pid-claude-session-registry* (make-hash-table :test 'eql)
-  "PID → Claude session ID mapping. Populated by /register-claude-session endpoint.")
+  "PID → list of (claude-session-id . internal-real-time) entries,
+   newest-first. Populated by /register-claude-session endpoint.")
 
 (defvar *pid-registry-lock* (make-lock "pid-registry")
   "Lock for thread-safe PID registry access.")
 
+(defun %pid-registry-entries (pid)
+  "Return the list of (sid . timestamp) entries for PID, newest-first.
+   Caller must already hold *PID-REGISTRY-LOCK*."
+  (gethash pid *pid-claude-session-registry*))
+
 (defun register-claude-session-for-pid (pid claude-session-id)
   "Register a PID → Claude session ID mapping.
-   Called by /register-claude-session HTTP endpoint."
+   Called by /register-claude-session HTTP endpoint.
+
+   Multiple registrations for the same PID accumulate so parallel Claude
+   Code shells with shared PID lineage do not silently coalesce onto a
+   single sid.  A re-registration of the same sid promotes it to the
+   newest position; older entries for that PID stay in the list."
   (with-lock-held (*pid-registry-lock*)
-    (setf (gethash pid *pid-claude-session-registry*)
-          (cons claude-session-id (get-internal-real-time))))
+    (let* ((entries (gethash pid *pid-claude-session-registry*))
+           (filtered (remove claude-session-id entries
+                             :key #'car :test #'equal))
+           (new-entry (cons claude-session-id (get-internal-real-time))))
+      (setf (gethash pid *pid-claude-session-registry*)
+            (cons new-entry filtered))))
   (format nil "Registered PID ~D → Claude session ~A" pid claude-session-id))
 
 (defun lookup-claude-session-by-pid (pid)
-  "Look up Claude session ID for a PID. Returns string or NIL."
+  "Look up the most-recently registered Claude session ID for PID.
+   Returns string or NIL.  When a PID has multiple registered sids,
+   only the newest is returned — peer-PID resolution is fundamentally
+   ambiguous under shared PID lineage and the per-request
+   Claude-Session-Id header is the authoritative signal."
   (with-lock-held (*pid-registry-lock*)
-    (car (gethash pid *pid-claude-session-registry*))))
+    (let ((entries (%pid-registry-entries pid)))
+      (when entries
+        (caar entries)))))
 
 ;;; Session store
 
@@ -105,11 +147,36 @@
 (defvar *session-states-lock* (make-lock "session-states")
   "Lock for thread-safe session state access.")
 
+(define-condition unknown-session-error (error)
+  ((session-id :initarg :session-id :reader unknown-session-error-session-id))
+  (:report (lambda (condition stream)
+             (format stream "Unknown playbook session: ~A"
+                     (unknown-session-error-session-id condition))))
+  (:documentation
+   "Signaled by code paths that must reject calls against an unknown session
+    rather than silently resurrect one. Activation and feedback go through
+    GET-SESSION-OR-ERROR so that, after the unknown-session contract on the
+    HTTP boundary, hitting an evicted or never-initialized session is treated
+    as a programming error instead of a virgin-state creation."))
+
 (defun get-or-create-session (session-id &key task-dir)
-  "Get existing session state or create a new one."
+  "Get existing session state or create a new one.
+   Use only on legitimate creation paths — initialize and PID registration.
+
+   In stdio mode the SESSION-ID passed in IS the Claude session ID by
+   construction (one MCP subprocess per Claude Code shell, session-id
+   sourced from .claude/latest-session). Stamp it on the struct at
+   creation so every callsite can rely on a single invariant: a
+   session-state with a NIL claude-session-id is a not-yet-resolved
+   HTTP session, never a stdio one.
+
+   In HTTP mode SESSION-ID is the MCP-sid; APPLY-CLAUDE-SESSION-ID sets
+   claude-session-id later from the per-request header."
   (with-lock-held (*session-states-lock*)
     (or (gethash session-id *session-states*)
         (let ((session (make-session-state :id session-id :task-dir task-dir)))
+          (unless *http-mode*
+            (setf (session-state-claude-session-id session) session-id))
           (setf (gethash session-id *session-states*) session)
           session))))
 
@@ -118,16 +185,27 @@
   (with-lock-held (*session-states-lock*)
     (gethash session-id *session-states*)))
 
+(defun get-session-or-error (session-id)
+  "Get existing session state or signal UNKNOWN-SESSION-ERROR.
+   Use on code paths where an unknown session indicates a programming
+   error: activation and feedback recording, anywhere a virgin session
+   would silently swallow state that the caller assumed already existed."
+  (or (get-session session-id)
+      (error 'unknown-session-error :session-id session-id)))
+
 ;;; Session operations
 
 (defun record-activation (session-id pattern-id)
-  "Record that a pattern was activated in this session."
-  (let ((session (get-or-create-session session-id)))
+  "Record that a pattern was activated in this session.
+   Signals UNKNOWN-SESSION-ERROR if the session does not exist —
+   callers must initialize the session first via the MCP boundary."
+  (let ((session (get-session-or-error session-id)))
     (pushnew pattern-id (session-state-activated-patterns session) :test #'string=)))
 
 (defun record-feedback (session-id pattern-id feedback-type)
-  "Record feedback given for a pattern in this session."
-  (let ((session (get-or-create-session session-id)))
+  "Record feedback given for a pattern in this session.
+   Signals UNKNOWN-SESSION-ERROR if the session does not exist."
+  (let ((session (get-session-or-error session-id)))
     (let ((existing (assoc pattern-id (session-state-feedback-given session) :test #'string=)))
       (if existing
           (setf (cdr existing) feedback-type)
@@ -431,27 +509,71 @@
 ;;; per-thread so concurrent requests don't race.
 
 (defun resolve-claude-session-id (session)
-  "Resolve Claude session ID for a session from PID registry.
-   Scans registered PIDs to find one that's still alive and associated
-   with this process tree. Returns Claude session ID string or NIL."
+  "Resolve Claude session ID for a session from the PID registry.
+   Picks the most-recently registered entry across all PIDs.  Returns
+   the Claude session ID string or NIL when the registry is empty.
+
+   This is the legacy fallback used when no Claude-Session-Id header is
+   sent on the request (hook callers, older CLI clients).  Per-PID
+   entries are stored newest-first; this function walks the list-of-
+   entries shape in addition to the legacy single-entry shape so a
+   running daemon that hot-loaded a partial upgrade still resolves
+   correctly."
   (unless (session-state-claude-session-id session)
     (with-lock-held (*pid-registry-lock*)
       (let ((best-sid nil)
             (best-time 0))
-        (maphash (lambda (pid entry)
-                   (declare (ignore pid))
-                   (when (and (consp entry) (cdr entry) (> (cdr entry) best-time))
-                     (setf best-sid (car entry)
-                           best-time (cdr entry))))
-                 *pid-claude-session-registry*)
+        (flet ((consider (entry)
+                 (when (and (consp entry)
+                            (stringp (car entry))
+                            (numberp (cdr entry))
+                            (> (cdr entry) best-time))
+                   (setf best-sid (car entry)
+                         best-time (cdr entry)))))
+          (maphash (lambda (pid value)
+                     (declare (ignore pid))
+                     (cond
+                       ;; New shape: list of (sid . ts) newest-first.
+                       ((and (consp value) (consp (car value)))
+                        (dolist (entry value) (consider entry)))
+                       ;; Legacy shape: a single (sid . ts) cell.
+                       (t (consider value))))
+                   *pid-claude-session-registry*))
         (when best-sid
           (setf (session-state-claude-session-id session) best-sid)))))
+  (session-state-claude-session-id session))
+
+(defun apply-claude-session-id (session &key (header-sid (current-claude-session-id)))
+  "Stamp the Claude session ID on SESSION using the most authoritative
+   source available.
+
+   Priority order:
+   1. HEADER-SID — the explicit Claude-Session-Id header value from the
+      current HTTP request (default: read via CURRENT-CLAUDE-SESSION-ID).
+      The CLI populates the header from $CLAUDE_SESSION_ID, so each
+      Claude Code shell carries its own distinct identity.  When non-nil
+      this OVERWRITES any prior value on SESSION so a fresh header value
+      recovers a session from a stale peer-PID-derived coalescing.
+   2. RESOLVE-CLAUDE-SESSION-ID — the peer-PID-derived fallback used
+      when no header is sent (hook callers and older CLI clients).  Only
+      sets a value when the session does not already have one.
+
+   The keyword argument exists for testability; production callers use
+   the default and do not pass HEADER-SID.
+
+   Returns the resolved Claude session ID (string or NIL)."
+  (cond
+    (header-sid
+     (setf (session-state-claude-session-id session) header-sid))
+    (t
+     (resolve-claude-session-id session)))
   (session-state-claude-session-id session))
 
 (defun ensure-playbook-session-context ()
   "Ensure session state exists for the current HTTP request.
    In HTTP mode: gets/creates session-state from Mcp-Session-Id header,
-   updates last-active timestamp, resolves Claude session ID from PID registry.
+   updates last-active timestamp, and stamps the Claude session ID via
+   APPLY-CLAUDE-SESSION-ID (header preferred, peer-PID fallback).
    In stdio mode: no-op (session discovered via files).
    Returns session-id or NIL."
   (if *http-mode*
@@ -459,8 +581,7 @@
         (when http-sid
           (let ((session (get-or-create-session http-sid)))
             (setf (session-state-last-active session) (get-universal-time))
-            ;; Resolve Claude session ID if not yet known
-            (resolve-claude-session-id session))
+            (apply-claude-session-id session))
           http-sid))
       (current-session-id)))
 
@@ -564,33 +685,70 @@
                  1.0))))
     (sort (copy-list pending-ids) #'> :key #'beta-variance-for-id)))
 
+(defun %feedback-state-list-field (state key)
+  "Pull a list-of-strings field from a parsed feedback-state hash.
+   Yason returns JSON arrays as lists by default, but be defensive against
+   vectors in case a future writer changes that."
+  (let ((v (and state (gethash key state))))
+    (cond ((null v) nil)
+          ((listp v) v)
+          ((vectorp v) (coerce v 'list))
+          (t (list v)))))
+
 (defun write-feedback-state-file (cwd session-id)
-  "Write current feedback state to session directory.
-   Reads activated and feedback-given from in-memory session state.
-   In HTTP mode, writes to Claude session ID path (not MCP session ID path)
-   so the Stop hook can find it.
+  "Write the merged feedback state to the session directory.
+
+   Two contracts beyond a plain dump of in-memory state:
+
+   1. The path is always keyed by the Claude session ID. The Stop hook
+      only knows how to look up files under
+      .claude/sessions/<claude-sid>/playbook/feedback-state.json — any
+      MCP-sid-keyed write would be invisible to it. Refuse (return NIL)
+      when the session-state has no resolved claude-session-id.
+      GET-OR-CREATE-SESSION populates it eagerly in stdio mode; in HTTP
+      mode it must have been set by APPLY-CLAUDE-SESSION-ID at request
+      entry.
+
+   2. The on-disk file is the union across every MCP session that shares
+      this Claude session ID — multiple parallel Claude Code shells under
+      a single Claude-sid each hold their own activated / feedback_given
+      lists. Read-modify-write under a file lock unions this caller's
+      lists with whatever is already on disk and recomputes
+      pending = activated ∖ feedback_given.
+
    Creates {\"activated\":[...],\"feedback_given\":[...],\"pending\":[...],\"count\":N}."
   (when (and cwd session-id)
     (let ((session (get-session session-id)))
       (when session
         (handler-case
-            (let* ((activated (session-state-activated-patterns session))
-                   (feedback-ids (mapcar #'car (session-state-feedback-given session)))
-                   (pending (sort-pending-by-uncertainty
-                             (set-difference activated feedback-ids :test #'string=)))
-                   ;; Use Claude session ID for file path if available (HTTP mode),
-                   ;; otherwise fall back to MCP session ID (stdio mode)
-                   (file-sid (or (session-state-claude-session-id session) session-id))
-                   (path (feedback-state-path cwd file-sid))
-                   (ht (make-hash-table :test 'equal)))
-              (setf (gethash "activated" ht) (coerce activated 'vector))
-              (setf (gethash "feedback_given" ht) (coerce feedback-ids 'vector))
-              (setf (gethash "pending" ht) (coerce pending 'vector))
-              (setf (gethash "count" ht) (length pending))
-              (ensure-directories-exist path)
-              (with-open-file (s path :direction :output :if-exists :supersede)
-                (yason:encode ht s))
-              path)
+            (let ((claude-sid (session-state-claude-session-id session)))
+              (unless claude-sid
+                (return-from write-feedback-state-file nil))
+              (let* ((path (feedback-state-path cwd claude-sid))
+                     (this-activated (session-state-activated-patterns session))
+                     (this-feedback (mapcar #'car (session-state-feedback-given session))))
+                (ensure-directories-exist path)
+                (with-file-lock (path :wait t)
+                  (let* ((existing (read-feedback-state-file path))
+                         (merged-activated
+                           (union (%feedback-state-list-field existing "activated")
+                                  this-activated
+                                  :test #'string=))
+                         (merged-feedback
+                           (union (%feedback-state-list-field existing "feedback_given")
+                                  this-feedback
+                                  :test #'string=))
+                         (pending (sort-pending-by-uncertainty
+                                   (set-difference merged-activated merged-feedback
+                                                   :test #'string=)))
+                         (ht (make-hash-table :test 'equal)))
+                    (setf (gethash "activated" ht) (coerce merged-activated 'vector))
+                    (setf (gethash "feedback_given" ht) (coerce merged-feedback 'vector))
+                    (setf (gethash "pending" ht) (coerce pending 'vector))
+                    (setf (gethash "count" ht) (length pending))
+                    (with-open-file (s path :direction :output :if-exists :supersede)
+                      (yason:encode ht s))
+                    path))))
           (error () nil))))))
 
 (defun read-feedback-state-file (path)
@@ -599,6 +757,88 @@
     (handler-case
         (yason:parse (uiop:read-file-string path))
       (error () nil))))
+
+;;; =========================================================================
+;;; MISKEYED FEEDBACK-STATE RECONCILIATION
+;;; =========================================================================
+;;; The Stop hook reads feedback-state.json under
+;;; .claude/sessions/<claude-sid>/playbook/, where claude-sid is shaped
+;;; like a UUID.  Files under non-UUID-shaped session directories (e.g.
+;;; 32-hex-uppercase MCP-sid paths produced when peer-PID resolution
+;;; misKeyed the write) are unreachable to the hook.
+;;;
+;;; The file payload carries no claude-sid back-pointer, so automatic
+;;; remapping into the canonical path is not recoverable.  The
+;;; reconciliation pass archives misKeyed payloads to
+;;; .claude/sessions/.miskeyed/<dirname>/feedback-state.json so they
+;;; remain available for forensics without polluting the live lookup
+;;; surface.
+
+(defparameter *uuid-shape-scanner*
+  (cl-ppcre:create-scanner
+   "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+  "Compiled regex matching a session directory whose name is shaped
+   like a UUID — the canonical Claude-Session-Id form.")
+
+(defun %uuid-shaped-p (name)
+  "Return T when NAME is a UUID-shaped session directory name."
+  (and (stringp name)
+       (cl-ppcre:scan *uuid-shape-scanner* name)
+       t))
+
+(defun %session-dir-name (session-dir)
+  "Return the trailing directory component of SESSION-DIR as a string."
+  (first (last (pathname-directory
+                (uiop:ensure-directory-pathname session-dir)))))
+
+(defun reconcile-miskeyed-feedback-state-files (cwd)
+  "Archive feedback-state.json files that live under non-UUID-shaped
+   session directories at CWD.  These are leftovers from peer-PID
+   coalescing under MCP-sid keys; the Stop hook cannot find them.
+
+   The archive root is <cwd>/.claude/sessions/.miskeyed/<dirname>/
+   feedback-state.json — the original directory name is preserved so
+   forensic correlation back to MCP-sid logs stays possible.
+
+   Returns an alist summary suitable for a single structured log line:
+     ((:scanned . N) (:archived . M) (:archive-root . path-or-nil))"
+  (let* ((sessions-dir (merge-pathnames ".claude/sessions/"
+                                        (ensure-trailing-slash cwd)))
+         (archive-root (merge-pathnames ".miskeyed/" sessions-dir))
+         (scanned 0)
+         (archived 0))
+    (when (uiop:directory-exists-p sessions-dir)
+      (dolist (entry (directory (merge-pathnames "*/" sessions-dir)))
+        (let ((dir-name (%session-dir-name entry)))
+          ;; Skip our own archive root and any UUID-shaped directories.
+          (unless (or (string= dir-name ".miskeyed")
+                      (%uuid-shaped-p dir-name))
+            (let ((fb-file (merge-pathnames "playbook/feedback-state.json"
+                                            entry)))
+              (when (probe-file fb-file)
+                (incf scanned)
+                (let ((dest-dir (merge-pathnames
+                                 (concatenate 'string dir-name "/")
+                                 archive-root)))
+                  (handler-case
+                      (progn
+                        (ensure-directories-exist
+                         (merge-pathnames "feedback-state.json" dest-dir))
+                        (rename-file
+                         fb-file
+                         (merge-pathnames "feedback-state.json" dest-dir))
+                        (incf archived))
+                    (error (e)
+                      (format *error-output*
+                              "~&;; playbook-miskeyed-archive: failed for ~A: ~A~%"
+                              dir-name e))))))))))
+    (when (plusp scanned)
+      (format *error-output*
+              "~&;; playbook-miskeyed-archive: scanned=~D archived=~D root=~A~%"
+              scanned archived (when (plusp archived) (namestring archive-root))))
+    (list (cons :scanned scanned)
+          (cons :archived archived)
+          (cons :archive-root (when (plusp archived) (namestring archive-root))))))
 
 ;;; =========================================================================
 ;;; SIGNAL HANDLER CLEANUP

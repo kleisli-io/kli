@@ -204,40 +204,134 @@
 ;;; --- Request deadline ------------------------------------------------------
 
 (defvar *request-deadline-seconds* 30
-  "Maximum wall-clock seconds a single request handler may run before
-   its deadline fires and the handler returns an HTTP 503.  Bind to
-   NIL to disable the deadline entirely (not recommended outside of
-   tests).")
+  "Default maximum wall-clock seconds a single request handler may run
+   before its deadline fires and the handler returns an HTTP 503.
+   Applies to all routes that do not have a longer-lived contract
+   (see *SSE-DEADLINE-SECONDS* for SSE long-polls).  Bind to NIL to
+   disable the deadline entirely (not recommended outside of tests).")
+
+(defvar *sse-deadline-seconds* 86400
+  "Deadline (in seconds) for SSE long-poll routes — currently GET /mcp.
+   The MCP HTTP transport's GET /mcp is a Server-Sent-Events stream
+   that deliberately holds the connection open across multiple tool
+   calls, so the default 30s deadline used for tool POSTs would 503
+   the stream every 30 seconds.  Defaults to 24 hours as a sanity
+   ceiling.  Bind to NIL to disable the deadline for SSE routes.")
+
+(defvar *route-deadline-overrides*
+  '(((:get  . "/mcp")           . *sse-deadline-seconds*)
+    ((:post . "/mcp")           . *request-deadline-seconds*)
+    ((:post . "/admin/unwedge") . 60)
+    ((:get  . "/health")        . 5))
+  "Alist of per-route deadline overrides consulted by
+   EFFECTIVE-DEADLINE-SECONDS.  Each entry has the shape
+   ((METHOD . PATH-PREFIX) . VALUE) where:
+
+     METHOD is a keyword (:GET, :POST, ...) or NIL to match any method.
+     PATH-PREFIX is a string; it matches a request PATH iff PATH equals
+       PATH-PREFIX, or PATH starts with PATH-PREFIX immediately followed
+       by a `/' (so `/mcp' matches `/mcp' and `/mcp/' but not
+       `/mcp-other').
+     VALUE is one of: a non-negative number of seconds; NIL (run with no
+       deadline); or a SYMBOL naming a defvar whose current value is the
+       seconds.  Symbol resolution happens at lookup time, so callers
+       and tests that LET-bind *REQUEST-DEADLINE-SECONDS* or
+       *SSE-DEADLINE-SECONDS* continue to influence the table.
+
+   Order encodes priority — the first matching entry wins.  Routes with
+   no entry fall back to *REQUEST-DEADLINE-SECONDS*.  Ship the table as
+   the single source of truth for per-route deadlines so future
+   long-running endpoints can declare themselves without touching the
+   dispatch logic.")
+
+(defun route-prefix-matches-p (path prefix)
+  "Return T iff PATH matches PREFIX as a route prefix.  PATH equals
+   PREFIX exactly, or PATH starts with PREFIX immediately followed by
+   a `/'.  Both arguments must be strings."
+  (let ((plen (length prefix))
+        (slen (length path)))
+    (and (>= slen plen)
+         (string= prefix path :end2 plen)
+         (or (= slen plen)
+             (eql #\/ (char path plen))))))
+
+(defun resolve-deadline-value (value)
+  "Resolve a *ROUTE-DEADLINE-OVERRIDES* entry VALUE to a concrete
+   seconds-or-NIL.  Numbers and NIL pass through; symbols are resolved
+   via SYMBOL-VALUE so that the table can name defvars whose bindings
+   are intended to remain mutable (e.g. for tests)."
+  (cond ((null value) nil)
+        ((numberp value) value)
+        ((symbolp value) (symbol-value value))
+        (t (error "Invalid deadline override value: ~S" value))))
+
+(defun effective-deadline-seconds (method path)
+  "Return the deadline (in seconds) appropriate for an HTTP request
+   with METHOD (a keyword like :GET, :POST) and PATH (a string).
+   Returns NIL when the request should run with no deadline.
+
+   Walks *ROUTE-DEADLINE-OVERRIDES* in order; the first entry whose
+   METHOD matches (or is NIL) and whose PATH-PREFIX matches PATH wins,
+   and its VALUE is resolved via RESOLVE-DEADLINE-VALUE.  When no entry
+   matches the request falls back to *REQUEST-DEADLINE-SECONDS*."
+  (let ((entry
+          (find-if (lambda (e)
+                     (destructuring-bind ((entry-method . prefix) . _) e
+                       (declare (ignore _))
+                       (and (or (null entry-method) (eq method entry-method))
+                            (route-prefix-matches-p path prefix))))
+                   *route-deadline-overrides*)))
+    (if entry
+        (resolve-deadline-value (cdr entry))
+        *request-deadline-seconds*)))
 
 (define-condition request-deadline-exceeded (error)
   ((path :initarg :path :reader request-deadline-path)
-   (session-id :initarg :session-id :reader request-deadline-session-id))
+   (session-id :initarg :session-id :reader request-deadline-session-id)
+   (deadline-seconds :initarg :deadline-seconds
+                     :reader request-deadline-deadline-seconds
+                     :initform nil))
   (:report
    (lambda (c stream)
      (format stream "request exceeded ~Ds deadline (path=~A session=~A)"
-             *request-deadline-seconds*
+             (or (request-deadline-deadline-seconds c)
+                 *request-deadline-seconds*)
              (request-deadline-path c)
              (request-deadline-session-id c)))))
 
-(defmacro with-request-deadline ((&key path session-id) &body body)
-  "Wrap BODY in SB-SYS:WITH-DEADLINE with a timeout of
-   *REQUEST-DEADLINE-SECONDS*.  On timeout, signal
-   REQUEST-DEADLINE-EXCEEDED carrying PATH and SESSION-ID for
-   diagnostic attribution; callers translate that to HTTP 503.
-   When *REQUEST-DEADLINE-SECONDS* is NIL, BODY runs with no
-   deadline."
+(defmacro with-request-deadline ((&key method path session-id) &body body)
+  "Wrap BODY in SB-SYS:WITH-DEADLINE with a timeout chosen by
+   EFFECTIVE-DEADLINE-SECONDS for METHOD and PATH.  On timeout,
+   signal REQUEST-DEADLINE-EXCEEDED carrying PATH, SESSION-ID and
+   the actual deadline seconds for diagnostic attribution; callers
+   translate that to HTTP 503.  When the effective deadline is NIL,
+   BODY runs with no deadline."
   (let ((secs (gensym "SECS-")))
-    `(let ((,secs *request-deadline-seconds*))
+    `(let ((,secs (effective-deadline-seconds ,method ,path)))
        (if ,secs
            (handler-case
                (sb-sys:with-deadline (:seconds ,secs)
                  ,@body)
              (sb-sys:deadline-timeout ()
                (error 'request-deadline-exceeded
-                      :path ,path :session-id ,session-id)))
+                      :path ,path :session-id ,session-id
+                      :deadline-seconds ,secs)))
            (progn ,@body)))))
 
 ;;; --- /admin/diag + /admin/unwedge endpoints -------------------------------
+
+(defun route-deadlines-snapshot ()
+  "Snapshot of *ROUTE-DEADLINE-OVERRIDES* with values resolved to the
+   numbers (or NIL) currently in effect.  Each entry is a plist
+   (:METHOD :PATH :SECONDS) suitable for direct JSON serialisation; the
+   shape mirrors the alist input so an operator reading /admin/diag
+   sees the same routes in the same priority order as the source."
+  (mapcar (lambda (entry)
+            (destructuring-bind ((method . prefix) . value) entry
+              (list :method method
+                    :path prefix
+                    :seconds (resolve-deadline-value value))))
+          *route-deadline-overrides*))
 
 (defun diag-snapshot-plist ()
   "Collect a snapshot of daemon health for /admin/diag as a plist."
@@ -253,6 +347,7 @@
           :threads threads
           :close-wait close-wait
           :deadline-seconds *request-deadline-seconds*
+          :route-deadlines (route-deadlines-snapshot)
           :gc-thread-alive
           (and *session-gc-thread*
                (bt:thread-alive-p *session-gc-thread*)
@@ -264,7 +359,8 @@
 (defun diag-json-stream (stream plist)
   "Encode the /admin/diag PLIST to STREAM as JSON."
   (let ((ht (make-hash-table :test 'equal))
-        (events (getf plist :lock-events)))
+        (events (getf plist :lock-events))
+        (routes (getf plist :route-deadlines)))
     (setf (gethash "sessions" ht) (getf plist :sessions)
           (gethash "threads" ht) (getf plist :threads)
           (gethash "close_wait" ht) (getf plist :close-wait)
@@ -272,6 +368,19 @@
           (gethash "gc_thread_alive" ht) (getf plist :gc-thread-alive)
           (gethash "gc_interval_seconds" ht) (getf plist :gc-interval-seconds)
           (gethash "gc_max_age_hours" ht) (getf plist :gc-max-age-hours))
+    (setf (gethash "route_deadlines" ht)
+          (mapcar
+           (lambda (r)
+             (let ((rh (make-hash-table :test 'equal))
+                   (method (getf r :method)))
+               (setf (gethash "method" rh)
+                     (if method
+                         (string-downcase (symbol-name method))
+                         ""))
+               (setf (gethash "path" rh) (getf r :path)
+                     (gethash "seconds" rh) (getf r :seconds))
+               rh))
+           routes))
     (setf (gethash "lock_events" ht)
           (mapcar
            (lambda (e)
@@ -368,9 +477,9 @@
       *unwedge-default-max-age-hours*))
 
 (defun register-admin-endpoints ()
-  "Register /admin/diag (GET) and /admin/unwedge (any method) for daemon
-   introspection and recovery.  Called from REGISTER-HTTP-ENDPOINTS
-   alongside /health and friends."
+  "Register /admin/diag (GET), /admin/unwedge (any method), and
+   /admin/verify-events (GET) for daemon introspection and recovery.
+   Called from REGISTER-HTTP-ENDPOINTS alongside /health and friends."
   (hunchentoot:define-easy-handler (admin-diag :uri "/admin/diag") ()
     (setf (hunchentoot:content-type*) "application/json")
     (handler-case
@@ -387,6 +496,14 @@
                (result (perform-unwedge max-age)))
           (with-output-to-string (s)
             (unwedge-json-stream s result)))
+      (error (e)
+        (setf (hunchentoot:return-code*) 500)
+        (format nil "{\"error\": ~S}" (princ-to-string e)))))
+  (hunchentoot:define-easy-handler (admin-verify-events :uri "/admin/verify-events") ()
+    (setf (hunchentoot:content-type*) "application/json")
+    (handler-case
+        (with-output-to-string (s)
+          (task:verify-events-tree-to-json s task:*tasks-root*))
       (error (e)
         (setf (hunchentoot:return-code*) 500)
         (format nil "{\"error\": ~S}" (princ-to-string e))))))

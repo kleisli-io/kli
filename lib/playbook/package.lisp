@@ -140,6 +140,7 @@
   ;; HTTP multi-session support
   (:export #:*http-mode*
            #:current-http-session-id
+           #:current-claude-session-id
            #:ensure-playbook-session-context
            #:cleanup-inactive-playbook-sessions)
   ;; Session state
@@ -148,6 +149,9 @@
            #:session-state-claude-session-id
            #:get-or-create-session
            #:get-session
+           #:get-session-or-error
+           #:unknown-session-error
+           #:unknown-session-error-session-id
            #:record-activation
            #:record-feedback
            #:record-domain
@@ -169,13 +173,20 @@
   ;; Feedback state file (for Stop hook)
   (:export #:feedback-state-path
            #:write-feedback-state-file
-           #:read-feedback-state-file)
+           #:read-feedback-state-file
+           #:reconcile-miskeyed-feedback-state-files)
   ;; File locking
   (:export #:with-file-lock)
   ;; Orphan cleanup
   (:export #:get-valid-pattern-ids
            #:cleanup-orphaned-data
-           #:post-load-cleanup)
+           #:post-load-cleanup
+           #:verify-playbook-consistency
+           #:log-playbook-inconsistencies
+           #:evidence-ledger-orphans
+           #:prune-evidence-ledger
+           #:relevance-feedback-orphans
+           #:co-app-ledger-orphans)
   ;; Signal handler cleanup
   (:export #:*mcp-lock-path*
            #:cleanup-mcp-lock

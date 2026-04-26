@@ -35,6 +35,38 @@
    Plan(T) = coslice of T in the structural subgraph induced by these types.
    Lateral edges (depends-on, related-to, blocks, supersedes) cross fibers.")
 
+(defparameter *upward-edge-type-translations*
+  '((:phase-of      . :phase-of-parent)
+    (:forked-from   . :forked-from-parent))
+  "Structural edge types whose semantics flip direction when the edge is
+   stamped on the EMITTER side.
+
+   :task.fork events are stamped on the parent (parent->child); the
+   declared edge-type names the child's role and is stored as-is.
+   :task.link / :task.sever / :task.reclassify events are stamped on the
+   emitter; the declared edge-type names the EMITTER's role relative to
+   the target. For structural types this means 'I am phase-of target' /
+   'I am forked-from target' — both upward — and we translate to
+   parent-pointing keywords so task-children does not over-count the
+   parent as a pseudo-child. Non-structural types (depends-on, blocks,
+   etc.) are direction-blind and pass through unchanged.")
+
+(defun upward-edge-type (raw-edge-type)
+  "Translate a structural edge-type to its upward (parent-pointing)
+   variant when emitted from the emitter's side via :task.link or
+   :task.reclassify. Non-structural types pass through."
+  (or (cdr (assoc raw-edge-type *upward-edge-type-translations*))
+      raw-edge-type))
+
+(defun structural-edge-type-pair (raw-edge-type)
+  "Return both encodings of a structural edge-type (downward + upward).
+   Used by :task.sever / :task.reclassify to remove a matching edge
+   regardless of which side originally emitted it."
+  (let ((upward (cdr (assoc raw-edge-type *upward-edge-type-translations*))))
+    (if upward
+        (list raw-edge-type upward)
+        (list raw-edge-type))))
+
 ;;; ============================================================
 ;;; TASK STATE
 ;;; Coalgebraic state: edges OR-Set replaces children G-Set.
@@ -128,24 +160,37 @@
                                                 :keyword))
                                       :phase-of))))
            (ors-add (task-state-edges state) edge (etag edge))))
-        ;; Link creates typed edge to existing task
+        ;; Link creates typed edge to existing task. Structural edge types
+        ;; (phase-of, forked-from) are upward when emitted from the emitter
+        ;; side and are translated to parent-pointing variants so the OR-Set
+        ;; preserves direction. See *upward-edge-type-translations*.
         (:task.link
-         (let ((edge (encode-edge (strip-depot-prefix (getf data :target-id))
-                                  (intern (string-upcase (getf data :edge-type))
-                                          :keyword))))
+         (let* ((raw-type (intern (string-upcase (getf data :edge-type)) :keyword))
+                (effective-type (upward-edge-type raw-type))
+                (edge (encode-edge (strip-depot-prefix (getf data :target-id))
+                                   effective-type)))
            (ors-add (task-state-edges state) edge (etag edge))))
-        ;; Sever removes edge (strip-depot-prefix normalizes legacy qualified IDs)
+        ;; Sever removes edge (strip-depot-prefix normalizes legacy qualified IDs).
+        ;; For structural types, remove both possible encodings so the call works
+        ;; regardless of whether the original edge was emitted by :task.fork
+        ;; (downward) or :task.link (upward).
         (:task.sever
          (let* ((target (strip-depot-prefix (getf data :target-id)))
-                (edge-type (intern (string-upcase (getf data :edge-type)) :keyword)))
-           (ors-remove (task-state-edges state) (encode-edge target edge-type))))
-        ;; Reclassify = remove old type + add new type
+                (raw-type (intern (string-upcase (getf data :edge-type)) :keyword)))
+           (dolist (et (structural-edge-type-pair raw-type))
+             (ors-remove (task-state-edges state) (encode-edge target et)))))
+        ;; Reclassify = remove old type + add new type. Old removal is
+        ;; direction-tolerant (matches structural-edge-type-pair); the new
+        ;; edge is added under upward-edge-type since reclassify, like
+        ;; task.link, is stamped on the emitter side.
         (:task.reclassify
          (let* ((target (strip-depot-prefix (getf data :target-id)))
-                (old-type (intern (string-upcase (getf data :old-type)) :keyword))
-                (new-type (intern (string-upcase (getf data :new-type)) :keyword)))
-           (ors-remove (task-state-edges state) (encode-edge target old-type))
-           (let ((edge (encode-edge target new-type)))
+                (raw-old (intern (string-upcase (getf data :old-type)) :keyword))
+                (raw-new (intern (string-upcase (getf data :new-type)) :keyword)))
+           (dolist (et (structural-edge-type-pair raw-old))
+             (ors-remove (task-state-edges state) (encode-edge target et)))
+           (let* ((effective-new (upward-edge-type raw-new))
+                  (edge (encode-edge target effective-new)))
              (ors-add (task-state-edges state) edge (etag edge)))))
         ;; New: session claim/release
         (:session.claim

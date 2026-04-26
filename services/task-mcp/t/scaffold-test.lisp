@@ -1,10 +1,11 @@
 (in-package #:task-mcp-tests)
 
 ;;; Regression tests for the scaffold-plan / scaffold-chain / :fork
-;;; boundary introduced by the kli-scaffold-plan-bad-phase-names task:
-;;;   * :fork now improves invalid names from description (Phase 2).
-;;;   * scaffold-chain therefore produces descriptive IDs (Phase 3).
-;;;   * :display-name is emitted by every scaffold path (Phase 4).
+;;; boundary. Contracts under test:
+;;;   * :fork improves invalid LOCAL-NAME values from DESCRIPTION when the
+;;;     name fails validation.
+;;;   * scaffold-chain therefore produces descriptive IDs end-to-end.
+;;;   * :display-name is emitted by every scaffold mutation path.
 
 (in-suite :task-mcp-tests)
 
@@ -48,7 +49,7 @@
   "Extract the :value field from a :task.set-metadata event."
   (getf (task:event-data event) :value))
 
-;;; --- Phase 2: :fork name improvement at the mutation boundary --------------
+;;; --- :fork name improvement at the mutation boundary ----------------------
 
 (test fork-improves-invalid-name-from-description
   "When :fork receives an invalid LOCAL-NAME and a usable
@@ -97,12 +98,12 @@
            (tq-mutation-handler "parent-probe" :fork "phase-1" nil "phase-of"))
          "phase-1"))))
 
-;;; --- Phase 3: scaffold-chain produces descriptive ids ---------------------
+;;; --- scaffold-chain produces descriptive ids ------------------------------
 
 (test scaffold-chain-produces-descriptive-ids
   "scaffold-chain's 'phase-N' counters are improved at the :fork
-   boundary (Phase 2) so the resulting task IDs reflect the
-   user-supplied descriptions."
+   boundary so the resulting task IDs reflect the user-supplied
+   descriptions."
   (with-scaffold-env (:parent "parent-probe")
     (let* ((tq:*mutation-handler* #'tq-mutation-handler)
            (result (tq::execute-scaffold-chain
@@ -115,7 +116,7 @@
           (is (not (search "phase-" id))
               "descriptive slug should not retain the raw phase-N form"))))))
 
-;;; --- Phase 4: :display-name is always emitted -----------------------------
+;;; --- :display-name is always emitted --------------------------------------
 
 (test scaffold-chain-emits-display-name-metadata
   "Every phase produced by scaffold-chain must carry a

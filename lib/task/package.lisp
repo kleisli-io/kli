@@ -11,9 +11,14 @@
    #:event-log-events #:event-log-clock #:event-log-path
    #:elog-append #:elog-append-event #:elog-save #:elog-load #:elog-merge
    #:*elog-cache*
+   ;; Event-file verification + repair
+   #:verify-events-file #:verify-events-tree #:verify-events-tree-to-json
+   #:repair-events-file #:repair-events-tree #:synthesized-id-p
    ;; Edge Encoding
    #:encode-edge #:decode-edge #:edge-targets
    #:*child-bearing-edge-types*
+   #:*upward-edge-type-translations*
+   #:upward-edge-type #:structural-edge-type-pair
    ;; Task State
    #:task-state #:make-task-state
    #:task-state-id #:task-state-description #:task-state-status

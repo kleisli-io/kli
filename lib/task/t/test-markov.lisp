@@ -242,12 +242,13 @@
       (is (hash-table-p tasks))
       (is (= count (hash-table-count tasks)))
       (is (plusp count))
-      ;; Each entry has :events :state :depot
+      ;; Each entry has :events and :state. (Earlier revisions also
+      ;; carried :depot but that field was dropped when load-all-tasks
+      ;; stopped resolving depot membership.)
       (let ((first-val nil))
         (maphash (lambda (k v) (declare (ignore k)) (unless first-val (setf first-val v))) tasks)
         (is (listp (getf first-val :events)))
-        (is (not (null (getf first-val :state))))
-        (is (stringp (getf first-val :depot)))))))
+        (is (not (null (getf first-val :state))))))))
 
 ;;; --- TTL Cache ---
 

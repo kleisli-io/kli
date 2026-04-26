@@ -260,7 +260,7 @@
         (token-index (make-hash-table :test 'equal))
         (seen-pairs (make-hash-table :test 'equal))
         (edges nil))
-    ;; Phase 1: Build per-task token sets (downcased, deduped) and inverted index
+    ;; Build per-task token sets (downcased, deduped) and inverted index.
     (dolist (info task-infos)
       (let* ((id (getf info :id))
              (tokens (remove-duplicates
@@ -269,7 +269,7 @@
         (setf (gethash id task-tokens) tokens)
         (dolist (tok tokens)
           (push id (gethash tok token-index)))))
-    ;; Phase 2: Count co-occurring tasks via inverted index
+    ;; Count co-occurring tasks via the inverted index.
     (dolist (info task-infos)
       (let* ((id (getf info :id))
              (tokens (gethash id task-tokens))
@@ -349,24 +349,21 @@
 
 (defun extract-state-edges (task-id)
   "Extract edges from a task's OR-Set as (from to type) triples.
-   Replays event log, builds state, decodes edge members.
+   Routes through get-cached-task-state so build-task-graph benefits from
+   any prior task_get / enriched_retrieve / etc. that warmed the cache.
    Returns raw target IDs as stored in events (may be qualified or bare).
    Callers handle ID qualification as needed for their graph mode."
-  (let ((path (task-events-path task-id)))
-    (when (probe-file path)
-      (handler-case
-          (let* ((log (elog-load path))
-                 (events (reverse (event-log-events log)))
-                 (state (when events (compute-state events))))
-            (when state
-              (let ((result nil))
-                (dolist (member (ors-members (task-state-edges state)))
-                  (let ((decoded (decode-edge member)))
-                    (when decoded
-                      (push (list task-id (car decoded) (cdr decoded))
-                            result))))
-                (nreverse result))))
-        (error () nil)))))
+  (handler-case
+      (let ((state (get-cached-task-state task-id)))
+        (when state
+          (let ((result nil))
+            (dolist (member (ors-members (task-state-edges state)))
+              (let ((decoded (decode-edge member)))
+                (when decoded
+                  (push (list task-id (car decoded) (cdr decoded))
+                        result))))
+            (nreverse result))))
+    (error () nil)))
 
 (defun extract-all-state-edges (&optional (tasks-root *tasks-root*) infos)
   "Extract declared edges from all event-sourced tasks.
@@ -529,8 +526,15 @@
 ;;; --- Per-Task State Cache ---
 ;;; Global cache mapping task-id → (universal-time . computed-state).
 ;;; Unlike *elog-cache* (per-request, raw event log), this caches the
-;;; expensive compute-state result across requests with TTL.
-;;; Invalidated per-task on emit-event.
+;;; expensive compute-state result across requests with TTL + LRU.
+;;;
+;;; Invariants:
+;;;   - cache size ≤ *task-state-cache-max-entries* (LRU eviction on insert).
+;;;   - on insert, opportunistic sweep drops up to *task-state-cache-sweep-step*
+;;;     entries whose TTL has expired (amortised cleanup, no dedicated thread).
+;;;   - read promotes the LRU position by overwriting the timestamp.
+;;;
+;;; Eviction is always safe because callers re-derive on miss.
 
 (defvar *task-state-cache* (make-hash-table :test 'equal)
   "Cache: task-id → (timestamp . task-state). Thread-safe via *task-state-cache-lock*.")
@@ -542,16 +546,63 @@
   "TTL for per-task state cache in seconds. With mutation-based invalidation
    in emit-event, TTL is a safety net for external modifications.")
 
+(defparameter *task-state-cache-max-entries* 256
+  "Hard cap on cache size. On insert, the entry with the oldest timestamp is
+   evicted when this cap would be exceeded.")
+
+(defparameter *task-state-cache-sweep-step* 16
+  "Maximum entries scanned per opportunistic sweep on insert.")
+
+(defun task-state-cache--sweep-stale (now)
+  "Drop up to *task-state-cache-sweep-step* entries past TTL.
+   Caller MUST hold *task-state-cache-lock*."
+  (let ((scanned 0)
+        (to-drop nil)
+        (ttl *task-state-cache-ttl*))
+    (block scan
+      (maphash (lambda (k v)
+                 (when (>= scanned *task-state-cache-sweep-step*)
+                   (return-from scan))
+                 (incf scanned)
+                 (when (>= (- now (car v)) ttl)
+                   (push k to-drop)))
+               *task-state-cache*))
+    (dolist (k to-drop) (remhash k *task-state-cache*))))
+
+(defun task-state-cache--evict-oldest ()
+  "Drop the single entry with the oldest timestamp.
+   Caller MUST hold *task-state-cache-lock*."
+  (let ((oldest-key nil)
+        (oldest-ts most-positive-fixnum))
+    (maphash (lambda (k v)
+               (when (< (car v) oldest-ts)
+                 (setf oldest-ts (car v)
+                       oldest-key k)))
+             *task-state-cache*)
+    (when oldest-key
+      (remhash oldest-key *task-state-cache*))))
+
+(defun task-state-cache--insert (task-id state now)
+  "Insert (TASK-ID → (NOW . STATE)) with sweep + LRU eviction.
+   Caller MUST hold *task-state-cache-lock*."
+  (task-state-cache--sweep-stale now)
+  (loop while (>= (hash-table-count *task-state-cache*)
+                  *task-state-cache-max-entries*)
+        do (task-state-cache--evict-oldest))
+  (setf (gethash task-id *task-state-cache*) (cons now state)))
+
 (defun get-cached-task-state (task-id)
   "Get computed CRDT state for TASK-ID, using cache with TTL.
+   On hit, promotes the entry's LRU position.
    Returns state or NIL if task has no events. Thread-safe."
   (let ((now (get-universal-time)))
-    ;; Check cache
+    ;; Check cache; promote on hit.
     (bt:with-lock-held (*task-state-cache-lock*)
       (let ((entry (gethash task-id *task-state-cache*)))
         (when (and entry (< (- now (car entry)) *task-state-cache-ttl*))
+          (setf (car entry) now)
           (return-from get-cached-task-state (cdr entry)))))
-    ;; Cache miss — compute state
+    ;; Cache miss — compute state.
     (let ((path (task-events-path task-id)))
       (when (probe-file path)
         (handler-case
@@ -560,8 +611,8 @@
                    (state (when events (compute-state events))))
               (when state
                 (bt:with-lock-held (*task-state-cache-lock*)
-                  (setf (gethash task-id *task-state-cache*)
-                        (cons (get-universal-time) state))))
+                  (task-state-cache--insert task-id state
+                                            (get-universal-time))))
               state)
           (error () nil))))))
 
@@ -987,90 +1038,101 @@
 
 (defun task-health-data ()
   "Return structured health data via streaming single-pass scan.
-   Iterates tasks once, computes state per task, runs all checks inline,
-   discards state before next task to keep peak memory at O(1 task).
-   Reuses cached graph for edge-dependent checks."
+   For each task: compute state once (cached), collect edges inline, run
+   non-orphan checks inline, defer the orphan check until all edges seen.
+   Per-task events list is GC'd between iterations so peak heap is
+   O(1 task)."
   (unless *tasks-root* (detect-tasks-root))
   (let* ((now (get-universal-time))
          (day-seconds (* 24 60 60))
+         (infos (get-cached-task-infos))
+         ;; O(1) topic lookup keyed by id.
+         (info-by-id (let ((h (make-hash-table :test 'equal)))
+                       (dolist (info infos) (setf (gethash (getf info :id) h) info))
+                       h))
+         ;; Edge tables populated inline during the streaming pass.
+         (edge-targets (make-hash-table :test 'equal))
+         (edge-pairs (make-hash-table :test 'equal))
+         (active-by-topic (make-hash-table :test 'equal))
          ;; Result accumulators
          (stale nil) (dead nil) (orphans nil)
          (stale-claims nil) (frontier nil) (premature nil)
-         ;; Precompute edge targets once (for orphan check)
-         (infos (get-cached-task-infos))
-         (all-edges (extract-all-state-edges *tasks-root* infos))
-         (edge-targets (make-hash-table :test 'equal))
-         ;; For convergent clusters: need per-task status by topic
-         (active-by-topic (make-hash-table :test 'equal))
-         (edge-pairs (make-hash-table :test 'equal)))
-    ;; Build edge lookup tables
-    (dolist (edge all-edges)
-      (setf (gethash (second edge) edge-targets) t)
-      (setf (gethash (cons (first edge) (second edge)) edge-pairs) t)
-      (setf (gethash (cons (second edge) (first edge)) edge-pairs) t))
-    ;; Streaming single-pass: load one task at a time, run all checks, discard
-    (dolist (dir (uiop:subdirectories *tasks-root*))
-      (let* ((id (first (last (pathname-directory dir))))
-             (events-path (format nil "~Aevents.jsonl" (namestring dir))))
-        (when (probe-file events-path)
-          (handler-case
-              (let* ((log (elog-load events-path))
-                     (events (reverse (event-log-events log)))
-                     (state (when events (compute-state events))))
-                (when state
-                  (let* ((status (lww-value (task-state-status state)))
-                         (obs-count (length (gs-members
-                                             (task-state-observations state))))
-                         (claim (lww-value (task-state-claim state)))
-                         (create-event (find :task.create events
-                                             :key #'event-type))
-                         (last-event (car (last events))))
-                    (unless (string= status "completed")
-                      ;; Stale tasks: <=1 obs, >3 days old
-                      (when (and (<= obs-count 1) create-event
-                                 (> (- now (event-timestamp create-event))
-                                    (* 3 day-seconds)))
-                        (push id stale))
-                      ;; Dead ends: no events for >7 days
-                      (when (and last-event
-                                 (> (- now (event-timestamp last-event))
-                                    (* 7 day-seconds)))
-                        (push id dead))
-                      ;; Stale claims: claimed but no claimer activity for >4h
-                      (when (and claim (> (length claim) 0))
-                        (let ((last-from-claimer
-                                (find claim (reverse events)
-                                      :key #'event-session :test #'string=)))
-                          (when (and last-from-claimer
-                                     (> (- now (event-timestamp
-                                                last-from-claimer))
-                                        (* 4 60 60)))
-                            (push id stale-claims))))
-                      ;; Unexplored frontier: active, unclaimed
-                      (when (and (string= status "active")
-                                 (or (null claim) (string= claim "")))
-                        (push id frontier))
-                      ;; Orphans: no incoming edges
-                      (when (not (gethash id edge-targets))
-                        (push id orphans)))
-                    ;; Premature completions: completed but incomplete children
-                    (when (string= status "completed")
-                      (let ((incomplete (handler-case
-                                            (incomplete-descendants id)
-                                          (error () nil))))
-                        (when incomplete
-                          (push (list :id id
-                                      :incomplete-count (length incomplete)
-                                      :children (mapcar #'car incomplete))
-                                premature))))
-                    ;; Track active tasks by topic for cluster check
-                    (when (string= status "active")
-                      (let ((info (find id infos :key (lambda (i) (getf i :id))
-                                                 :test #'equal)))
-                        (when info
-                          (push id (gethash (getf info :topic)
-                                            active-by-topic))))))))
-            (error () nil)))))
+         ;; Orphan check is deferred — edge-targets isn't complete until the
+         ;; pass finishes. We collect candidates as we go and resolve at the
+         ;; end. Memory cost: one cons per active task, no event payload.
+         (orphan-candidates nil))
+    ;; Single streaming pass: one task at a time, state from cache,
+    ;; events list goes out of scope when this iteration finishes so it
+    ;; can be GC'd before we move on.
+    (dolist (info infos)
+      (when (getf info :has-events)
+        (let* ((id (getf info :id))
+               (events-path (task-events-path id)))
+          (when (and events-path (probe-file events-path))
+            (handler-case
+                (let ((state (get-cached-task-state id)))
+                  (when state
+                    ;; Inline edge collection — replaces extract-all-state-edges.
+                    (dolist (member (ors-members (task-state-edges state)))
+                      (let ((decoded (decode-edge member)))
+                        (when decoded
+                          (let ((target (strip-depot-prefix (car decoded))))
+                            (setf (gethash target edge-targets) t)
+                            (setf (gethash (cons id target) edge-pairs) t)
+                            (setf (gethash (cons target id) edge-pairs) t)))))
+                    (let* ((status (lww-value (task-state-status state)))
+                           (obs-count (length (gs-members
+                                               (task-state-observations state))))
+                           (claim (lww-value (task-state-claim state)))
+                           ;; Events needed for create/last/claimer checks only.
+                           ;; elog-load is per-request-cached; the list is GC'd
+                           ;; when this LET goes out of scope.
+                           (events (reverse (event-log-events (elog-load events-path))))
+                           (create-event (find :task.create events
+                                               :key #'event-type))
+                           (last-event (car (last events))))
+                      (unless (string= status "completed")
+                        (when (and (<= obs-count 1) create-event
+                                   (> (- now (event-timestamp create-event))
+                                      (* 3 day-seconds)))
+                          (push id stale))
+                        (when (and last-event
+                                   (> (- now (event-timestamp last-event))
+                                      (* 7 day-seconds)))
+                          (push id dead))
+                        (when (and claim (> (length claim) 0))
+                          (let ((last-from-claimer
+                                  (find claim (reverse events)
+                                        :key #'event-session :test #'string=)))
+                            (when (and last-from-claimer
+                                       (> (- now (event-timestamp
+                                                  last-from-claimer))
+                                          (* 4 60 60)))
+                              (push id stale-claims))))
+                        (when (and (string= status "active")
+                                   (or (null claim) (string= claim "")))
+                          (push id frontier))
+                        ;; Defer orphan check — edge-targets still being built.
+                        (push id orphan-candidates))
+                      (when (string= status "completed")
+                        (let ((incomplete (handler-case
+                                              (incomplete-descendants id)
+                                            (error () nil))))
+                          (when incomplete
+                            (push (list :id id
+                                        :incomplete-count (length incomplete)
+                                        :children (mapcar #'car incomplete))
+                                  premature))))
+                      (when (string= status "active")
+                        (let ((info (gethash id info-by-id)))
+                          (when info
+                            (push id (gethash (getf info :topic)
+                                              active-by-topic))))))))
+              (error () nil))))))
+    ;; Resolve orphan candidates now that edge-targets is complete.
+    (dolist (id orphan-candidates)
+      (unless (gethash id edge-targets)
+        (push id orphans)))
     ;; Convergent clusters: topics with unlinked active tasks
     (let ((clusters nil))
       (maphash (lambda (topic ids)

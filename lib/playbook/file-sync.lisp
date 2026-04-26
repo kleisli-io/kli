@@ -68,6 +68,49 @@
             (format *error-output* "Warning: append-pattern-evidence ~A: ~A~%"
                     pattern-id e)))))))
 
+(defun evidence-ledger-orphans (ledger-path valid-pattern-ids)
+  "Return the list of pattern-ids present in the evidence ledger at
+   LEDGER-PATH but absent from VALID-PATTERN-IDS.  Read-only.  Returns
+   NIL when the file does not exist or every key is valid."
+  (when (probe-file ledger-path)
+    (let ((parsed (yason:parse (alexandria:read-file-into-string ledger-path)))
+          (valid-set (make-hash-table :test 'equal))
+          (orphans nil))
+      (dolist (id valid-pattern-ids)
+        (setf (gethash id valid-set) t))
+      (maphash (lambda (pattern-id entries)
+                 (declare (ignore entries))
+                 (unless (gethash pattern-id valid-set)
+                   (push pattern-id orphans)))
+               parsed)
+      orphans)))
+
+(defun prune-evidence-ledger (ledger-path valid-pattern-ids)
+  "Remove evidence entries whose pattern-id is not in
+   VALID-PATTERN-IDS.  Atomic write (write-temp-then-rename).  Returns
+   the count of removed pattern keys.  No-op when LEDGER-PATH does not
+   exist."
+  (unless (probe-file ledger-path)
+    (return-from prune-evidence-ledger 0))
+  (let ((parsed (yason:parse (alexandria:read-file-into-string ledger-path)))
+        (valid-set (make-hash-table :test 'equal))
+        (to-remove nil))
+    (dolist (id valid-pattern-ids)
+      (setf (gethash id valid-set) t))
+    (maphash (lambda (pattern-id entries)
+               (declare (ignore entries))
+               (unless (gethash pattern-id valid-set)
+                 (push pattern-id to-remove)))
+             parsed)
+    (dolist (id to-remove)
+      (remhash id parsed))
+    (when to-remove
+      (let ((temp-path (format nil "~A.tmp" (namestring ledger-path))))
+        (with-open-file (s temp-path :direction :output :if-exists :supersede)
+          (yason:encode parsed s))
+        (rename-file temp-path ledger-path)))
+    (length to-remove)))
+
 ;;; Feedback persistence
 
 (defun save-pattern-feedback (pattern-id feedback-type &optional evidence)
@@ -241,6 +284,23 @@
     (error (e)
       (format *error-output* "Warning: merge-relevance-feedback ~A: ~A~%" path e)
       0)))
+
+(defun relevance-feedback-orphans (path valid-pattern-ids)
+  "Return the list of pattern-ids present in the relevance-feedback
+   ledger at PATH but absent from VALID-PATTERN-IDS.  Read-only.
+   Returns NIL when the file does not exist or every key is valid."
+  (when (probe-file path)
+    (let ((parsed (yason:parse (alexandria:read-file-into-string path)))
+          (valid-set (make-hash-table :test 'equal))
+          (orphans nil))
+      (dolist (id valid-pattern-ids)
+        (setf (gethash id valid-set) t))
+      (maphash (lambda (pattern-id entries)
+                 (declare (ignore entries))
+                 (unless (gethash pattern-id valid-set)
+                   (push pattern-id orphans)))
+               parsed)
+      orphans)))
 
 (defun prune-relevance-feedback (path valid-pattern-ids)
   "Remove relevance entries for patterns not in VALID-PATTERN-IDS.

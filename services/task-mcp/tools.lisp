@@ -432,22 +432,17 @@ swarm awareness (parallel sessions + similar work), and ready phases."
                id (length incomplete)
                (loop for (cid . status) in incomplete
                      collect cid collect status))))
-    ;; Rebind *current-task-id* as a fresh dynamic binding so emit-event
-    ;; writes to ID's event log without exposing the interim value via
-    ;; the session registry.  Concurrent requests on the same MCP session
-    ;; would otherwise load ID from the registry during this window and
-    ;; see a completed target as their current task.  The outer binding
-    ;; (set by the :around method's load-session-context) is automatically
-    ;; restored on exit, and the :around's unwind-protect save
-    ;; persists that outer value to the registry once — not twice.
-    (let ((*current-task-id* id))
-      (emit-event :task.update-status (list :status "completed"))
-      (let ((frontier-update (handler-case
-                                 (completion-frontier-update id)
-                               (error () nil))))
-        (make-text-content
-         (format nil "Task ~A marked as completed.~@[~%~%~A~]"
-                 id frontier-update))))))
+    ;; Route the emit explicitly to ID via :task-id.  The session
+    ;; registry's ctx-task-id is left untouched, so concurrent requests
+    ;; on the same MCP session continue to see the user's focus task as
+    ;; their current task — the completion target is invisible to them.
+    (emit-event :task.update-status (list :status "completed") :task-id id)
+    (let ((frontier-update (handler-case
+                               (completion-frontier-update id)
+                             (error () nil))))
+      (make-text-content
+       (format nil "Task ~A marked as completed.~@[~%~%~A~]"
+               id frontier-update)))))
 
 (define-session-tool task_reopen
     ((task_id string "Task ID (default: current)" nil))
@@ -457,13 +452,9 @@ swarm awareness (parallel sessions + similar work), and ready phases."
                 *current-task-id*)))
     (unless id
       (error "No task specified and no current task set."))
-    ;; Rebind *current-task-id* as a fresh dynamic binding so emit-event
-    ;; writes to ID's event log without exposing the interim value via
-    ;; the session registry (see task_complete for the full rationale).
-    (let ((*current-task-id* id))
-      (emit-event :task.update-status (list :status "active"))
-      (make-text-content
-       (format nil "Task ~A reopened." id)))))
+    (emit-event :task.update-status (list :status "active") :task-id id)
+    (make-text-content
+     (format nil "Task ~A reopened." id))))
 
 (define-task-tool task_set_metadata
     ((key string "Metadata key (e.g. display-name, tags, phase, goals, depends-on)")
@@ -586,15 +577,11 @@ Also use to take over orphaned phases — when bootstrap shows
                   (resolve-task-id task_id))
                 *current-task-id*)))
     (unless id (error "No task specified and no current task set."))
-    ;; Rebind *current-task-id* as a fresh dynamic binding so emit-event
-    ;; writes to ID's event log without exposing the interim value via
-    ;; the session registry (see task_complete for the full rationale).
-    (let ((*current-task-id* id))
-      (emit-event :session.release nil)
-      ;; Clear task_id in session file for hook coordination
-      (clear-session-task-file)
-      (make-text-content
-       (format nil "Task ~A released by session ~A" id *session-id*)))))
+    (emit-event :session.release nil :task-id id)
+    ;; Clear task_id in session file for hook coordination
+    (clear-session-task-file)
+    (make-text-content
+     (format nil "Task ~A released by session ~A" id *session-id*))))
 
 (defun handoff-timestamp ()
   "Return (values iso-timestamp handoff-name-prefix).

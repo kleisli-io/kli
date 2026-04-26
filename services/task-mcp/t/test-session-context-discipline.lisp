@@ -271,3 +271,97 @@
                  "task_release must not overwrite the session's focus task-id"))
         (uiop:delete-directory-tree scratch :validate t
                                     :if-does-not-exist :ignore)))))
+
+;;; ==========================================================================
+;;; (C) EMIT-EVENT TASK-ID ROUTING DISCIPLINE
+;;; ==========================================================================
+;;;
+;;; EMIT-EVENT routes its append to the explicit :TASK-ID keyword
+;;; argument, defaulting to *CURRENT-TASK-ID*.  TASK_COMPLETE,
+;;; TASK_REOPEN, and TASK_RELEASE pass :TASK-ID directly so an emit
+;;; against a target task other than the session's current focus does
+;;; not depend on dynamic-binding tricks that an in-body
+;;; ENSURE-SESSION-CONTEXT call could undo.
+
+(defun count-events-in-task-log (task-id)
+  "Count newline-terminated event lines in TASK-ID's events.jsonl.
+   Returns 0 for empty / non-existent files."
+  (let ((path (task:task-events-path task-id)))
+    (if (probe-file path)
+        (with-open-file (s path :direction :input)
+          (loop for line = (read-line s nil nil)
+                while line
+                count (plusp (length line))))
+        0)))
+
+(test emit-event-respects-explicit-task-id
+  "Calling EMIT-EVENT with :task-id TARGET while *current-task-id*=FOCUS
+   must write to TARGET's events.jsonl, not FOCUS's.  This is the unit-
+   level invariant the per-tool routing relies on."
+  (with-status-fixture (:focus "task-A" :target "task-B")
+    (emit-event :task.update-status (list :status "completed")
+                :task-id "task-B")
+    (is (= 1 (count-events-in-task-log "task-B"))
+        "event must land in TARGET's events.jsonl")
+    (is (= 0 (count-events-in-task-log "task-A"))
+        "event must NOT land in FOCUS's events.jsonl")
+    (is (string= "task-A" *current-task-id*)
+        "thread-local *CURRENT-TASK-ID* must be unchanged")))
+
+(test emit-event-defaults-task-id-to-current
+  "When :task-id is omitted, EMIT-EVENT must default to *current-task-id*
+   so the ~25 callers that mean 'emit on the current task' keep working."
+  (with-status-fixture (:focus "task-A" :target "task-B")
+    (emit-event :task.update-status (list :status "completed"))
+    (is (= 1 (count-events-in-task-log "task-A"))
+        "event must default to *current-task-id*'s events.jsonl")
+    (is (= 0 (count-events-in-task-log "task-B"))
+        "event must NOT land in TARGET's events.jsonl when no :task-id given")))
+
+(test task_complete-writes-update-status-to-target-not-focus
+  "End-to-end: with the session focused on FOCUS (loaded into the registry
+   via prior task_set_current), invoking task_complete --task_id TARGET
+   must persist :task.update-status into TARGET's events.jsonl, never
+   into FOCUS's."
+  (with-status-fixture (:focus "task-A" :target "task-B")
+    (pandoric-tool-call "task_complete" `(:task_id "task-B"))
+    (is (= 1 (count-events-in-task-log "task-B"))
+        "task_complete must persist to TARGET's events.jsonl")
+    (is (= 0 (count-events-in-task-log "task-A"))
+        "task_complete must NOT persist to FOCUS's events.jsonl")
+    (is (string= "task-A" (task-mcp::ctx-task-id (fetch-ctx "sid-focus")))
+        "registry ctx-task-id must remain at FOCUS")))
+
+(test task_reopen-writes-update-status-to-target-not-focus
+  "Symmetric to task_complete: task_reopen --task_id TARGET writes to
+   TARGET's events.jsonl, not FOCUS's."
+  (with-status-fixture (:focus "task-A" :target "task-B")
+    ;; Pre-mark task-B completed so reopen has legitimate work.
+    (emit-event :task.update-status (list :status "completed")
+                :task-id "task-B")
+    (let ((before-target (count-events-in-task-log "task-B"))
+          (before-focus (count-events-in-task-log "task-A")))
+      (pandoric-tool-call "task_reopen" `(:task_id "task-B"))
+      (is (= (1+ before-target) (count-events-in-task-log "task-B"))
+          "task_reopen must persist to TARGET's events.jsonl")
+      (is (= before-focus (count-events-in-task-log "task-A"))
+          "task_reopen must NOT persist to FOCUS's events.jsonl"))))
+
+(test task_release-writes-session-release-to-target-not-focus
+  "task_release --task_id TARGET emits :session.release on TARGET, not on
+   FOCUS.  Same routing invariant as task_complete/task_reopen."
+  (with-status-fixture (:focus "task-A" :target "task-B")
+    (let ((scratch (uiop:ensure-directory-pathname
+                    (format nil "~Atask-mcp-release-route-~A/"
+                            (uiop:temporary-directory)
+                            (random 1000000)))))
+      (ensure-directories-exist scratch)
+      (unwind-protect
+           (with-kli-coordination-root ((namestring scratch))
+             (pandoric-tool-call "task_release" `(:task_id "task-B"))
+             (is (= 1 (count-events-in-task-log "task-B"))
+                 "task_release must persist to TARGET's events.jsonl")
+             (is (= 0 (count-events-in-task-log "task-A"))
+                 "task_release must NOT persist to FOCUS's events.jsonl"))
+        (uiop:delete-directory-tree scratch :validate t
+                                    :if-does-not-exist :ignore)))))

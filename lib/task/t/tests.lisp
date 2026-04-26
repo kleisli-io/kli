@@ -240,6 +240,140 @@
     ;; After release, claim is empty
     (is (string= "" (lww-value (task-state-claim state))))))
 
+(test task-link-phase-of-encodes-as-parent-pointing
+  "task.link target=parent edge-type=phase-of from a child encodes as
+   :phase-of-parent (upward) — NOT :phase-of (downward). Without this
+   translation, task-children(child) would return parent as a pseudo-child
+   and all-descendants(child) would enumerate the parent's siblings."
+  (let* ((events (list
+                  (make-event :id "e1" :timestamp 100 :session "s1"
+                              :clock (make-vector-clock) :type :task.create
+                              :data (list :name "child"))
+                  (make-event :id "e2" :timestamp 200 :session "s1"
+                              :clock (make-vector-clock) :type :task.link
+                              :data (list :target-id "parent" :edge-type "phase-of"))))
+         (state (compute-state events)))
+    (is (equal '("parent") (edge-targets (task-state-edges state) :phase-of-parent)))
+    (is (null (edge-targets (task-state-edges state) :phase-of)))))
+
+(test task-link-forked-from-encodes-as-parent-pointing
+  "task.link edge-type=forked-from translates to :forked-from-parent."
+  (let* ((events (list
+                  (make-event :id "e1" :timestamp 100 :session "s1"
+                              :clock (make-vector-clock) :type :task.create
+                              :data (list :name "branch"))
+                  (make-event :id "e2" :timestamp 200 :session "s1"
+                              :clock (make-vector-clock) :type :task.link
+                              :data (list :target-id "trunk" :edge-type "forked-from"))))
+         (state (compute-state events)))
+    (is (equal '("trunk") (edge-targets (task-state-edges state) :forked-from-parent)))
+    (is (null (edge-targets (task-state-edges state) :forked-from)))))
+
+(test task-link-lateral-edge-passes-through
+  "task.link with non-structural edge-type (depends-on, related-to, etc.)
+   is direction-blind and is NOT translated."
+  (let* ((events (list
+                  (make-event :id "e1" :timestamp 100 :session "s1"
+                              :clock (make-vector-clock) :type :task.create
+                              :data (list :name "a"))
+                  (make-event :id "e2" :timestamp 200 :session "s1"
+                              :clock (make-vector-clock) :type :task.link
+                              :data (list :target-id "b" :edge-type "depends-on"))
+                  (make-event :id "e3" :timestamp 300 :session "s1"
+                              :clock (make-vector-clock) :type :task.link
+                              :data (list :target-id "c" :edge-type "related-to"))))
+         (state (compute-state events)))
+    (is (equal '("b") (edge-targets (task-state-edges state) :depends-on)))
+    (is (equal '("c") (edge-targets (task-state-edges state) :related-to)))))
+
+(test task-sever-removes-upward-link
+  "task.sever target=parent edge-type=phase-of removes the :phase-of-parent
+   encoding written by an earlier :task.link."
+  (let* ((events (list
+                  (make-event :id "e1" :timestamp 100 :session "s1"
+                              :clock (make-vector-clock) :type :task.create
+                              :data (list :name "child"))
+                  (make-event :id "e2" :timestamp 200 :session "s1"
+                              :clock (make-vector-clock) :type :task.link
+                              :data (list :target-id "parent" :edge-type "phase-of"))
+                  (make-event :id "e3" :timestamp 300 :session "s1"
+                              :clock (make-vector-clock) :type :task.sever
+                              :data (list :target-id "parent" :edge-type "phase-of"))))
+         (state (compute-state events)))
+    (is (null (edge-targets (task-state-edges state) :phase-of-parent)))
+    (is (null (edge-targets (task-state-edges state) :phase-of)))))
+
+(test task-sever-removes-downward-fork-edge
+  "task.sever still removes a :phase-of edge written by :task.fork
+   (parent-side, downward) — direction-tolerant removal."
+  (let* ((events (list
+                  (make-event :id "e1" :timestamp 100 :session "s1"
+                              :clock (make-vector-clock) :type :task.create
+                              :data (list :name "parent"))
+                  (make-event :id "e2" :timestamp 200 :session "s1"
+                              :clock (make-vector-clock) :type :task.fork
+                              :data (list :child-id "child-1" :edge-type "phase-of"))
+                  (make-event :id "e3" :timestamp 300 :session "s1"
+                              :clock (make-vector-clock) :type :task.sever
+                              :data (list :target-id "child-1" :edge-type "phase-of"))))
+         (state (compute-state events)))
+    (is (null (edge-targets (task-state-edges state) :phase-of)))
+    (is (null (edge-targets (task-state-edges state) :phase-of-parent)))))
+
+(test task-children-skips-upward-phase-of-link
+  "Integration: a leaf task that links upward to a parent via :task.link
+   does NOT see the parent enumerated as a child, and all-descendants
+   on the leaf does NOT enumerate sibling phases as descendants. This
+   is the regression test for the asymmetric-task_complete bug."
+  (let* ((root (format nil "/tmp/asym-fix-~A/" (symbol-name (gensym "T"))))
+         (write-task
+          (lambda (id events)
+            (let* ((dir (concatenate 'string root id "/"))
+                   (path (concatenate 'string dir "events.jsonl"))
+                   (log (make-event-log :path path)))
+              (ensure-directories-exist dir)
+              (dolist (ev events) (elog-append log ev))
+              (elog-save log)))))
+    (unwind-protect
+         (let ((*tasks-root* root))
+           (clear-graph-cache)
+           (clear-infos-cache)
+           (clear-task-state-cache)
+           (funcall write-task "asym-parent"
+                    (list (make-event :id "p1" :timestamp 1000 :session "s"
+                                      :clock (make-vector-clock) :type :task.create
+                                      :data '(:name "asym-parent"))
+                          (make-event :id "p2" :timestamp 1010 :session "s"
+                                      :clock (make-vector-clock) :type :task.fork
+                                      :data '(:child-id "asym-fork-child"
+                                              :edge-type "phase-of"))))
+           (funcall write-task "asym-fork-child"
+                    (list (make-event :id "fc1" :timestamp 2000 :session "s"
+                                      :clock (make-vector-clock) :type :task.create
+                                      :data '(:name "asym-fork-child"))))
+           (funcall write-task "asym-linked-leaf"
+                    (list (make-event :id "ll1" :timestamp 3000 :session "s"
+                                      :clock (make-vector-clock) :type :task.create
+                                      :data '(:name "asym-linked-leaf"))
+                          (make-event :id "ll2" :timestamp 3010 :session "s"
+                                      :clock (make-vector-clock) :type :task.link
+                                      :data '(:target-id "asym-parent"
+                                              :edge-type "phase-of"))))
+           ;; The leaf's outgoing :phase-of-parent is NOT child-bearing,
+           ;; so task-children sees no children.
+           (is (null (task-children "asym-linked-leaf")))
+           ;; Therefore all-descendants returns no descendants — the bug
+           ;; reproducer would have returned [parent, sibling-fork-child].
+           (is (null (all-descendants "asym-linked-leaf")))
+           ;; Sanity: parent still sees its forked child.
+           (is (equal '("asym-fork-child") (task-children "asym-parent"))))
+      (uiop:delete-directory-tree (pathname root)
+                                  :validate t
+                                  :if-does-not-exist :ignore)
+      (clear-graph-cache)
+      (clear-infos-cache)
+      (clear-task-state-cache))))
+
 (test legacy-spawn-to-edge
   "Legacy :task.spawn maps to phase-of edge in OR-Set."
   (let* ((events (list
@@ -462,21 +596,9 @@
 
 ;;; --- Graph / Health Regression Tests ---
 ;;;
-;;; These tests use real .kli/tasks/ data via detect-tasks-root.
-
-(defun task-roots-available-p ()
-  "Try to set up *tasks-root* from real data. Returns T if available."
-  (handler-case
-      (progn
-        (detect-tasks-root)
-        (and *tasks-root* (uiop:directory-exists-p *tasks-root*)))
-    (error () nil)))
-
-(defmacro with-task-roots (&body body)
-  "Execute BODY only if tasks root is available, otherwise skip."
-  `(if (not (task-roots-available-p))
-       (skip "No tasks root available (sandbox or missing .kli/tasks/)")
-       (progn ,@body)))
+;;; These tests use the synthetic tasks tree built by WITH-TASK-ROOTS
+;;; (defined in t/package.lisp). The fixture has three tasks:
+;;; synth-parent forks synth-childA + synth-childB.
 
 (test build-task-graph-structure
   "build-task-graph returns a task-graph with nodes and edges."

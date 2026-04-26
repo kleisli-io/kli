@@ -118,6 +118,7 @@
   ;; Simulate stdio mode
   (let ((playbook::*session-states* (make-hash-table :test 'equal))
         (playbook::*http-mode* nil))
+    (get-or-create-session "parity-sess")
     (record-activation "parity-sess" "pat-1")
     (record-activation "parity-sess" "pat-2")
     (let ((stdio-activated
@@ -126,6 +127,7 @@
       ;; Simulate HTTP mode (same operations)
       (let ((playbook::*session-states* (make-hash-table :test 'equal))
             (playbook::*http-mode* t))
+        (get-or-create-session "parity-sess")
         (record-activation "parity-sess" "pat-1")
         (record-activation "parity-sess" "pat-2")
         (let ((http-activated
@@ -139,12 +141,14 @@
   "Feedback recording produces identical state in both transport modes."
   (let ((playbook::*session-states* (make-hash-table :test 'equal))
         (playbook::*http-mode* nil))
+    (get-or-create-session "parity-fb")
     (record-activation "parity-fb" "pat-1")
     (record-feedback "parity-fb" "pat-1" :helpful)
     (multiple-value-bind (s-act s-fb s-pending)
         (session-summary "parity-fb")
       (let ((playbook::*session-states* (make-hash-table :test 'equal))
             (playbook::*http-mode* t))
+        (get-or-create-session "parity-fb")
         (record-activation "parity-fb" "pat-1")
         (record-feedback "parity-fb" "pat-1" :helpful)
         (multiple-value-bind (h-act h-fb h-pending)
@@ -157,6 +161,7 @@
   "session-summary returns identical results regardless of transport mode."
   (let ((playbook::*session-states* (make-hash-table :test 'equal))
         (playbook::*http-mode* nil))
+    (get-or-create-session "parity-sum")
     (record-activation "parity-sum" "p1")
     (record-activation "parity-sum" "p2")
     (record-activation "parity-sum" "p3")
@@ -166,6 +171,7 @@
         (session-summary "parity-sum")
       (let ((playbook::*session-states* (make-hash-table :test 'equal))
             (playbook::*http-mode* t))
+        (get-or-create-session "parity-sum")
         (record-activation "parity-sum" "p1")
         (record-activation "parity-sum" "p2")
         (record-activation "parity-sum" "p3")
@@ -176,3 +182,103 @@
           (is (= s-act h-act))
           (is (= s-fb h-fb))
           (is (null (set-exclusive-or s-pend h-pend :test #'string=))))))))
+
+;;; ==========================================================================
+;;; Claude-Session-Id resolution
+;;; ==========================================================================
+;;;
+;;; PLAYBOOK::APPLY-CLAUDE-SESSION-ID stamps the Claude session ID on a
+;;; session-state.  The contract: an explicit Claude-Session-Id HTTP
+;;; header value (passed via :HEADER-SID, default
+;;; CURRENT-CLAUDE-SESSION-ID) is authoritative when present;
+;;; peer-PID-derived RESOLVE-CLAUDE-SESSION-ID is the fallback.
+;;;
+;;; Header authority matters because Claude Code shells with a shared
+;;; UNIX PID lineage all resolve to the same registered PID, so the
+;;; peer-PID path coalesces them onto a single claude-sid.  An explicit
+;;; per-request header carries each shell's own identity.
+
+(test apply-claude-session-id-prefers-header-over-pid-fallback
+  "Given a non-NIL :HEADER-SID, APPLY-CLAUDE-SESSION-ID must stamp it on
+   the session and skip the peer-PID lookup entirely."
+  (let ((playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
+        (playbook::*http-mode* t))
+    ;; Seed the peer-PID registry with a DIFFERENT sid that would win
+    ;; under the fallback path.
+    (register-claude-session-for-pid 999999 "peer-pid-derived-sid")
+    (let ((session (get-or-create-session "mcp-sid-A")))
+      (let ((resolved (playbook::apply-claude-session-id
+                       session :header-sid "header-claude-sid-X")))
+        (is (string= "header-claude-sid-X" resolved)
+            "APPLY must return the header value")
+        (is (string= "header-claude-sid-X"
+                     (playbook::session-state-claude-session-id session))
+            "session-state-claude-session-id must be the header value, ~
+             not the peer-PID-derived fallback")))))
+
+(test apply-claude-session-id-falls-back-to-peer-pid-when-no-header
+  "Given a NIL :HEADER-SID, APPLY-CLAUDE-SESSION-ID must delegate to
+   RESOLVE-CLAUDE-SESSION-ID (the peer-PID-derived path) for backward
+   compatibility with hook callers and older clients."
+  (let ((playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
+        (playbook::*http-mode* t))
+    (register-claude-session-for-pid 12345 "peer-pid-derived-sid")
+    (let ((session (get-or-create-session "mcp-sid-B")))
+      (let ((resolved (playbook::apply-claude-session-id
+                       session :header-sid nil)))
+        (is (string= "peer-pid-derived-sid" resolved)
+            "without header, must fall back to peer-PID registry")))))
+
+(test apply-claude-session-id-header-overwrites-stale-value
+  "When session-state already holds a stale claude-sid (e.g. from a
+   previous peer-PID coalescing), a fresh :HEADER-SID must overwrite
+   it so the session can recover from prior mis-keying."
+  (let ((playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*http-mode* t))
+    (let ((session (get-or-create-session "mcp-sid-C")))
+      (setf (playbook::session-state-claude-session-id session)
+            "stale-coalesced-sid")
+      (playbook::apply-claude-session-id session :header-sid "fresh-header-sid")
+      (is (string= "fresh-header-sid"
+                   (playbook::session-state-claude-session-id session))
+          "header value must overwrite the stale value"))))
+
+(test apply-claude-session-id-no-header-no-pid-leaves-session-untouched
+  "When neither :HEADER-SID nor the peer-PID registry yields a value,
+   the session's claude-session-id stays NIL — no fabricated identity."
+  (let ((playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
+        (playbook::*http-mode* t))
+    (let ((session (get-or-create-session "mcp-sid-D")))
+      (let ((resolved (playbook::apply-claude-session-id
+                       session :header-sid nil)))
+        (is (null resolved)
+            "no header + empty PID registry => NIL")
+        (is (null (playbook::session-state-claude-session-id session))
+            "session-state-claude-session-id stays NIL")))))
+
+(test parallel-shells-with-distinct-headers-stay-distinct
+  "Two MCP sessions, each handling a request that carries a DIFFERENT
+   Claude-Session-Id header value, must record DISTINCT
+   session-state-claude-session-id values even when peer-PID resolution
+   would coalesce them onto a single registered PID."
+  (let ((playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
+        (playbook::*http-mode* t))
+    (register-claude-session-for-pid 42 "coalesced-claude-sid")
+    (let ((session-1 (get-or-create-session "mcp-sid-shell-1"))
+          (session-2 (get-or-create-session "mcp-sid-shell-2")))
+      (playbook::apply-claude-session-id session-1 :header-sid "claude-shell-1")
+      (playbook::apply-claude-session-id session-2 :header-sid "claude-shell-2")
+      (is (string= "claude-shell-1"
+                   (playbook::session-state-claude-session-id session-1))
+          "shell 1 must record its own header value")
+      (is (string= "claude-shell-2"
+                   (playbook::session-state-claude-session-id session-2))
+          "shell 2 must record its own header value, not be coalesced")
+      (is (not (string=
+                (playbook::session-state-claude-session-id session-1)
+                (playbook::session-state-claude-session-id session-2)))
+          "the two sessions must hold distinct claude-sids"))))

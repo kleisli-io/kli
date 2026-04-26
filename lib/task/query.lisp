@@ -1086,8 +1086,8 @@
                     (setf max-n n))))))))))
 
 (defun execute-scaffold-chain (descriptions)
-  "Execute (scaffold-chain! \"Phase 1\" \"Phase 2\" \"Phase 3\").
-   Creates linear dependency chain: p1 -> p2 -> p3.
+  "Execute (scaffold-chain! \"Research the API\" \"Draft the plan\" \"Implement the change\").
+   Creates linear dependency chain: child-1 -> child-2 -> child-3.
    Uses *current-task-id* as parent.
    Starts numbering after existing phase-N children to avoid collisions."
   (unless *mutation-handler*

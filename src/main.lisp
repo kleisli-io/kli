@@ -151,9 +151,19 @@
       (format *error-output* "~&[kli] Debugger hook installed~%")
       (force-output *error-output*))))
 
+(defun log-runtime-banner ()
+  "Log SBCL runtime + heap configuration to stderr at daemon startup."
+  (format *error-output*
+          "~&;; kli daemon: SBCL ~A, heap=~D MB, pid=~D~%"
+          (lisp-implementation-version)
+          (round (sb-ext:dynamic-space-size) (* 1024 1024))
+          (sb-posix:getpid))
+  (force-output *error-output*))
+
 (defun prepare-daemon (&key (swank-port 14011))
   "Prepare for long-running execution: debugger hook + Swank in background.
    SWANK-PORT controls the Swank listener port for live debugging."
+  (log-runtime-banner)
   (install-debugger-hook)
   (let ((port swank-port))
     (sb-thread:make-thread (lambda () (start-swank :port port))
@@ -300,18 +310,42 @@
         (let ((sid (uiop:read-file-string path)))
           (when (plusp (length sid)) sid))))))
 
+(defun claude-session-id-from-env ()
+  "Read $CLAUDE_SESSION_ID from the environment.  Claude Code sets this
+   per-shell so each invocation of `kli` carries a distinct identity even
+   when multiple shells share a parent PID lineage.  Returns NIL when the
+   var is unset (manual invocation outside Claude Code, or a non-Claude
+   client) — daemon-side resolution then falls back to peer-PID."
+  (let ((sid (uiop:getenv "CLAUDE_SESSION_ID")))
+    (when (and sid (plusp (length sid))) sid)))
+
+(defun mcp-headers (session-id)
+  "Build the standard outbound HTTP header alist for an MCP request.
+   Includes Content-Type, Mcp-Session-Id, and (when available)
+   Claude-Session-Id sourced from $CLAUDE_SESSION_ID."
+  (let ((claude-sid (claude-session-id-from-env)))
+    (append
+     `(("Content-Type" . "application/json")
+       ("Mcp-Session-Id" . ,session-id))
+     (when claude-sid
+       `(("Claude-Session-Id" . ,claude-sid))))))
+
 (defun mcp-init (&key (host "127.0.0.1") (port 8090))
   "Initialize MCP session with daemon. Returns session-id string."
-  (let ((url (format nil "http://~A:~A/mcp" host port))
-        (body (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"kli-cli\",\"version\":\"~A\"}}}" *version*)))
-    (multiple-value-bind (body-bytes status headers)
+  (let* ((url (format nil "http://~A:~A/mcp" host port))
+         (body (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"kli-cli\",\"version\":\"~A\"}}}" *version*))
+         (claude-sid (claude-session-id-from-env))
+         (headers (append '(("Content-Type" . "application/json"))
+                          (when claude-sid
+                            `(("Claude-Session-Id" . ,claude-sid))))))
+    (multiple-value-bind (body-bytes status headers-out)
         (dex:post url
                   :content body
-                  :headers '(("Content-Type" . "application/json"))
+                  :headers headers
                   :connect-timeout 3
                   :force-binary t)
       (declare (ignore body-bytes status))
-      (let ((session-id (gethash "mcp-session-id" headers)))
+      (let ((session-id (gethash "mcp-session-id" headers-out)))
         (unless session-id
           (error "No Mcp-Session-Id in response — is kli daemon running?"))
         session-id))))
@@ -320,8 +354,39 @@
   "Deprecated — returns NIL. No depot concept anymore."
   nil)
 
-(defun mcp-call (tool-name args-ht session-id &key (host "127.0.0.1") (port 8090))
-  "Call MCP tool via daemon HTTP. Returns result text string."
+(defun clear-cli-session ()
+  "Delete the persisted CLI session file.  Called when the daemon
+   reports our Mcp-Session-Id is unknown so the next ENSURE-SESSION
+   call mints a fresh one via /initialize."
+  (let ((path (cli-session-path)))
+    (when (probe-file path)
+      (ignore-errors (delete-file path)))))
+
+(defun session-not-found-error-p (condition)
+  "Return T when CONDITION is a dex:http-request-failed with status
+   404 and a body containing the typed code session-not-found.  This
+   signals that the daemon evicted our Mcp-Session-Id and the CLI
+   should re-initialize and retry."
+  (and (typep condition 'dex:http-request-failed)
+       (eql 404 (dex:response-status condition))
+       (let ((body (dex:response-body condition)))
+         (and body
+              (search "session-not-found"
+                      (if (stringp body)
+                          body
+                          (ignore-errors
+                            (babel:octets-to-string body))))))))
+
+(defun mcp-call (tool-name args-ht session-id
+                 &key (host "127.0.0.1") (port 8090) (allow-retry t))
+  "Call MCP tool via daemon HTTP. Returns result text string.
+
+   On HTTP 404 with code=session-not-found the persisted sid is
+   stale (daemon was restarted, or task-mcp's 4h cleanup evicted
+   the context).  Drop the persisted sid, re-initialize via
+   /initialize, and retry the request once.  Recursion is bounded
+   by ALLOW-RETRY: the retry call passes :ALLOW-RETRY NIL so a
+   second 404 propagates to the caller rather than looping."
   (let* ((url (format nil "http://~A:~A/mcp" host port))
          (params (make-hash-table :test 'equal))
          (request (make-hash-table :test 'equal)))
@@ -333,27 +398,36 @@
           (gethash "params" request) params)
     (let ((body (with-output-to-string (s) (yason:encode request s)))
           (depot (detect-cli-depot)))
-      (multiple-value-bind (body-bytes status)
-          (dex:post url
-                    :content body
-                    :headers `(("Content-Type" . "application/json")
-                               ("Mcp-Session-Id" . ,session-id)
-                               ,@(when depot
-                                   `(("X-Depot" . ,depot))))
-                    :connect-timeout 5
-                    :read-timeout 30
-                    :force-binary t)
-        (declare (ignore status))
-        (let* ((response-text (babel:octets-to-string body-bytes))
-               (parsed (yason:parse response-text)))
-          (if (gethash "error" parsed)
-              (let* ((err (gethash "error" parsed))
-                     (msg (gethash "message" err)))
-                (error "~A" msg))
-              (let ((content (gethash "content" (gethash "result" parsed))))
-                (with-output-to-string (s)
-                  (dolist (item content)
-                    (format s "~A" (gethash "text" item)))))))))))
+      (handler-case
+          (multiple-value-bind (body-bytes status)
+              (dex:post url
+                        :content body
+                        :headers (append (mcp-headers session-id)
+                                         (when depot
+                                           `(("X-Depot" . ,depot))))
+                        :connect-timeout 5
+                        :read-timeout 30
+                        :force-binary t)
+            (declare (ignore status))
+            (let* ((response-text (babel:octets-to-string body-bytes))
+                   (parsed (yason:parse response-text)))
+              (if (gethash "error" parsed)
+                  (let* ((err (gethash "error" parsed))
+                         (msg (gethash "message" err)))
+                    (error "~A" msg))
+                  (let ((content (gethash "content" (gethash "result" parsed))))
+                    (with-output-to-string (s)
+                      (dolist (item content)
+                        (format s "~A" (gethash "text" item))))))))
+        (dex:http-request-failed (c)
+          (cond
+            ((and allow-retry (session-not-found-error-p c))
+             (clear-cli-session)
+             (let ((new-sid (mcp-init :host host :port port)))
+               (save-session new-sid)
+               (mcp-call tool-name args-ht new-sid
+                         :host host :port port :allow-retry nil)))
+            (t (error c))))))))
 
 (defun ensure-session (&key (host "127.0.0.1") (port 8090))
   "Get a valid MCP session: load persisted or init new.
@@ -370,8 +444,7 @@
               (dex:post (format nil "http://~A:~A/mcp" host port)
                         :content (with-output-to-string (s)
                                    (yason:encode request s))
-                        :headers `(("Content-Type" . "application/json")
-                                   ("Mcp-Session-Id" . ,sid))
+                        :headers (mcp-headers sid)
                         :connect-timeout 3
                         :force-binary t)
               sid)
@@ -435,6 +508,7 @@
   (format t "  serve [--task|--playbook]  Start MCP server (default: task)~%")
   (format t "  dashboard                  Start task graph dashboard~%")
   (format t "  hook <name>                Run Claude Code hook handler~%")
+  (format t "  admin <subcmd>             Offline maintenance (verify-events, repair-events)~%")
   (format t "  status [--task ID]         One-shot task overview~%")
   (format t "  version                    Show version~%")
   (format t "  help                       Show this help~%")
@@ -449,6 +523,96 @@
   (format t "  TASK_MCP_TRANSPORT         'http' for HTTP mode, else stdio~%")
   (format t "  TASK_MCP_SWANK_PORT        Swank port for task daemon (default: 14011)~%")
   (format t "  PLAYBOOK_MCP_SWANK_PORT    Swank port for playbook daemon (default: 14010)~%"))
+
+;;; --- Offline admin subcommands (verify-events, repair-events) ---
+
+(defun admin-print-verify (data)
+  "Pretty-print a (verify-events-tree) result plist to *standard-output*."
+  (let* ((totals (getf data :totals))
+         (per-task (getf data :per-task))
+         (tasks (getf data :tasks))
+         (lines (getf totals :lines))
+         (good (getf totals :good))
+         (synth (getf totals :synthesized))
+         (bad (getf totals :quarantined))
+         (errs (getf totals :errors))
+         (interesting (remove-if
+                       (lambda (e) (and (zerop (getf e :synthesized))
+                                        (zerop (getf e :quarantined))
+                                        (null (getf e :error))))
+                       per-task)))
+    (format t "~&Verify events under ~A~%" (or task:*tasks-root* "(unknown)"))
+    (format t "  Tasks scanned : ~D~%" tasks)
+    (format t "  Total lines   : ~D~%" lines)
+    (format t "    Good        : ~D~%" good)
+    (format t "    Synthesized : ~D (recoverable old-format ids)~%" synth)
+    (format t "    Quarantined : ~D (unparseable; in .quarantine sidecar)~%" bad)
+    (format t "    Read errors : ~D~%" errs)
+    (when interesting
+      (format t "~%Tasks with issues:~%")
+      (dolist (e interesting)
+        (if (getf e :error)
+            (format t "  ~A  ERROR: ~A~%" (getf e :id) (getf e :error))
+            (format t "  ~A  total=~D good=~D synth=~D bad=~D~%"
+                    (getf e :id) (getf e :total) (getf e :good)
+                    (getf e :synthesized) (getf e :quarantined)))))))
+
+(defun admin-print-repair (data)
+  "Pretty-print a (repair-events-tree) result plist to *standard-output*."
+  (let* ((totals (getf data :totals))
+         (per-task (getf data :per-task))
+         (tasks (getf data :tasks))
+         (rewrote (getf data :rewrote)))
+    (format t "~&Repair events under ~A~%" (or task:*tasks-root* "(unknown)"))
+    (format t "  Tasks scanned : ~D~%" tasks)
+    (format t "  Files rewrote : ~D~%" rewrote)
+    (format t "  Lines read    : ~D~%" (getf totals :read))
+    (format t "  Lines written : ~D~%" (getf totals :written))
+    (format t "  Synthesized   : ~D (ids baked in)~%" (getf totals :synthesized))
+    (format t "  Quarantined   : ~D (kept in .quarantine sidecar)~%"
+            (getf totals :quarantined))
+    (when per-task
+      (format t "~%Affected tasks:~%")
+      (dolist (e per-task)
+        (cond
+          ((getf e :error)
+           (format t "  ~A  ERROR: ~A~%" (getf e :id) (getf e :error)))
+          (t
+           (format t "  ~A  read=~D written=~D synth=~D bad=~D ~A~%"
+                   (getf e :id) (getf e :read) (getf e :written)
+                   (getf e :synthesized) (getf e :quarantined)
+                   (if (getf e :rewrote-p) "[rewrote]" "[clean]"))))))))
+
+(defun admin-cli (args)
+  "Dispatch `kli admin <subcmd>`. Subcommands run offline against the
+   on-disk tasks tree (no daemon required). Resolves the tasks root via
+   KLI_TASKS_DIR / git-root / cwd as documented in detect-tasks-root.
+
+   Subcommands:
+     verify-events    Dry-run parse every events.jsonl, report counts.
+     repair-events    Atomically rewrite each events.jsonl to bake in
+                      synthesized ids; quarantine unparseable lines."
+  (let ((sub (first args)))
+    (unless task:*tasks-root*
+      (handler-case (task:detect-tasks-root)
+        (error (e)
+          (format *error-output* "Cannot detect tasks root: ~A~%" e)
+          (uiop:quit 1))))
+    (cond
+      ((or (null sub) (string= sub "--help") (string= sub "help"))
+       (format t "Usage: kli admin <subcommand>~%")
+       (format t "Subcommands:~%")
+       (format t "  verify-events    Dry-run parse every events.jsonl, report counts.~%")
+       (format t "  repair-events    Rewrite events.jsonl files to bake in synthesized ids.~%")
+       (format t "                   Stop the daemon first to avoid concurrent-writer races.~%"))
+      ((string= sub "verify-events")
+       (admin-print-verify (task:verify-events-tree)))
+      ((string= sub "repair-events")
+       (admin-print-repair (task:repair-events-tree)))
+      (t
+       (format *error-output*
+               "Unknown admin subcommand: ~A~%Try: kli admin help~%" sub)
+       (uiop:quit 1)))))
 
 (defun main ()
   "Top-level entry point for the kli binary.
@@ -554,6 +718,9 @@
              (if name
                  (progn (kli-hook:hook-main name) (uiop:quit 0))
                  (progn (format *error-output* "Usage: kli hook <name>~%") (uiop:quit 1)))))
+          ((string= command "admin")
+           (admin-cli (rest args))
+           (uiop:quit 0))
           (t
            ;; Tool fallthrough: check *tool-registry* before erroring
            (multiple-value-bind (tag result) (cli-dispatch command (rest args))

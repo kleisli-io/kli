@@ -65,20 +65,94 @@
                             (make-hash-table))))
      s)))
 
+;;; --- Event id synthesis ---
+;;; Old-format events lacking a top-level "id" are accepted by re-deriving
+;;; a stable id from (timestamp,type,data). Replay stays deterministic.
+
+(declaim (fixnum *synthesized-event-ids*))
+(sb-ext:defglobal *synthesized-event-ids* 0
+  "Counter of events whose id was synthesized during parse. Inspectable
+   for diagnostics via the verify-events admin endpoint.")
+
+(defun synthesize-event-id (timestamp type-string data-repr)
+  "Derive a deterministic id from (TIMESTAMP TYPE-STRING DATA-REPR).
+   Same inputs → same id, so re-parsing the same line is idempotent.
+   8-hex-char digest keeps ids compact and recognisable."
+  (format nil "synth-~A-~A-~8,'0X"
+          (or timestamp 0)
+          (or type-string "unknown")
+          (logand most-positive-fixnum
+                  (sxhash (list timestamp type-string data-repr)))))
+
+(define-condition event-parse-error (error)
+  ((reason :initarg :reason :reader event-parse-error-reason)
+   (raw :initarg :raw :reader event-parse-error-raw))
+  (:report (lambda (c s)
+             (format s "event-parse-error: ~A (raw: ~S)"
+                     (event-parse-error-reason c)
+                     (let ((r (event-parse-error-raw c)))
+                       (if (and (stringp r) (> (length r) 80))
+                           (concatenate 'string (subseq r 0 80) "...")
+                           r))))))
+
 (defun json-string-to-event (str)
-  "Parse JSON string to event struct."
-  (let* ((alist (yason:parse str :object-as :alist))
+  "Parse JSON string to event struct, tolerant of old-format lines.
+
+   Returns (VALUES EVENT SYNTHESIZED-P).  SYNTHESIZED-P is T iff THIS
+   call had to synthesize the id (i.e. the raw line lacked one).  It
+   stays NIL when the raw line already carried an id, even one whose
+   value matches the synth- prefix (i.e. already baked in by a prior
+   repair pass).  Repair callers use the second value to detect a
+   genuine fix-up vs an idempotent re-parse.
+
+   Recovery rules:
+   - Missing/null id        → synthesised from (timestamp,type,data); counter incremented.
+   - Missing/null session   → defaults to \"\".
+   - Missing/null clock     → defaults to empty vector-clock.
+   - Missing/null data      → defaults to NIL.
+   - Missing/null timestamp → REJECTED (signals event-parse-error).
+   - Missing/null type      → REJECTED.
+   - JSON parse failure     → REJECTED."
+  (let* ((alist (handler-case (yason:parse str :object-as :alist)
+                  (error (e)
+                    (error 'event-parse-error
+                           :reason (format nil "yason: ~A" e)
+                           :raw str))))
+         (timestamp (cdr (assoc "timestamp" alist :test #'string=)))
+         (type-str (cdr (assoc "type" alist :test #'string=)))
+         (id-raw (cdr (assoc "id" alist :test #'string=)))
+         (session (or (cdr (assoc "session" alist :test #'string=)) ""))
          (clock-alist (cdr (assoc "clock" alist :test #'string=)))
-         (vc (make-vector-clock)))
-    (loop for (k . v) in clock-alist
-          do (setf (gethash k (vc-entries vc)) v))
-    (let ((data-alist (cdr (assoc "data" alist :test #'string=))))
-      (make-event
-       :id (cdr (assoc "id" alist :test #'string=))
-       :timestamp (cdr (assoc "timestamp" alist :test #'string=))
-       :session (cdr (assoc "session" alist :test #'string=))
-       :clock vc
-       :type (intern (string-upcase
-                      (cdr (assoc "type" alist :test #'string=)))
-                     :keyword)
-       :data (when data-alist (alist-to-plist data-alist))))))
+         (data-alist (cdr (assoc "data" alist :test #'string=)))
+         (vc (make-vector-clock))
+         (synth-p nil))
+    (unless (integerp timestamp)
+      (error 'event-parse-error
+             :reason "missing or non-integer timestamp" :raw str))
+    (unless (and type-str (stringp type-str))
+      (error 'event-parse-error
+             :reason "missing or non-string type" :raw str))
+    (when clock-alist
+      (loop for (k . v) in clock-alist
+            do (setf (gethash k (vc-entries vc)) v)))
+    (let ((id (cond
+                ((and id-raw (stringp id-raw) (> (length id-raw) 0)) id-raw)
+                (t
+                 (setf synth-p t)
+                 (sb-ext:atomic-incf *synthesized-event-ids*)
+                 (synthesize-event-id timestamp type-str
+                                      (when data-alist
+                                        (write-to-string data-alist
+                                                         :readably nil
+                                                         :pretty nil
+                                                         :length 32
+                                                         :level 4)))))))
+      (values
+       (make-event
+        :id id
+        :timestamp timestamp
+        :session session
+        :clock vc
+        :type (intern (string-upcase type-str) :keyword)
+        :data (when data-alist (alist-to-plist data-alist)))
+       synth-p))))

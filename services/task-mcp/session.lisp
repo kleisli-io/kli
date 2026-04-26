@@ -77,9 +77,48 @@
    after the mutation completes.")
 
 
+(define-condition unknown-session (error)
+  ((session-id :initarg :session-id :reader unknown-session-session-id))
+  (:report
+   (lambda (c stream)
+     (format stream "session ~S not found in registry — client must reinitialize"
+             (unknown-session-session-id c))))
+  (:documentation
+   "Signalled when a request arrives carrying an Mcp-Session-Id header
+    that does not correspond to a context in *SESSION-CONTEXTS*.  The
+    HTTP layer translates this to 404 with code=session-not-found so
+    the CLI can drop its persisted sid and re-init.
+
+    Before this condition existed, GET-SESSION-CONTEXT silently
+    auto-created a virgin context for any unknown sid.  When task-mcp's
+    4h cleanup-inactive-sessions evicted a context that the framework's
+    no-TTL session-store still considered valid, the next request from
+    the same client would resurrect a virgin (task-id=NIL) context with
+    no indication to the client that any state had been lost."))
+
 (defun get-session-context (session-id)
-  "Get or create session context for SESSION-ID."
+  "Look up the session context for SESSION-ID.  Returns NIL on miss.
+
+   This is a pure read.  See CREATE-SESSION-CONTEXT for the legitimate
+   creation paths (post-/initialize hook in the :AROUND method, and
+   REGISTER-CLAUDE-PID); see ENSURE-SESSION-CONTEXT for the validation
+   gate that signals UNKNOWN-SESSION when a request supplies an
+   Mcp-Session-Id whose context has been evicted."
   (with-timed-lock (*session-contexts-lock* :get-ctx)
+    (gethash session-id *session-contexts*)))
+
+(defun create-session-context (session-id)
+  "Insert a fresh session-context for SESSION-ID and return it.
+   Idempotent: if a context already exists for SESSION-ID, return it
+   unchanged.
+
+   Legitimate creation paths:
+   - The :AROUND method's post-call-next-method hook, when the
+     framework allocated a new Mcp-Session-Id during /initialize.
+   - REGISTER-CLAUDE-PID, when the SessionStart hook stitches a
+     Claude PID onto an MCP session that has not yet seen its first
+     tool call."
+  (with-timed-lock (*session-contexts-lock* :create-ctx)
     (or (gethash session-id *session-contexts*)
         (let ((ctx (make-session-context
                     :id session-id
@@ -161,6 +200,10 @@
   "Load session context into globals.
    Called before request processing in HTTP mode.
 
+   Signals UNKNOWN-SESSION when SESSION-ID has no context in the
+   registry — callers must have validated existence (typically via
+   ENSURE-SESSION-CONTEXT, which runs first in the :AROUND method).
+
    The vector clock is COPIED into a fresh struct so concurrent
    requests on the same MCP session each operate on an independent
    hash table.  Otherwise two threads' VC-INCREMENT calls would race
@@ -169,6 +212,8 @@
    merges the per-thread VC back into the registry pointwise-max
    under the lock, preserving monotonicity across the join."
   (let ((ctx (get-session-context session-id)))
+    (unless ctx
+      (error 'unknown-session :session-id session-id))
     (setf *session-id* session-id)
     (setf *current-task-id* (ctx-task-id ctx))
     (setf *session-vc*
@@ -207,8 +252,13 @@
 (defun register-claude-pid (session-id pid &key team-name agent-name agent-type)
   "Register Claude Code's PID for a session.
    Called by SessionStart hook to correlate HTTP session with Claude process.
-   When TEAM-NAME is non-nil, also stores agent team metadata."
-  (let ((ctx (get-session-context session-id)))
+   When TEAM-NAME is non-nil, also stores agent team metadata.
+
+   The SessionStart hook may fire before any tool call has loaded the
+   MCP session into the task-mcp registry, so this is a legitimate
+   creation path: CREATE-SESSION-CONTEXT is idempotent — it returns
+   the existing context unchanged if one already exists."
+  (let ((ctx (create-session-context session-id)))
     (setf (ctx-claude-pid ctx) pid)
     (when team-name
       (setf (ctx-team-name ctx) team-name)
@@ -458,9 +508,13 @@
   "Event types permitted on completed tasks.
    Additive provenance (fork, link) allowed; subtractive (sever) requires reopen.")
 
-(defun current-task-completed-p ()
-  "Check if current task has status completed."
-  (let* ((path (task:task-events-path *current-task-id*))
+(defun current-task-completed-p (&optional (task-id *current-task-id*))
+  "Check whether TASK-ID has status completed.
+   Defaults to *current-task-id* for the common case.  Callers that
+   route an emit to a different target (task_complete, task_reopen,
+   task_release) pass the target explicitly so the completed-gate
+   checks the same task the emit will write to."
+  (let* ((path (task:task-events-path task-id))
          (log (task:elog-load path))
          (events (reverse (task:event-log-events log))))
     (when events
@@ -498,20 +552,33 @@
         when (or (eq value 'missing) (null value))
         collect field))
 
-(defun emit-event (type &optional data)
-  "Emit an event to the current task's event log.
-   Rejects mutating events when task is completed.
+(defun emit-event (type &optional data &key (task-id *current-task-id*))
+  "Emit an event to TASK-ID's event log.
+   TASK-ID defaults to *current-task-id*.  Callers that need to write
+   to a task other than the session's current focus (task_complete,
+   task_reopen, task_release) pass :task-id explicitly.
+
+   Rejects mutating events when TASK-ID is completed.
    Rejects events whose required fields (per *event-required-fields*) are
    missing or nil — this is the boundary check that prevents JSON nulls
    from surviving to disk.
    Increments vector clock, creates event, appends to file.
    Uses append-only writes for concurrent safety — multiple sessions
-   can emit events to the same task without lost updates."
-  (require-current-task)
-  (when (and (current-task-completed-p)
+   can emit events to the same task without lost updates.
+
+   Session context (Mcp-Session-Id → ctx-task-id, vector clock, event
+   counter) is loaded once per request by the HTTP :AROUND method on
+   ACCEPTOR-DISPATCH-REQUEST and by DEFINE-TASK-TOOL's injected
+   REQUIRE-CURRENT-TASK.  EMIT-EVENT does not re-load it: re-loading
+   would overwrite *CURRENT-TASK-ID* from the registry mid-body and
+   defeat the explicit :TASK-ID argument."
+  (unless task-id
+    (error "emit-event: no task-id supplied and *current-task-id* is nil. ~
+            Either pass :task-id, or run task_set_current / task_create first."))
+  (when (and (current-task-completed-p task-id)
              (not (member type *completed-allowed-events*)))
     (error "Task ~A is completed. Reopen with task_reopen before making changes."
-           *current-task-id*))
+           task-id))
   (let ((missing (check-required-fields type data)))
     (when missing
       (error "emit-event: event type ~A missing/nil required field(s): ~{~A~^, ~}"
@@ -524,13 +591,13 @@
               :clock *session-vc*
               :type type
               :data data))
-         (path (task:task-events-path *current-task-id*)))
+         (path (task:task-events-path task-id)))
     (task:elog-append-event path ev)
     ;; Invalidate per-request elog cache for this task (we just appended an event)
     (when task:*elog-cache*
       (remhash (namestring path) task:*elog-cache*))
     ;; Invalidate per-task state cache (we just modified this task's events)
-    (task:invalidate-task-state-cache *current-task-id*)
+    (task:invalidate-task-state-cache task-id)
     ;; Invalidate graph/infos caches on edge-mutating events only.
     ;; task.create adds a node but no edges — the existing graph is still valid
     ;; (new task will be discovered on next full rebuild or TTL expiry).
@@ -542,7 +609,7 @@
     ;; Auto-index observations into *obs-graph* (best-effort)
     (when (eq type :observation)
       (ignore-errors
-       (index-observation-event ev *current-task-id*)))
+       (index-observation-event ev task-id)))
     ;; Session context (vector clock, event counter) is persisted by the
     ;; HTTP dispatch :around method on request exit.  No per-event save
     ;; needed — eliminates mid-mutation registry write risk.

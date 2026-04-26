@@ -342,11 +342,11 @@
    Prevents lock contention when Ollama is slow or down.
    Circuit breaker skips ollama after consecutive failures.
    Triggers periodic disk persistence after new embeddings accumulate."
-  ;; Phase 1: Check cache
   (let ((cached (bt:with-lock-held (*embedding-cache-lock*)
                   (gethash text *embedding-cache*))))
     (or cached
-        ;; Phase 2: Check circuit breaker, embed without lock, then store
+        ;; Cache miss: check circuit breaker, embed without holding the lock,
+        ;; re-acquire and store.
         (when (ollama-available-p)
           (let ((embedding (ollama-embed text)))
             (if embedding

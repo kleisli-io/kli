@@ -44,8 +44,8 @@
               "package.lisp"
               "validation.lisp"
               "event.lisp"
-              "log.lisp"
               "paths.lisp"
+              "log.lisp"
               "state.lisp"
               "graph.lisp"
               "query.lisp"
@@ -247,6 +247,9 @@
           kli-binary = buildLisp.program {
             name = "kli";
             main = "kli:main";
+            # 4 GB SBCL heap; default 1 GB is too small for full task-graph
+            # walks across the .kli/tasks store.
+            dynamicSpaceSize = 4096;
             deps = [
               task-mcp-service
               playbook-lib
@@ -298,14 +301,28 @@
               name = "kli-tests";
               srcs =
                 (map (f: ./lib/crdt/t + "/${f}") [ "package.lisp" "tests.lisp" ]) ++
-                (map (f: ./lib/task/t + "/${f}") [ "package.lisp" "tests.lisp" "test-query.lisp" "test-markov.lisp" "test-name-validation.lisp" ]) ++
+                (map (f: ./lib/task/t + "/${f}") [ "package.lisp" "tests.lisp" "test-query.lisp" "test-markov.lisp" "test-name-validation.lisp" "test-event-tolerance.lisp" ]) ++
                 (map (f: ./lib/claude-hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-json.lisp" "test-responses.lisp" "test-paths.lisp" "test-file-io.lisp" "test-prompts.lisp" "test-hook.lisp" ]) ++
                 (map (f: ./lib/playbook-hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-domains.lisp" "test-co-app.lisp" "test-session-io.lisp" ]) ++
-                (map (f: ./lib/playbook/t + "/${f}") [ "package.lisp" "suite.lisp" "test-session-state.lisp" "test-http-transport.lisp" "test-session-discovery.lisp" "test-feedback-state.lisp" "test-relevance-feedback.lisp" "test-regression.lisp" ]) ++
-                (map (f: ./services/task-mcp/t + "/${f}") [ "package.lisp" "null-boundary-test.lisp" "scaffold-test.lisp" "test-session-locks.lisp" "test-session-context-discipline.lisp" ]) ++
+                (map (f: ./lib/playbook/t + "/${f}") [ "package.lisp" "suite.lisp" "test-session-state.lisp" "test-http-transport.lisp" "test-session-discovery.lisp" "test-feedback-state.lisp" "test-session-contract.lisp" "test-relevance-feedback.lisp" "test-playbook-consistency.lisp" "test-regression.lisp" ]) ++
+                (map (f: ./services/task-mcp/t + "/${f}") [ "package.lisp" "null-boundary-test.lisp" "scaffold-test.lisp" "test-session-locks.lisp" "test-session-context-discipline.lisp" "test-request-deadline.lisp" "test-unknown-session.lisp" ]) ++
                 (map (f: ./hooks/t + "/${f}") [ "package.lisp" "suite.lisp" "test-task-complete-reflect.lisp" "test-session-task-write.lisp" ]);
               deps = [ lisp.fiveam lisp.bordeaux-threads ];
-              expression = "(and (fiveam:run! :crdt-tests) (fiveam:run! :task-tests) (fiveam:run! :task-mcp-tests) (claude-hooks.tests:run-all-tests) (playbook-hooks.tests:run-all-tests) (playbook.tests:run-all-tests) (kli-hook.tests:run-all-tests))";
+              # Skipped fiveam checks fail the build — strict-run requires
+              # results-status's ok=T AND its skipped-list to be empty.
+              expression = ''
+                (flet ((strict-run (suite)
+                         (let ((r (fiveam:run suite)))
+                           (and (fiveam:explain! r)
+                                (null (nth-value 2 (fiveam:results-status r)))))))
+                  (and (strict-run :crdt-tests)
+                       (strict-run :task-tests)
+                       (strict-run :task-mcp-tests)
+                       (claude-hooks.tests:run-all-tests)
+                       (playbook-hooks.tests:run-all-tests)
+                       (playbook.tests:run-all-tests)
+                       (kli-hook.tests:run-all-tests)))
+              '';
             };
           };
 
@@ -317,8 +334,7 @@
             mkdir -p $out/bin $out/share/kli
             cp -rT ${./plugin} $out/share/kli/
             makeWrapper ${kli-binary}/bin/kli $out/bin/kli \
-              --set KLI_DATA_DIR $out/share/kli \
-              --set NIX_BUILDLISP_LISP_ARGS "--dynamic-space-size 4096"
+              --set KLI_DATA_DIR $out/share/kli
           '';
 
         in {

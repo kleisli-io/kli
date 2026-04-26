@@ -294,7 +294,7 @@ Metadata keywords: :objective, :acceptance, :steps, :context, :constraints, :awa
 These are stored as task metadata and surfaced via :enrich, plan-markdown, and plan-context.
 
 Create linear chain:
-  (scaffold-chain! \"Phase 1\" \"Phase 2\" \"Phase 3\")"
+  (scaffold-chain! \"Research the API\" \"Draft the plan\" \"Implement the change\")"
   (cond
     ((or (null query)
          (and (stringp query) (zerop (length query))))

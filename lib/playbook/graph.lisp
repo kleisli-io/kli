@@ -163,6 +163,25 @@
         (rename-file temp-path ledger-path))
       (length pairs))))
 
+(defun co-app-ledger-orphans (ledger-path valid-pattern-ids)
+  "Return the list of co-app keys at LEDGER-PATH that reference at
+   least one pattern-id absent from VALID-PATTERN-IDS.  Read-only.
+   Returns NIL when the file does not exist or every pair is valid."
+  (when (probe-file ledger-path)
+    (let ((ledger (yason:parse (alexandria:read-file-into-string ledger-path)))
+          (valid-set (make-hash-table :test 'equal))
+          (orphans nil))
+      (dolist (id valid-pattern-ids)
+        (setf (gethash id valid-set) t))
+      (maphash (lambda (key count)
+                 (declare (ignore count))
+                 (let ((pair (parse-co-app-key key)))
+                   (unless (and (gethash (car pair) valid-set)
+                                (gethash (cdr pair) valid-set))
+                     (push key orphans))))
+               ledger)
+      orphans)))
+
 (defun prune-co-app-ledger (ledger-path valid-pattern-ids)
   "Remove co-app pairs containing patterns not in VALID-PATTERN-IDS.
    Uses file-level locking for safe concurrent access.

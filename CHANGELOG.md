@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-26
+
+This release fixes the long-standing `task_complete` persistence bug where the daemon acknowledged completions in-memory but the durable `events.jsonl` tail never reflected the status change, leaving parents impossible to close. Alongside the fix, the HTTP transport's session-identity story is rebuilt around the `Claude-Session-Id` header, the daemon is hardened against heap exhaustion and corrupt event logs, request deadlines are now per-route, and cold bootstrap is ~33× faster.
+
+### Added
+
+- **Per-route request deadline overrides** — `*route-deadline-overrides*` alist lets each endpoint declare its own timeout. Built-ins: `GET /mcp` 24h (SSE long-poll), `POST /mcp` 30s (tool dispatch), `POST /admin/unwedge` 60s, `GET /health` 5s. Active config exposed via `/admin/diag` under `route_deadlines`.
+- **`Claude-Session-Id` HTTP header** authoritative for session resolution — replaces peer-PID coalescing, which conflated parallel Claude shells sharing a parent PID into one session.
+- **`/admin/unwedge` endpoint** — runtime cleanup of dead-Claude session contexts; supports `?max_age_hours=N` override.
+- **`/admin/diag` endpoint** — daemon health snapshot (sessions, threads, close-wait, GC status, lock-trace tail, route deadlines).
+- **Session GC thread** — periodic eviction of inactive session contexts, bounded by `*session-gc-interval-seconds*` and `*session-gc-max-age-hours*`.
+- **`reconcile-miskeyed-feedback-state-files`** — daemon-startup scan that archives MCP-sid-keyed `feedback-state.json` files (left over from before the header-path migration) under `.claude/sessions/.miskeyed/`.
+- **Playbook sidecar consistency audit** (`verify-playbook-consistency`) — read-only inspection of orphans across `playbook-evidence.json`, `playbook-relevance-feedback.json`, and `playbook-co-applications.json`. Repair-in-place during `post-load-cleanup`; non-zero totals emit a structured warning at startup.
+- **Direction-aware edge encoding** — `task.link` writes `:phase-of-parent` / `:forked-from-parent` for upward links so `task-children` no longer over-counts the parent as a pseudo-child or inflates the incomplete-descendant count.
+- **`kli admin verify-events` + one-shot repair** — surfaces unparseable `events.jsonl` lines and rebuilds them out of `.quarantine` sidecars.
+- **Three-layer nil/empty validation** at MCP tool boundaries — explicit error path replacing silent-NIL handling.
+- **Scaffold rejection of non-descriptive phase names** — phase-of links refuse "Phase 1" / "P2" placeholders at the boundary.
+- **Session locks with deadlines and diagnostics** — long lock holds surface in `/admin/diag` lock-trace ring buffer.
+- **Pattern regression test suite** — `pattern.activate` event emission, scaffold-plan registry isolation, sub-agent fork race coverage.
+
+### Fixed
+
+- **`task_complete` persistence** — events now land in the target task's `events.jsonl`, not the focus task's. `emit-event` takes an explicit `:task-id` parameter; `task_complete` / `task_reopen` / `task_release` no longer rely on a `let`-shadow of `*current-task-id*` that was being clobbered mid-request by `load-session-context`.
+- **Asymmetric edge encoding** — parents no longer counted as their own pseudo-children, so `task-children` returns NIL for leaves and parents close cleanly once their children complete.
+- **Unknown session contexts no longer auto-resurrect** — HTTP returns `404 code=session-not-found`; the CLI drops its persisted sid and re-initialises rather than silently inheriting a virgin context.
+- **SSE long-poll no longer 503's every 30 seconds** — `GET /mcp` uses a 24h SSE deadline (one log slice previously recorded 1352 deadline warnings on a single session).
+- **Heap exhaustion under concurrent load** — `--dynamic-space-size 4096` now threads from the kli wrapper through `buildLisp.program`; `*task-state-cache*` bounded; single-pass `extract-all-state-edges` + `task-health-data`.
+- **Corrupt events.jsonl tolerance** — unparseable lines quarantined to `events.jsonl.quarantine` sidecars rather than aborting reads.
+- **Playbook session contract** — `record-activation` / `record-feedback` signal `unknown-session-error` instead of silently creating a virgin session; `write-feedback-state-file` reads existing on-disk content under `with-file-lock` and unions activated/feedback_given before writing, killing last-writer-wins across parallel Claude shells.
+- **Playbook patterns load into memory at daemon startup** — `pq_query` previously returned 0 patterns despite `playbook.md` existing on disk.
+- **Session registry race in concurrent sub-agent forks** — eliminated.
+- **Orphaned threads on remote-eval timeout** — swank-mcp / task-mcp boundary fixed.
+- **Stale `kli-meta-path`, session-resolution leaks, legacy `playbook-mcp` references** — cleared.
+- **Session-context save discipline** — eliminates state leaks between request boundaries.
+- **Concurrency fixes + parser gate** in task-mcp / hooks integration.
+
+### Performance
+
+- **Cold bootstrap**: 91s → 2.7s (~33×). Edge-read deduplication, inlined orphan check, frontier-affinity cap, elog-load per-request caching, single-pass graph build.
+- **`task_health`**: 37s → 7s (~5×).
+
+### Changed
+
+- **`*pid-claude-session-registry*`** reshaped from `PID → (sid . ts)` to `PID → list of (sid . ts)` newest-first; multiple sids per PID now coexist instead of overwriting each other. Resolver tolerates the legacy single-cell shape for safe hot-loads.
+- **`emit-event`** is now a pure persistence-layer function — does not call `ensure-session-context`. Session context loading lives exclusively at the request-entry layer (HTTP `:around` method on acceptor-dispatch-request, plus `define-task-tool` macro injection).
+- **`playbook-mcp` package renamed to `playbook`** and the standalone service directory deleted — playbook is now a library inside the unified daemon.
+
+### Removed
+
+- **`(or claude-session-id session-id)` fallback** in `write-feedback-state-file` — replaced with a single mode-agnostic invariant: claude-sid must be set or the write refuses.
+- **Peer-PID coalescing** as the primary session-resolution mechanism — `Claude-Session-Id` header takes precedence; peer-PID remains as a defensive lookup only.
+- **In-body `require-current-task` re-runs** inside `emit-event` — request-entry guards (HTTP `:around` + `define-task-tool` macro) are the single source of truth.
+- **Sandbox-incompatible playbook tests** removed from `PLAYBOOK.TESTS` aggregate.
+
 ## [0.3.1] - 2026-02-28
 
 ### Fixed

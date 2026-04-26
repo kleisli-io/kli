@@ -35,6 +35,7 @@
 (test record-activation-basic
   "record-activation adds pattern ID to session."
   (let ((playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session "sess-act-001")
     (record-activation "sess-act-001" "lisp-000001")
     (record-activation "sess-act-001" "lisp-000002")
     (let ((session (get-session "sess-act-001")))
@@ -45,6 +46,7 @@
 (test record-activation-deduplicates
   "record-activation does not duplicate pattern IDs."
   (let ((playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session "sess-dedup-001")
     (record-activation "sess-dedup-001" "lisp-000001")
     (record-activation "sess-dedup-001" "lisp-000001")
     (record-activation "sess-dedup-001" "lisp-000001")
@@ -56,6 +58,7 @@
 (test record-feedback-basic
   "record-feedback stores pattern feedback in session."
   (let ((playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session "sess-fb-001")
     (record-feedback "sess-fb-001" "lisp-000001" :helpful)
     (let ((session (get-session "sess-fb-001")))
       (is (= 1 (length (playbook::session-state-feedback-given session))))
@@ -66,6 +69,7 @@
 (test record-feedback-overwrites
   "record-feedback overwrites previous feedback for same pattern."
   (let ((playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session "sess-overwrite-001")
     (record-feedback "sess-overwrite-001" "lisp-000001" :helpful)
     (record-feedback "sess-overwrite-001" "lisp-000001" :harmful)
     (let ((session (get-session "sess-overwrite-001")))
@@ -97,6 +101,7 @@
 (test session-summary-computes-pending
   "session-summary returns correct counts and pending IDs."
   (let ((playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session "sess-sum-001")
     (record-activation "sess-sum-001" "pat-a")
     (record-activation "sess-sum-001" "pat-b")
     (record-activation "sess-sum-001" "pat-c")
@@ -133,6 +138,7 @@
 (test session-to-json-alist-structure
   "session-to-json-alist produces expected keys."
   (let ((playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session "sess-json-001")
     (record-activation "sess-json-001" "pat-a")
     (record-feedback "sess-json-001" "pat-a" :helpful)
     (record-domain "sess-json-001" "lisp")
@@ -148,6 +154,8 @@
 (test multiple-sessions-isolated
   "Sessions do not share state: activations in one are invisible to another."
   (let ((playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session "session-A")
+    (get-or-create-session "session-B")
     (record-activation "session-A" "pat-1")
     (record-activation "session-B" "pat-2")
     (let ((a (get-session "session-A"))

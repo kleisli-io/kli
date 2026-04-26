@@ -20,6 +20,7 @@
          (sid "fb-state-test-001")
          (playbook::*session-states* (make-hash-table :test 'equal)))
     ;; Set up session with activations and partial feedback
+    (get-or-create-session sid)
     (record-activation sid "pat-a")
     (record-activation sid "pat-b")
     (record-activation sid "pat-c")
@@ -50,6 +51,7 @@
   (let* ((dir (format nil "/tmp/test-fb-all-~a" (random 1000000)))
          (sid "fb-all-001")
          (playbook::*session-states* (make-hash-table :test 'equal)))
+    (get-or-create-session sid)
     (record-activation sid "pat-a")
     (record-activation sid "pat-b")
     (record-feedback sid "pat-a" :helpful)
