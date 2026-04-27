@@ -55,13 +55,22 @@
                               (when session
                                 (session-state-active-domains session))))))
             (save-pattern-relevance-feedback pattern-id domains evidence))))
-       ;; Common tail: record in session + update feedback state file
-       (let ((session-id (current-session-id)))
-         (when session-id
-           (record-feedback session-id pattern-id type-kw)
-           (let ((cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
-             (write-feedback-state-file cwd session-id))))
-       (format nil "Recorded ~A for ~A" type-kw pattern-id)))
+       ;; Common tail: record in session + update feedback state file.
+       ;; The bridge write is the only signal the Stop hook reads to
+       ;; clear pending nudges; if it returns NIL (claude-sid unresolved
+       ;; in parallel-shell scenarios, no cwd, etc.) the agent must know
+       ;; — silently succeeding here is what produced the long-standing
+       ;; feedback-nudge false-positive bug.
+       (let* ((session-id (current-session-id))
+              (bridge-written
+                (when session-id
+                  (record-feedback session-id pattern-id type-kw)
+                  (let ((cwd (or (mcp-find-depot-root) (namestring (uiop:getcwd)))))
+                    (write-feedback-state-file cwd session-id)))))
+         (if (or (not session-id) bridge-written)
+             (format nil "Recorded ~A for ~A" type-kw pattern-id)
+             (format nil "Recorded ~A for ~A (warning: stop-hook bridge could not be updated — Claude-Session-Id may be unresolved or ambiguous; the feedback-nudge hook may continue to nudge for this pattern)"
+                     type-kw pattern-id)))))
 
     (:evolve
      (let* ((content (first args))

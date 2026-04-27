@@ -255,19 +255,112 @@
       (is (string= "sid-X" (car (first entries)))
           "re-registered sid is now at the head"))))
 
-(test resolve-claude-session-id-walks-list-shape
-  "resolve-claude-session-id finds the most-recent sid across a registry
-   that stores per-PID entries as a list-of-(sid . ts) newest-first."
+(test resolve-claude-session-id-resolves-when-only-one-distinct-sid-registered
+  "resolve-claude-session-id walks the per-PID list-of-(sid . ts) shape and
+   returns the registered claude-sid when the registry holds exactly one
+   distinct sid (one Claude Code shell, possibly re-registered)."
   (let ((playbook::*session-states* (make-hash-table :test 'equal))
         (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
         (playbook::*http-mode* t))
-    (register-claude-session-for-pid 400 "old-on-pid-400")
+    (register-claude-session-for-pid 400 "the-only-claude-sid")
     (sleep 0.01)
-    (register-claude-session-for-pid 401 "newer-on-pid-401")
-    (let ((session (get-or-create-session "mcp-resolve")))
-      (let ((resolved (playbook::resolve-claude-session-id session)))
-        (is (string= "newer-on-pid-401" resolved)
-            "resolver must pick the most recent across all PIDs")))))
+    (register-claude-session-for-pid 401 "the-only-claude-sid")
+    (let* ((session (get-or-create-session "mcp-resolve"))
+           (resolved (playbook::resolve-claude-session-id session)))
+      (is (string= "the-only-claude-sid" resolved)
+          "single distinct sid in registry must resolve"))))
+
+(test resolve-claude-session-id-refuses-when-distinct-sids-across-pids
+  "resolve-claude-session-id REFUSES (returns NIL) when the registry holds
+   two distinct claude-sids registered under different PIDs.  Peer-PID
+   resolution is fundamentally ambiguous in parallel-shell scenarios:
+   guessing the most-recent globally causes feedback writes to land
+   under the wrong claude-sid, where the activator's Stop hook cannot
+   read them.  Callers must pass the Claude-Session-Id header for a
+   deterministic answer."
+  (let ((playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
+        (playbook::*http-mode* t))
+    (register-claude-session-for-pid 400 "claude-shell-A")
+    (sleep 0.01)
+    (register-claude-session-for-pid 401 "claude-shell-B")
+    (let* ((session (get-or-create-session "mcp-resolve"))
+           (resolved (playbook::resolve-claude-session-id session)))
+      (is (null resolved)
+          "ambiguous registry must resolve to NIL, not a guess")
+      (is (null (playbook::session-state-claude-session-id session))
+          "no fabricated identity may be stamped on the session"))))
+
+(test resolve-claude-session-id-refuses-when-distinct-sids-on-one-pid
+  "When two parallel Claude shells share a UNIX PID lineage, the same
+   PID accumulates entries for distinct claude-sids.  Even within a
+   single PID's list-of-entries, distinct sids mean ambiguous identity:
+   the resolver must refuse rather than pick the newest."
+  (let ((playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
+        (playbook::*http-mode* t))
+    (register-claude-session-for-pid 500 "claude-shell-A")
+    (sleep 0.01)
+    (register-claude-session-for-pid 500 "claude-shell-B")
+    (let* ((session (get-or-create-session "mcp-resolve"))
+           (resolved (playbook::resolve-claude-session-id session)))
+      (is (null resolved)
+          "two distinct sids on one PID must resolve to NIL"))))
+
+(test feedback-bridge-survives-parallel-shell-without-header
+  "Regression for the feedback-nudge false-positive bug: when a parallel
+   Claude shell registers a different claude-sid AFTER the activator,
+   a header-less :feedback! call from the activator's MCP session
+   must NOT mis-route the bridge write to the parallel shell's
+   feedback-state.json.  Pre-fix, resolve-claude-session-id picked the
+   globally-most-recent sid and the bridge wrote under the wrong key,
+   leaving the activator's Stop hook to re-fire on patterns the agent
+   had already given feedback on.  Post-fix, the resolver refuses
+   ambiguous resolution; the activator's session — already stamped
+   from its own header — keeps its correct claude-sid."
+  (let ((dir (format nil "/tmp/test-fb-bridge-survives-~a" (random 1000000)))
+        (playbook::*session-states* (make-hash-table :test 'equal))
+        (playbook::*pid-claude-session-registry* (make-hash-table :test 'eql))
+        (playbook::*http-mode* t))
+    (unwind-protect
+         (progn
+           ;; Activator session: its claude-sid was set from a header at
+           ;; request entry, and the activation pre-populated the
+           ;; feedback-state.json under that claude-sid.
+           (let ((s (get-or-create-session "mcp-activator")))
+             (setf (playbook::session-state-claude-session-id s)
+                   "claude-activator"))
+           (record-activation "mcp-activator" "pat-stuck-1")
+           (record-activation "mcp-activator" "pat-stuck-2")
+           ;; Parallel shell registers a different claude-sid LATER.
+           (register-claude-session-for-pid 600 "claude-activator")
+           (sleep 0.01)
+           (register-claude-session-for-pid 700 "claude-parallel")
+           ;; Subsequent :feedback! call on the activator session.
+           ;; It already has its claude-sid stamped from header entry,
+           ;; so apply-claude-session-id should NOT re-resolve.  Even if
+           ;; the resolver were reached, post-fix it returns NIL.
+           (record-feedback "mcp-activator" "pat-stuck-1" :not-relevant)
+           (record-feedback "mcp-activator" "pat-stuck-2" :not-relevant)
+           (let ((path (write-feedback-state-file dir "mcp-activator")))
+             (is (not (null path))
+                 "bridge write must succeed for the activator session")
+             ;; The file path must be keyed by the activator's sid,
+             ;; not the parallel shell's.
+             (is (search "claude-activator" (namestring path)))
+             (is (not (search "claude-parallel" (namestring path))))
+             ;; And the file must reflect that feedback cleared pending.
+             (let ((state (read-feedback-state-file path)))
+               (is (zerop (gethash "count" state))
+                   "pending count must be zero after :feedback!")
+               (is (zerop (length (gethash "pending" state))))
+               (is (= 2 (length (gethash "feedback_given" state))))))
+           ;; And no parallel-shell-keyed file exists.
+           (is (null (probe-file (feedback-state-path dir "claude-parallel")))
+               "no feedback file may have been written under the parallel sid"))
+      (ignore-errors
+        (uiop:delete-directory-tree
+         (uiop:ensure-directory-pathname dir) :validate t)))))
 
 (test feedback-given-survives-cleanup-cycle
   "cleanup-session drops the in-memory state, but the on-disk

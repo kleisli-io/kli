@@ -510,26 +510,37 @@
 
 (defun resolve-claude-session-id (session)
   "Resolve Claude session ID for a session from the PID registry.
-   Picks the most-recently registered entry across all PIDs.  Returns
-   the Claude session ID string or NIL when the registry is empty.
 
-   This is the legacy fallback used when no Claude-Session-Id header is
-   sent on the request (hook callers, older CLI clients).  Per-PID
-   entries are stored newest-first; this function walks the list-of-
-   entries shape in addition to the legacy single-entry shape so a
-   running daemon that hot-loaded a partial upgrade still resolves
-   correctly."
+   Returns the Claude session ID string when the registry holds exactly
+   one distinct claude-sid, NIL otherwise.
+
+   Two or more distinct sids in the registry mean parallel Claude Code
+   shells are alive concurrently.  Peer-PID resolution cannot tell us
+   which shell sent this header-less request: a globally-most-recent
+   guess routes the bridge write under the wrong claude-sid, where the
+   activator session's Stop hook will never see it and keeps re-firing
+   on patterns the agent has already given feedback on.  Refusing in
+   the ambiguous case turns silent corruption into a fail-loud no-op.
+
+   Callers that need a deterministic answer in parallel-shell scenarios
+   must pass the Claude-Session-Id header (CLI populates it from
+   $CLAUDE_SESSION_ID; APPLY-CLAUDE-SESSION-ID prefers the header over
+   this fallback).  The fallback exists only for hook callers and older
+   clients that do not carry the header; in single-shell deployments
+   the registry has at most one distinct sid so this path resolves."
   (unless (session-state-claude-session-id session)
     (with-lock-held (*pid-registry-lock*)
-      (let ((best-sid nil)
+      (let ((unique-sids (make-hash-table :test 'equal))
+            (best-sid nil)
             (best-time 0))
         (flet ((consider (entry)
                  (when (and (consp entry)
                             (stringp (car entry))
-                            (numberp (cdr entry))
-                            (> (cdr entry) best-time))
-                   (setf best-sid (car entry)
-                         best-time (cdr entry)))))
+                            (numberp (cdr entry)))
+                   (setf (gethash (car entry) unique-sids) t)
+                   (when (> (cdr entry) best-time)
+                     (setf best-sid (car entry)
+                           best-time (cdr entry))))))
           (maphash (lambda (pid value)
                      (declare (ignore pid))
                      (cond
@@ -539,7 +550,7 @@
                        ;; Legacy shape: a single (sid . ts) cell.
                        (t (consider value))))
                    *pid-claude-session-registry*))
-        (when best-sid
+        (when (and best-sid (= 1 (hash-table-count unique-sids)))
           (setf (session-state-claude-session-id session) best-sid)))))
   (session-state-claude-session-id session))
 

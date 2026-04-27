@@ -8,9 +8,54 @@ on:
 permissions:
   contents: write
 
+# Draft-then-promote flow:
+#   draft     creates a draft release with notes from CHANGELOG.md
+#   build     matrix-builds artifacts; upload as workflow artifacts
+#   finalize  downloads artifacts, uploads to the draft, flips draft=false
+#
+# A failure anywhere before `finalize` succeeds leaves a *draft* release.
+# The josh-mirror retry service treats draft releases as in-flight and
+# force-moves the tag on the next attempt. Only a non-draft release is
+# sealed and immutable.
+
 jobs:
+  draft:
+    name: Create draft release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk "/^## \[?${VERSION}\]?/{found=1; next} /^## \[?[0-9]/{if(found) exit} found" CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for ${VERSION}, using tag name." >&2
+            echo "Release ${GITHUB_REF_NAME}" > release-notes.md
+          fi
+
+      - name: Create or refresh draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" --json isDraft --jq .isDraft >/tmp/state 2>/dev/null; then
+            STATE=$(cat /tmp/state)
+            if [ "$STATE" = "false" ]; then
+              echo "Refusing: $TAG is already published (sealed)."
+              exit 1
+            fi
+            echo "Refreshing existing draft for $TAG"
+            gh release edit "$TAG" --draft --notes-file release-notes.md
+          else
+            echo "Creating draft for $TAG"
+            gh release create "$TAG" --draft --title "$TAG" --notes-file release-notes.md
+          fi
+
   build:
     name: Build ${{ matrix.artifact }}
+    needs: draft
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -40,19 +85,18 @@ jobs:
         run: |
           mkdir -p staging/bin staging/lib staging/share/kli
 
-          # Copy the SBCL executable with embedded core image
           cp result-binary/bin/.kli-wrapped staging/bin/kli
           chmod +x staging/bin/kli
 
-          # Bundle shared libraries that SBCL dlopen's at image startup.
-          # These are in the Nix closure but won't exist on non-Nix systems.
+          # SBCL dlopens libssl/libcrypto/libzstd at image startup.
+          # These are in the Nix closure but absent on non-Nix systems,
+          # so bundle them next to the binary.
           for lib in libcrypto.so.3 libssl.so.3 libzstd.so.1; do
             path=$(find $(nix path-info -r ./result-binary) -name "$lib" -print -quit 2>/dev/null)
             if [ -n "$path" ]; then
               cp "$path" staging/lib/
             fi
           done
-          # macOS: same but for dylibs
           for lib in libcrypto.3.dylib libssl.3.dylib libzstd.1.dylib; do
             path=$(find $(nix path-info -r ./result-binary) -name "$lib" -print -quit 2>/dev/null)
             if [ -n "$path" ]; then
@@ -68,14 +112,12 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
 
-  release:
-    name: Create Release
-    needs: build
+  finalize:
+    name: Upload assets and promote
+    needs: [draft, build]
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -83,20 +125,16 @@ jobs:
       - name: Generate checksums
         run: sha256sum kli-*.tar.gz > checksums.txt
 
-      - name: Extract release notes
+      - name: Upload assets to draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          # Extract the section for this version from CHANGELOG.md
-          awk "/^## \[?${VERSION}\]?/{found=1; next} /^## \[?[0-9]/{if(found) exit} found" CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "No changelog entry found for ${VERSION}, using tag name." >&2
-            echo "Release ${GITHUB_REF_NAME}" > release-notes.md
-          fi
+          TAG="${GITHUB_REF_NAME}"
+          gh release upload "$TAG" --clobber kli-*.tar.gz checksums.txt
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: release-notes.md
-          files: |
-            kli-*
-            checksums.txt
+      - name: Promote draft to published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release edit "$TAG" --draft=false
