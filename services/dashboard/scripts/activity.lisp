@@ -9,7 +9,7 @@
   (ps:ps
     (defun update-sentinel-category (category)
       "Update the load-more sentinel's URL and re-register with HTMX.
-       The lol-reactive HTMX runtime captures hx-get at processElement time,
+       The lol-web HTMX runtime captures hx-get at processElement time,
        so we must clone/replace the sentinel to trigger re-registration."
       (let ((sentinel (ps:chain document (get-element-by-id "load-more-sentinel"))))
         (when sentinel

@@ -2,7 +2,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-health
+(lol-web:defcss :kli-health
   (".health-summary" (("display" . "flex")
                       ("justify-content" . "space-between")
                       ("align-items" . "center")

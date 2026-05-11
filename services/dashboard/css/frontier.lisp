@@ -4,7 +4,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-frontier
+(lol-web:defcss :kli-frontier
 
   ;; === FRONTIER SECTIONS ===
   (".frontier-sections" (("display" . "flex")

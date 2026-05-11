@@ -2,7 +2,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-activity
+(lol-web:defcss :kli-activity
   ;; Summary bar
   (".activity-summary" (("display" . "grid")
                         ("grid-template-columns" . "repeat(auto-fit, minmax(100px, 1fr))")

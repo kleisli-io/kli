@@ -8,7 +8,7 @@
                "kli-playbook"
                "kli-mcp-framework"
                "kli-mcp-http"
-               "lol-reactive"
+               "lol-web"
                ;; External deps (bundled into binary via Quicklisp)
                "alexandria"
                "bordeaux-threads"

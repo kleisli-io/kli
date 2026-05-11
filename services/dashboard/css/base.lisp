@@ -4,7 +4,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-base
+(lol-web:defcss :kli-base
 
   ;; --- Global Reset ---
   ("*" (("box-sizing" . "border-box")))

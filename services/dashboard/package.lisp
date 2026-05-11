@@ -4,10 +4,10 @@
 
 (defpackage :kli-dashboard
   (:use :cl)
-  (:import-from :lol-reactive
+  (:import-from :lol-web
     #:htm-str #:html-page #:defroute #:start-server #:stop-server
     #:defcss #:generate-all-component-css #:generate-css-variables #:classes
     #:*colors* #:*typography* #:*spacing* #:*effects*
     #:get-color #:get-font #:get-spacing #:get-effect
-    #:reactive-script #:make-token-set)
+    #:reactive-script)
   (:export #:start #:stop #:reload))

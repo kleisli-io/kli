@@ -4,8 +4,8 @@
 (in-package :kli-dashboard)
 
 (defun init-tokens ()
-  "Set lol-reactive design tokens to KLI aesthetic."
-  (setf lol-reactive:*colors*
+  "Set lol-web design tokens to KLI aesthetic."
+  (setf lol-web:*colors*
     '((:background . "#08080a")
       (:surface    . "#111116")
       (:surface-2  . "#1a1a22")
@@ -21,7 +21,7 @@
       (:warning    . "#d4a853")
       (:error      . "#f87171")))
 
-  (setf lol-reactive:*typography*
+  (setf lol-web:*typography*
     '((:family    . "'Major Mono Display', monospace")
       (:heading   . "'Space Mono', monospace")
       (:body      . "Inter, system-ui, -apple-system, sans-serif")
@@ -34,7 +34,7 @@
       (:small     . "0.875rem")
       (:caption   . "0.75rem")))
 
-  (setf lol-reactive:*spacing*
+  (setf lol-web:*spacing*
     '((:section . "clamp(5rem, 12vh, 10rem)")
       (:block   . "4rem")
       (:element . "2rem")

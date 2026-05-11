@@ -82,6 +82,12 @@
        (handle-sse-stream acceptor))
       (:delete
        (handle-delete transport))
+      (:head
+       ;; HEAD: advertise the JSON-RPC content type a POST would return
+       ;; plus the supported method set per RFC 7231 §4.3.2. Empty body.
+       (setf (hunchentoot:content-type*) "application/json")
+       (setf (hunchentoot:header-out "Allow") "POST, GET, DELETE, HEAD, OPTIONS")
+       "")
       (t
        (setf (hunchentoot:return-code*) hunchentoot:+http-method-not-allowed+)
        ""))))

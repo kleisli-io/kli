@@ -7,12 +7,12 @@
     nixpkgs.url = "github:NixOS/nixpkgs/88d3861acdd3d2f0e361767018218e51810df8a1";
     cl-deps.url = "github:kleisli-io/cl-deps";
     cl-deps.inputs.nixpkgs.follows = "nixpkgs";
-    lol-reactive.url = "github:kleisli-io/lol-reactive";
-    lol-reactive.inputs.nixpkgs.follows = "nixpkgs";
-    lol-reactive.inputs.cl-deps.follows = "cl-deps";
+    lol-web.url = "github:kleisli-io/lol-web";
+    lol-web.inputs.nixpkgs.follows = "nixpkgs";
+    lol-web.inputs.cl-deps.follows = "cl-deps";
   };
 
-  outputs = { nixpkgs, cl-deps, lol-reactive, ... }:
+  outputs = { nixpkgs, cl-deps, lol-web, ... }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
     in {
@@ -147,7 +147,7 @@
 
           # --- Web framework (flake input) ---
 
-          kli-lol-reactive = lol-reactive.lib.${system}.library;
+          kli-lol-web = lol-web.lib.${system}.library;
 
           # --- Service modules ---
 
@@ -202,7 +202,7 @@
 
           dashboard-service = buildLisp.library {
             name = "kli-dashboard";
-            deps = [ kli-lol-reactive kli-task lisp.cl-who lisp.parenscript lisp.yason ];
+            deps = [ kli-lol-web kli-task lisp.cl-who lisp.parenscript lisp.yason ];
             srcs = map (f: ./services/dashboard + "/${f}") [
               "package.lisp"
               # CSS modules (tokens first — defines design system)

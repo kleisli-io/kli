@@ -4,7 +4,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-task-detail
+(lol-web:defcss :kli-task-detail
 
   ;; === DETAIL HEADER ===
   (".detail-header" (("padding" . "16px 0 16px 14px")

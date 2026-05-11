@@ -2,7 +2,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-stats
+(lol-web:defcss :kli-stats
   ;; Summary cards
   (".stats-summary" (("display" . "grid")
                      ("grid-template-columns" . "repeat(auto-fit, minmax(120px, 1fr))")

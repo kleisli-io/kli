@@ -1,5 +1,5 @@
 ;;;; kli dashboard — Route definitions
-;;;; All lol-reactive defroute registrations.
+;;;; All lol-web defroute registrations.
 
 (in-package :kli-dashboard)
 
@@ -7,7 +7,7 @@
 ;;; PAGE ROUTES
 ;;; ============================================================
 
-(lol-reactive:defroute "/" (:method :get)
+(lol-web:defroute "/" (:method :get)
   "Frontier — 4-section task dashboard"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
@@ -15,14 +15,14 @@
       :include-tailwind nil
       :include-htmx nil
       :head-extra (htm-str
-                    (:script (cl-who:str (lol-reactive:htmx-runtime-js))))
+                    (:script (cl-who:str (lol-web:htmx-runtime-js))))
       :body (format nil "~A~A~A~A"
                     (render-nav "/" :depot depot)
                     (render-frontier-page depot)
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/health" (:method :get)
+(lol-web:defroute "/health" (:method :get)
   "Health diagnostics"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
@@ -35,7 +35,7 @@
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/activity" (:method :get)
+(lol-web:defroute "/activity" (:method :get)
   "Activity stream with category filters and infinite scroll"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
@@ -44,14 +44,14 @@
       :include-htmx nil
       :head-extra (htm-str
                     (:script (cl-who:str (activity-filter-script)))
-                    (:script (cl-who:str (lol-reactive:htmx-runtime-js))))
+                    (:script (cl-who:str (lol-web:htmx-runtime-js))))
       :body (format nil "~A~A~A~A"
                     (render-nav "/activity" :depot depot)
                     (render-activity-page depot)
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/stats" (:method :get)
+(lol-web:defroute "/stats" (:method :get)
   "Aggregate statistics with charts"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
@@ -64,7 +64,7 @@
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/sessions" (:method :get)
+(lol-web:defroute "/sessions" (:method :get)
   "Active and historical sessions"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
@@ -79,7 +79,7 @@
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/task" (:method :get)
+(lol-web:defroute "/task" (:method :get)
   "Task detail view"
   (let ((task-id (hunchentoot:parameter "id")))
     (html-page
@@ -89,7 +89,7 @@
       :include-tailwind nil
       :include-htmx nil
       :head-extra (htm-str
-                    (:script (cl-who:str (lol-reactive:htmx-runtime-js)))
+                    (:script (cl-who:str (lol-web:htmx-runtime-js)))
                     (:style (cl-who:str ".expand-target{display:none}.expand-btn.open+.expand-target{display:block}.expand-btn{background:none;border:none;color:var(--color-text);font-family:var(--font-mono);font-size:0.78rem;cursor:pointer;padding:4px 0}.expand-btn:hover{color:var(--color-accent)}.expand-btn.loading{opacity:0.5}.expand-panel{padding:8px 0 4px 16px;font-size:0.78rem;border-left:2px solid var(--color-border)}.expand-section{margin-bottom:8px}.expand-label{font-family:var(--font-mono);font-size:0.6875rem;color:var(--color-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px}.expand-desc{color:var(--color-text);line-height:1.5}.expand-handoff{font-size:0.72rem;color:var(--color-text);line-height:1.5;white-space:pre-wrap;max-height:400px;overflow-y:auto;background:var(--color-surface-2);padding:8px;border-radius:2px;border:1px solid var(--color-border)}}")))
       :body (format nil "~A~A~A~A"
                     (render-nav nil)
@@ -97,7 +97,7 @@
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/plan" (:method :get)
+(lol-web:defroute "/plan" (:method :get)
   "Plan view — phase DAG with expandable cards"
   (let ((task-id (hunchentoot:parameter "id")))
     (html-page
@@ -112,7 +112,7 @@
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/clusters" (:method :get)
+(lol-web:defroute "/clusters" (:method :get)
   "Topic cluster groupings"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
@@ -125,7 +125,7 @@
                     (htm-str (:script (cl-who:str (scratchpad-js))))
                     (render-scratchpad-sidebar)))))
 
-(lol-reactive:defroute "/graph" (:method :get)
+(lol-web:defroute "/graph" (:method :get)
   "Full-bleed WebGL force graph (Pixi.js + D3)"
   (let ((depot (hunchentoot:parameter "depot")))
     (html-page
@@ -145,7 +145,7 @@
 ;;; ACTIVITY PAGINATION API
 ;;; ============================================================
 
-(lol-reactive:defroute "/api/activity/events" (:method :get
+(lol-web:defroute "/api/activity/events" (:method :get
                                                 :content-type "text/html")
   "Paginated activity events as HTML fragments for infinite scroll.
    Supports category and depot filters via query params.
@@ -174,7 +174,7 @@
 ;;; HTMX FRAGMENT ROUTES
 ;;; ============================================================
 
-(lol-reactive:defroute "/api/task/expand" (:method :get
+(lol-web:defroute "/api/task/expand" (:method :get
                                            :content-type "text/html")
   "Return HTML fragment for expanding a frontier card."
   (let ((task-id (hunchentoot:parameter "id")))
@@ -193,7 +193,7 @@
 ;;; HANDOFF EXPAND API
 ;;; ============================================================
 
-(lol-reactive:defroute "/api/handoff/expand" (:method :get
+(lol-web:defroute "/api/handoff/expand" (:method :get
                                                :content-type "text/html")
   "Return HTML fragment for expanding a handoff in task detail."
   (let ((task-id (hunchentoot:parameter "task_id"))
@@ -213,7 +213,7 @@
 ;;; PIN API
 ;;; ============================================================
 
-(lol-reactive:defroute "/api/pin" (:method :post)
+(lol-web:defroute "/api/pin" (:method :post)
   "Pin a task. Returns HTMX fragment."
   (let* ((task-id (hunchentoot:parameter "task_id"))
          (depot (let ((d (hunchentoot:parameter "depot")))
@@ -230,7 +230,7 @@
           (setf (hunchentoot:return-code*) 400)
           "Missing task_id"))))
 
-(lol-reactive:defroute "/api/unpin" (:method :post)
+(lol-web:defroute "/api/unpin" (:method :post)
   "Unpin a task. Returns HTMX fragment."
   (let* ((task-id (hunchentoot:parameter "task_id"))
          (depot (let ((d (hunchentoot:parameter "depot")))
@@ -251,7 +251,7 @@
 ;;; SCRATCHPAD API
 ;;; ============================================================
 
-(lol-reactive:defroute "/api/scratchpad" (:method :get
+(lol-web:defroute "/api/scratchpad" (:method :get
                                           :content-type "text/plain")
   "Get scratchpad content for a task."
   (let ((task-id (let ((t-id (hunchentoot:parameter "task_id")))
@@ -260,7 +260,7 @@
         (load-scratchpad task-id)
         (progn (setf (hunchentoot:return-code*) 400) ""))))
 
-(lol-reactive:defroute "/api/scratchpad" (:method :post)
+(lol-web:defroute "/api/scratchpad" (:method :post)
   "Save scratchpad for a task. Body is raw text content."
   (let ((task-id (let ((t-id (hunchentoot:parameter "task_id")))
                    (when (and t-id (> (length t-id) 0)) t-id)))
@@ -288,14 +288,14 @@
 
 (defun parse-json-body ()
   "Parse JSON POST body into an alist. Returns nil on failure.
-   Uses lol-reactive:request-body which reads from the Clack env stream."
+   Uses lol-web:request-body which reads from the Clack env stream."
   (handler-case
-    (let ((text (lol-reactive:request-body)))
+    (let ((text (lol-web:request-body)))
       (when (and text (> (length text) 0))
         (yason:parse text :object-as :alist)))
     (error () nil)))
 
-(lol-reactive:defroute "/api/task/complete" (:method :post
+(lol-web:defroute "/api/task/complete" (:method :post
                                               :content-type "application/json")
   "Mark a task as completed via task-mcp RPC.
    Emits a :task.update-status event directly into the task's event log."
@@ -309,18 +309,18 @@
             (yason:with-output-to-string* ()
               (yason:encode-alist '(("ok" . t)))))
           (error (e)
-            (lol-reactive:response 500
+            (lol-web:response 500
               :content-type "application/json"
               :body (yason:with-output-to-string* ()
                       (yason:encode-alist
                         `(("ok" . nil)
                           ("error" . ,(princ-to-string e))))))))
-        (lol-reactive:response 400
+        (lol-web:response 400
           :content-type "application/json"
           :body (yason:with-output-to-string* ()
                   (yason:encode-alist '(("ok" . nil) ("error" . "Missing task_id"))))))))
 
-(lol-reactive:defroute "/api/task/reopen" (:method :post
+(lol-web:defroute "/api/task/reopen" (:method :post
                                             :content-type "application/json")
   "Reopen a completed task.
    Emits a :task.update-status event with status active."
@@ -334,13 +334,13 @@
             (yason:with-output-to-string* ()
               (yason:encode-alist '(("ok" . t)))))
           (error (e)
-            (lol-reactive:response 500
+            (lol-web:response 500
               :content-type "application/json"
               :body (yason:with-output-to-string* ()
                       (yason:encode-alist
                         `(("ok" . nil)
                           ("error" . ,(princ-to-string e))))))))
-        (lol-reactive:response 400
+        (lol-web:response 400
           :content-type "application/json"
           :body (yason:with-output-to-string* ()
                   (yason:encode-alist '(("ok" . nil) ("error" . "Missing task_id"))))))))
@@ -355,7 +355,7 @@
    DATA is a plist with the event-specific fields."
   (emit-task-event source-task-id event-type data))
 
-(lol-reactive:defroute "/api/task/link" (:method :post
+(lol-web:defroute "/api/task/link" (:method :post
                                           :content-type "application/json")
   "Create a typed edge from source task to target task via RPC."
   (let* ((body (parse-json-body))
@@ -373,19 +373,19 @@
             (yason:with-output-to-string* ()
               (yason:encode-alist '(("ok" . t)))))
           (error (e)
-            (lol-reactive:response 500
+            (lol-web:response 500
               :content-type "application/json"
               :body (yason:with-output-to-string* ()
                       (yason:encode-alist
                         `(("ok" . nil)
                           ("error" . ,(princ-to-string e))))))))
-        (lol-reactive:response 400
+        (lol-web:response 400
           :content-type "application/json"
           :body (yason:with-output-to-string* ()
                   (yason:encode-alist
                     '(("ok" . nil) ("error" . "Missing task_id, target_id, or edge_type"))))))))
 
-(lol-reactive:defroute "/api/task/sever" (:method :post
+(lol-web:defroute "/api/task/sever" (:method :post
                                            :content-type "application/json")
   "Remove a typed edge from source task to target task via RPC."
   (let* ((body (parse-json-body))
@@ -403,19 +403,19 @@
             (yason:with-output-to-string* ()
               (yason:encode-alist '(("ok" . t)))))
           (error (e)
-            (lol-reactive:response 500
+            (lol-web:response 500
               :content-type "application/json"
               :body (yason:with-output-to-string* ()
                       (yason:encode-alist
                         `(("ok" . nil)
                           ("error" . ,(princ-to-string e))))))))
-        (lol-reactive:response 400
+        (lol-web:response 400
           :content-type "application/json"
           :body (yason:with-output-to-string* ()
                   (yason:encode-alist
                     '(("ok" . nil) ("error" . "Missing task_id, target_id, or edge_type"))))))))
 
-(lol-reactive:defroute "/api/task/reclassify" (:method :post
+(lol-web:defroute "/api/task/reclassify" (:method :post
                                                 :content-type "application/json")
   "Change the type of an edge from source task to target task via RPC."
   (let* ((body (parse-json-body))
@@ -435,13 +435,13 @@
             (yason:with-output-to-string* ()
               (yason:encode-alist '(("ok" . t)))))
           (error (e)
-            (lol-reactive:response 500
+            (lol-web:response 500
               :content-type "application/json"
               :body (yason:with-output-to-string* ()
                       (yason:encode-alist
                         `(("ok" . nil)
                           ("error" . ,(princ-to-string e))))))))
-        (lol-reactive:response 400
+        (lol-web:response 400
           :content-type "application/json"
           :body (yason:with-output-to-string* ()
                   (yason:encode-alist
@@ -452,7 +452,7 @@
 ;;; HEALTH SUGGESTION ACTIONS
 ;;; ============================================================
 
-(lol-reactive:defroute "/api/health/dismiss-edge" (:method :post
+(lol-web:defroute "/api/health/dismiss-edge" (:method :post
                                                     :content-type "application/json")
   "Dismiss a suggested edge so it no longer appears in health diagnostics."
   (let* ((body (parse-json-body))
@@ -465,13 +465,13 @@
             (yason:with-output-to-string* ()
               (yason:encode-alist '(("ok" . t)))))
           (error (e)
-            (lol-reactive:response 500
+            (lol-web:response 500
               :content-type "application/json"
               :body (yason:with-output-to-string* ()
                       (yason:encode-alist
                         `(("ok" . nil)
                           ("error" . ,(princ-to-string e))))))))
-        (lol-reactive:response 400
+        (lol-web:response 400
           :content-type "application/json"
           :body (yason:with-output-to-string* ()
                   (yason:encode-alist

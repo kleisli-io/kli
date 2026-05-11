@@ -3,7 +3,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-plan
+(lol-web:defcss :kli-plan
 
   ;; === PLAN HEADER ===
   (".plan-header" (("margin-bottom" . "1.5rem")))

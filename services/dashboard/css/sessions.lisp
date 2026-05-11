@@ -2,7 +2,7 @@
 
 (in-package :kli-dashboard)
 
-(lol-reactive:defcss :kli-sessions
+(lol-web:defcss :kli-sessions
   ;; Section
   (".sessions-section" (("margin-bottom" . "2rem")))
   ;; Active sessions grid
