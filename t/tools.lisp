@@ -1100,10 +1100,14 @@ directory and its :default-timeout bounds the run."
          (protocol (switch-to-extension-protocol context)))
     (install-extension context tools-bash:*bash-tool-extension-manifest*)
     (setf (tools-bash:bash-policy protocol) '(:cwd "/tmp" :default-timeout 1))
-    (let ((here (tool-result-text
-                 (ext:invoke-tool protocol :bash '(:command "pwd") context))))
-      (is (string= "/tmp"
-                   (subseq here 0 (or (position #\Newline here) (length here))))
+    (let* ((here (tool-result-text
+                  (ext:invoke-tool protocol :bash '(:command "pwd") context)))
+           (line (subseq here 0 (or (position #\Newline here) (length here)))))
+      ;; The spawned process reports getcwd(), which resolves symlinks —
+      ;; on darwin /tmp is a symlink to /private/tmp — so compare resolved
+      ;; directories rather than namestrings.
+      (is (equal (truename "/tmp/")
+                 (truename (concatenate 'string line "/")))
           "a bare pwd reports the policy cwd"))
     (let ((slow (ext:invoke-tool protocol :bash '(:command "sleep 5") context)))
       (is (ext:tool-result-error-p slow)
