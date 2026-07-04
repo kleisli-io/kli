@@ -4,6 +4,13 @@ All notable changes to kli are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-07-04
+
+### Fixed
+
+- Linux bundles now ship the full shared-library closure of their bundled libraries. `libz.so.1`, needed by the bundled `libsqlite3`, was missing, so extensions using SQLite full-text search failed on hosts without a Nix store.
+- The process now shows as `kli` in `ps`, `top`, and `tmux` instead of `ld-linux-x86-64.so.2`.
+
 ## [0.1.1] - 2026-07-04
 
 ### Fixed
