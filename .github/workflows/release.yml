@@ -90,7 +90,10 @@ jobs:
           mkdir -p "$DIST"
           tar -C result -chf - . | tar -C "$DIST" -xf -
           chmod -R u+w "$DIST"
-          chmod +x "$DIST/bin/kli" "$DIST/bin/.kli-wrapped"
+          # bin/.kli-wrapped is the raw image, Linux only; darwin's image is
+          # the exec'd entry at libexec/kli.
+          chmod +x "$DIST/bin/kli" "$DIST/libexec/kli"
+          [ ! -e "$DIST/bin/.kli-wrapped" ] || chmod +x "$DIST/bin/.kli-wrapped"
 
       - name: Validate darwin relocation
         if: runner.os == 'macOS'
@@ -106,7 +109,7 @@ jobs:
           DIST="${{ matrix.artifact }}"
           root="$PWD/$DIST"
           trace=$(DYLD_LIBRARY_PATH="$root/lib" KLI_DATA_DIR="$root/share/kli" \
-                  DYLD_PRINT_LIBRARIES=1 "$root/bin/.kli-wrapped" -- version 2>&1) || true
+                  DYLD_PRINT_LIBRARIES=1 "$root/libexec/kli" -- version 2>&1) || true
           printf '%s\n' "$trace"
           if printf '%s\n' "$trace" | grep '/nix/store/' | grep -q '\.dylib'; then
             echo "FAIL: dylibs still resolve to /nix/store; bundle incomplete." >&2
