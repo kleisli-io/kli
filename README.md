@@ -164,3 +164,7 @@ nix flake check
 ```
 
 FiveAM suites under `t/`.
+
+## License
+
+kli is released under the [MIT License](LICENSE).
