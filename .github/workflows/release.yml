@@ -112,7 +112,7 @@ jobs:
             echo "FAIL: dylibs still resolve to /nix/store; bundle incomplete." >&2
             exit 1
           fi
-          printf '%s\n' "$trace" | grep -q 'kli 0.1.0' \
+          printf '%s\n' "$trace" | grep -qF "kli ${GITHUB_REF_NAME#v}" \
             || { echo "FAIL: kli version did not run under direct exec." >&2; exit 1; }
           # The self-locating /bin/sh launcher path also boots end to end.
           "$root/bin/kli" version
@@ -156,10 +156,9 @@ jobs:
       - name: Prove install.sh installs and boots
         env:
           ARTIFACT: ${{ matrix.artifact }}
-          EXPECT_VERSION: kli 0.1.0
           RUN_CONTAINERS: ${{ matrix.containers }}
           RUN_RESOLVER_TEST: ${{ matrix.resolver }}
-        run: sh .github/ci/install-gate.sh
+        run: EXPECT_VERSION="kli ${GITHUB_REF_NAME#v}" sh .github/ci/install-gate.sh
 
   update-gate:
     name: Update verify gate

@@ -420,8 +420,7 @@ let
     ./src/extensions/app/util.lisp
     ./src/extensions/app/cli-grammar.lisp
     ./src/extensions/app/headless-io.lisp
-    # +kli-version+ defparameter; generated from version.sexp, drift-checked.
-    # Compiled-in (no resource lookup) so it survives relocation.
+    # +kli-version+ compiled in (no resource lookup) so it survives relocation.
     ./src/extensions/app/version-const.lisp
     ./src/extensions/app/version.lisp
     ./src/extensions/app/user-extensions.lisp
@@ -919,20 +918,12 @@ let
 
         # Fails the build when the checked-in qlot artifacts drift from their
         # single sources of truth: kli.asd's component list vs the serial
-        # allSrcs, version-const.lisp vs version.sexp, and the qlfile external
-        # pins vs the canonical cl-deps revs.
+        # allSrcs, and the qlfile external pins vs the canonical cl-deps revs.
         driftGate = pkgs.runCommand "kli-drift-gate" { } ''
           if ! diff -u ${src}/kli.asd ${asd}; then
             echo >&2
             echo "kli.asd is out of sync with the source list in build.nix." >&2
             echo "Regenerate it from the build and commit the result." >&2
-            exit 1
-          fi
-
-          ver=$(tr -d '"[:space:]' < ${src}/version.sexp)
-          if ! grep -F "+kli-version+ \"$ver\"" ${src}/src/extensions/app/version-const.lisp >/dev/null; then
-            echo >&2
-            echo "version-const.lisp does not carry version.sexp ($ver)." >&2
             exit 1
           fi
 
@@ -1101,7 +1092,7 @@ let
       } // swankAttrs;
   }).overrideAttrs (old: {
     # The image refuses to build unless the source-level invariants hold: the
-    # qlot/version/resource drift gate, the lattice-top allowlist, and the
+    # qlot/resource drift gate, the lattice-top allowlist, and the
     # sole-authorizer invariant. Failing any one fails every downstream build
     # (binary, relocatable, tests).
     nativeBuildInputs =

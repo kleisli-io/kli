@@ -4,6 +4,13 @@ All notable changes to kli are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-07-04
+
+### Fixed
+
+- Profile group members now activate by requirement rather than declared order: a member whose requirements a later entry provides is deferred and retried instead of erroring, and when nothing can progress the error names every blocked extension and its missing requirements.
+- An error escaping the configured-image dump is now reported on stderr with a backtrace and a nonzero exit, instead of vanishing silently with the process.
+
 ## [0.1.0] - 2026-07-04
 
 First public release of kli — a radically extensible coding agent for the modern Lisp hacker. kli runs inside its own live SBCL image over a small boot kernel that knows only how to install, switch, and roll back protocols; everything else is an extension on that kernel.
