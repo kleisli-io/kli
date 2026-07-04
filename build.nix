@@ -579,6 +579,7 @@ let
     ./t/tui-projection.lisp
     ./t/tui-commands.lisp
     ./t/tui-app.lisp
+    ./t/tui-surfaces.lisp
     ./t/eliminate-image-global-protocol-state.lisp
     ./t/manifest-completeness-and-method-wrapper.lisp
     ./t/prompts.lisp

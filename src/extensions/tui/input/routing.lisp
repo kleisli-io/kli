@@ -7,7 +7,8 @@
        (:interrupt-handler (route-interrupt-handler context))
        (:abort-handler (route-abort-handler context))
        (:clear-screen-handler (route-clear-screen-handler context))
-       (:tool-output-handler (route-tool-output-handler context))))
+       (:tool-output-handler (route-tool-output-handler context))
+       (:next-surface-handler (route-next-surface-handler context))))
     ((listp context)
      (getf context key))
     (t
@@ -30,6 +31,7 @@ already match (submit-input-p / newline-input-p / backspace-input-p).")
     (case action
       (:clear-screen (route-key-handler context :clear-screen-handler))
       (:tool-output  (route-key-handler context :tool-output-handler))
+      (:next-surface (route-key-handler context :next-surface-handler))
       (:abort        (or (dismiss-overlay view)
                          (route-key-handler context :abort-handler)))
       ((:submit :newline :backspace)

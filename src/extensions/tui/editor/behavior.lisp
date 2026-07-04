@@ -139,9 +139,14 @@
                         (1+ (editor-cursor editor)))))))
 
 (defun handle-editor-command (editor data)
-  "Dispatch DATA's keymap action against EDITOR. App keys that reach the editor
-with no route handler (:swallow, :clear-screen, :tool-output) stay inert."
-  (case (keymap-action (object-protocol editor) data)
+  "Dispatch DATA against EDITOR: a key-id string resolves through the keymap,
+an action keyword dispatches directly, so callers can drive the editor with
+actions and no binding. Unknown keywords die silently in the (t nil) clause.
+App keys that reach the editor with no route handler (:swallow, :clear-screen,
+:tool-output) stay inert."
+  (case (if (keywordp data)
+            data
+            (keymap-action (object-protocol editor) data))
     (:move-char-left  (move-cursor editor (previous-cursor-position editor)))
     (:move-char-right (move-cursor editor (next-cursor-position editor)))
     (:move-line-up    (move-up editor))
@@ -175,25 +180,32 @@ with no route handler (:swallow, :clear-screen, :tool-output) stay inert."
     (t nil)))
 
 (defun handle-plain-editor-input (editor data)
-  (cond
-    ((submit-input-p data)
-     (submit-editor* editor))
-    ((newline-input-p data)
-     (insert-text editor (string #\Newline)))
-    ((backspace-input-p data)
-     (when (plusp (editor-cursor editor))
-       (let ((range (paste-marker-ending-at editor
-                                            (editor-cursor editor))))
-         (if range
-             (delete-range editor (car range) (cdr range))
-             (delete-range editor
-                           (1- (editor-cursor editor))
-                           (editor-cursor editor))))))
-    ((handle-editor-command editor data))
-    ((recognized-command-p editor data)
-     nil)
-    ((insertable-input-string data)
-     (insert-text editor (insertable-input-string data)))))
+  "Handle DATA, a key-id string or an action keyword. Keywords short-circuit
+to HANDLE-EDITOR-COMMAND: the clauses below are string-only (in particular
+INSERTABLE-INPUT-STRING signals on a symbol), and keyword
+:submit/:newline/:backspace are not widened -- the router canonicalizes key
+events to the strings the classifiers match."
+  (if (keywordp data)
+      (handle-editor-command editor data)
+      (cond
+        ((submit-input-p data)
+         (submit-editor* editor))
+        ((newline-input-p data)
+         (insert-text editor (string #\Newline)))
+        ((backspace-input-p data)
+         (when (plusp (editor-cursor editor))
+           (let ((range (paste-marker-ending-at editor
+                                                (editor-cursor editor))))
+             (if range
+                 (delete-range editor (car range) (cdr range))
+                 (delete-range editor
+                               (1- (editor-cursor editor))
+                               (editor-cursor editor))))))
+        ((handle-editor-command editor data))
+        ((recognized-command-p editor data)
+         nil)
+        ((insertable-input-string data)
+         (insert-text editor (insertable-input-string data))))))
 
 (defun default-editor-behavior (editor operation &optional data)
   (case operation

@@ -76,6 +76,13 @@
           reloc-probe = library.relocationProbe;
         });
 
+      apps = forAllSystems (system: {
+        default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/kli";
+        };
+      });
+
       checks = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};

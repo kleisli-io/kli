@@ -33,7 +33,17 @@
      :tui-app-runtime-step
      :recode-tui-app-runtime
      :run-tui-app
-     :submit)))
+     :submit
+     :add-tui-app-surface
+     :remove-tui-app-surface
+     :list-tui-app-surfaces
+     :active-tui-app-surface
+     :select-tui-app-surface
+     :cycle-tui-app-surface
+     :add-tui-app-route-interceptor
+     :remove-tui-app-route-interceptor
+     :enqueue-tui-app-task
+     :request-tui-app-render)))
 
 (defun make-tui-app-provider ()
   (make-provider
@@ -69,7 +79,17 @@
          :tui-app-runtime-step #'tui-app-runtime-step
          :recode-tui-app-runtime #'recode-tui-app-runtime
          :run-tui-app #'run-tui-app
-         :submit #'submit-tui-app-input)))
+         :submit #'submit-tui-app-input
+         :add-tui-app-surface #'add-tui-app-surface
+         :remove-tui-app-surface #'remove-tui-app-surface
+         :list-tui-app-surfaces #'list-tui-app-surfaces
+         :active-tui-app-surface #'active-tui-app-surface
+         :select-tui-app-surface #'select-tui-app-surface
+         :cycle-tui-app-surface #'cycle-tui-app-surface
+         :add-tui-app-route-interceptor #'add-tui-app-route-interceptor
+         :remove-tui-app-route-interceptor #'remove-tui-app-route-interceptor
+         :enqueue-tui-app-task #'enqueue-main-thread-task
+         :request-tui-app-render #'request-tui-app-render)))
 
 (defextension tui-app
   ;; Only the capabilities tui-app resolves directly: session/log for the
@@ -80,6 +100,7 @@
    (capability session/log :contract session/log/v1)
    (capability agent/session :contract agent/session/v1))
   (:provides
+   (event-type :tui/app-started)
    (contract tui/app/v1
      (make-tui-app-contract))
    (capability tui/app (make-tui-app-provider))))

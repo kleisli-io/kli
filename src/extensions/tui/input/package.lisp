@@ -54,6 +54,7 @@
    #:route-interrupt-handler
    #:route-abort-handler
    #:route-clear-screen-handler
+   #:route-next-surface-handler
    #:insertable-input-string
    #:normalize-insertable-text
    #:submit-input-p

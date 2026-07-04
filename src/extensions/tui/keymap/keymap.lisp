@@ -39,8 +39,10 @@ and :ignore are recognized but inert, never inserted as literal text.")
     :move-line-start :move-line-end :move-word-left :move-word-right
     :delete-char-forward :delete-to-line-start :delete-to-line-end
     :delete-word-backward :delete-word-forward :insert-tab :insert-space
-    :abort :swallow :ignore :undo)
-  "Actions a user config may target (load-time validation whitelist).")
+    :abort :swallow :ignore :undo :next-surface)
+  "Actions a user config may target (load-time validation whitelist).
+:next-surface ships with no default binding -- surface switching is the /tab
+command's job; a chord is the user's own call.")
 
 (defparameter +keymap-storage-key+ :kli/tui/keymap)
 

@@ -110,18 +110,24 @@
    (tool-output-handler
     :initarg :tool-output-handler
     :initform nil
-    :accessor route-tool-output-handler)))
+    :accessor route-tool-output-handler)
+   (next-surface-handler
+    :initarg :next-surface-handler
+    :initform nil
+    :accessor route-next-surface-handler)))
 
 (defun make-input-route-context (&key (id :input-route-context)
                                       protocol
                                       interrupt-handler
                                       abort-handler
                                       clear-screen-handler
-                                      tool-output-handler)
+                                      tool-output-handler
+                                      next-surface-handler)
   (make-instance 'input-route-context
                  :id id
                  :protocol protocol
                  :interrupt-handler interrupt-handler
                  :abort-handler abort-handler
                  :clear-screen-handler clear-screen-handler
-                 :tool-output-handler tool-output-handler))
+                 :tool-output-handler tool-output-handler
+                 :next-surface-handler next-surface-handler))

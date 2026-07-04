@@ -70,7 +70,10 @@ produced the final text for the model."
        (clear-tui-app-screen app))
      :tool-output-handler
      (lambda ()
-       (toggle-tui-app-tool-output app)))))
+       (toggle-tui-app-tool-output app))
+     :next-surface-handler
+     (lambda ()
+       (cycle-tui-app-surface app)))))
 
 (defun toggle-tui-app-tool-output (app)
   "Flip the active protocol's tool-output expansion state and hard-reprint so
@@ -140,11 +143,21 @@ produced the final text for the model."
       (unless (tui-app-route-context app)
         (setf (tui-app-route-context app)
               (make-app-route-context app)))
+      ;; Surface 0 aliases the transcript slots: the dozens of call sites that
+      ;; read tui-app-view/-renderer directly and the surface dispatch see the
+      ;; same objects.
+      (setf (tui-app-surfaces app)
+            (list (make-tui-surface :id :transcript :label "transcript"
+                                    :view view :renderer renderer
+                                    :route-context (tui-app-route-context app))))
       (set-focused view t)
       (when context
         (register-tui-app context app)
         (register-tui-app-listener app context))
       app)))
+
+(defun tui-app-active-surface (app)
+  (nth (tui-app-active-surface-index app) (tui-app-surfaces app)))
 
 (defun agent-session-service-for-app (context)
   (and context
@@ -454,7 +467,123 @@ terminal sees instead of a frame at the shell cursor."
     (register-live-object registry (tui-app-runtime-behavior app))
     (when (tui-app-route-context app)
       (register-live-object registry (tui-app-route-context app))))
+  ;; Announce the app on the stream so extensions installed before or after
+  ;; it exists can contribute surfaces without polling the registry.
+  (kli/event:emit-event
+   context
+   (kli/event:make-event
+    :tui/app-started
+    :payload (list :app-id (object-id app)
+                   :mode (tui-app-mode-id app))))
   app)
+
+(defun add-tui-app-surface (app &key id label view renderer
+                                  (route-context (tui-app-route-context app))
+                                  activate)
+  "Append a surface. Loop-thread-only, like every surface mutator -- the
+renderer is stateful; off-thread callers go through :enqueue-tui-app-task.
+ROUTE-CONTEXT defaults to the app's, so app-level chords (:next-surface,
+user-bound actions) work on every surface unless overridden. With ACTIVATE,
+select it. Returns ID, NIL when refused."
+  (unless (tui-app-foreign-thread-p app "add-surface refused off the loop thread")
+    (setf (tui-app-surfaces app)
+          (append (tui-app-surfaces app)
+                  (list (make-tui-surface :id id :label label
+                                          :view view :renderer renderer
+                                          :route-context route-context))))
+    (when activate
+      (select-tui-app-surface app id))
+    id))
+
+(defun remove-tui-app-surface (app id)
+  "Remove the surface named ID. Surface 0 refuses -- the transcript is the
+app's floor. Removing the active surface falls back to surface 0. Returns T
+on removal, NIL when unknown or refused."
+  (unless (tui-app-foreign-thread-p app "remove-surface refused off the loop thread")
+    (let ((index (position id (tui-app-surfaces app) :key #'surface-id)))
+      (cond
+        ((null index) nil)
+        ((zerop index)
+         (kli/ext:note-fault :render (list :surface id)
+                             "surface 0 refused removal")
+         nil)
+        (t
+         (let ((active (tui-app-active-surface-index app)))
+           (setf (tui-app-surfaces app)
+                 (remove id (tui-app-surfaces app)
+                         :key #'surface-id :count 1))
+           (cond
+             ((= active index) (select-tui-app-surface app 0))
+             ((> active index) (decf (tui-app-active-surface-index app)))))
+         t)))))
+
+(defun surface-descriptor (surface active-p)
+  (list :id (surface-id surface)
+        :label (surface-label surface)
+        :active-p active-p))
+
+(defun list-tui-app-surfaces (app)
+  "Surface descriptors (:id :label :active-p), in surface order."
+  (loop for surface in (tui-app-surfaces app)
+        for index from 0
+        collect (surface-descriptor
+                 surface (= index (tui-app-active-surface-index app)))))
+
+(defun active-tui-app-surface (app)
+  "The active surface's descriptor (:id :label :active-p)."
+  (surface-descriptor (tui-app-active-surface app) t))
+
+(defun select-tui-app-surface (app id-or-index)
+  "Activate a surface by id or index. Selecting surface 0 rides the
+hard-redraw doctrine (reset-pending clears and reprints from the model); any
+other surface repaints from a cleared screen. Returns the selected id, NIL
+when unknown or refused."
+  (unless (tui-app-foreign-thread-p app "select-surface refused off the loop thread")
+    (let* ((surfaces (tui-app-surfaces app))
+           (index (if (integerp id-or-index)
+                      (and (< -1 id-or-index (length surfaces)) id-or-index)
+                      (position id-or-index surfaces :key #'surface-id))))
+      (when index
+        (setf (tui-app-active-surface-index app) index)
+        (if (zerop index)
+            (redraw-tui-app app)
+            (render-tui-app app :clear t :force t))
+        (surface-id (nth index surfaces))))))
+
+(defun cycle-tui-app-surface (app &optional (delta 1))
+  "Activate the surface DELTA steps from the active one, wrapping."
+  (unless (tui-app-foreign-thread-p app "cycle-surface refused off the loop thread")
+    (select-tui-app-surface
+     app (mod (+ (tui-app-active-surface-index app) delta)
+              (length (tui-app-surfaces app))))))
+
+(defun add-tui-app-route-interceptor (app id fn)
+  "Register FN under ID at the end of the chain; a live ID re-registers in
+place, keeping its position. FN is called (fn APP EVENT) ahead of the active
+surface and consumes the event by returning :handled. Returns ID, NIL when
+refused."
+  (unless (tui-app-foreign-thread-p app "add-interceptor refused off the loop thread")
+    (let ((entry (assoc id (tui-app-route-interceptors app))))
+      (if entry
+          (setf (cdr entry) fn)
+          (setf (tui-app-route-interceptors app)
+                (append (tui-app-route-interceptors app)
+                        (list (cons id fn))))))
+    id))
+
+(defun remove-tui-app-route-interceptor (app id)
+  "Drop ID's interceptor. Returns ID, NIL when refused."
+  (unless (tui-app-foreign-thread-p app "remove-interceptor refused off the loop thread")
+    (setf (tui-app-route-interceptors app)
+          (remove id (tui-app-route-interceptors app) :key #'car :count 1))
+    id))
+
+(defun request-tui-app-render (app)
+  "Ask for a repaint of the active surface at the next trampoline drain.
+Thread-safe: rides the main-thread task queue, and render-pending coalesces a
+burst of requests into one frame."
+  (enqueue-main-thread-task
+   app (lambda () (setf (tui-app-render-pending-p app) t))))
 
 (defun tui-app-editor (app)
   (transcript-view-editor (tui-app-view app)))
@@ -978,34 +1107,53 @@ an off-thread frame corrupts it."
                     app (format nil "Internal render fault — frame skipped (see ~A)."
                                 (kli/ext:fault-log-path :render)))
                    nil))
-    (let ((force force)
-          (terminal (tui-app-terminal app)))
-      (terminal-begin-frame terminal)
-      (unwind-protect
-           (progn
-             (when clear
-               ;; The screen is blank after the clear, so a line diff against
-               ;; the region cache would skip "unchanged" rows - force the
-               ;; full repaint.
-               (terminal-clear-screen terminal)
-               (scrollback-anchor-bottom (tui-app-renderer app))
-               (setf force t))
-             (when (shiftf (tui-app-render-reset-pending-p app) nil)
-               (terminal-clear-screen terminal)
-               ;; A hard reset during an open stream must keep the stream open.
-               ;; Dropping it would let the reprint commit the half-streamed
-               ;; event, and the next delta would re-open it behind the commit
-               ;; boundary - inconsistent renderer geometry.
-               (let* ((renderer (tui-app-renderer app))
-                      (streaming (scrollback-renderer-streaming-event renderer)))
-                 (scrollback-reset renderer)
-                 (when streaming
-                   (begin-scrollback-stream renderer streaming))
-                 (scrollback-anchor-bottom renderer))
-               (setf force t))
-             (prog1 (render-frame (tui-app-renderer app) terminal :force force)
-               (setf (tui-app-render-fault-streak app) 0)))
-        (terminal-end-frame terminal)))))
+    (if (zerop (tui-app-active-surface-index app))
+        (let ((force force)
+              (terminal (tui-app-terminal app)))
+          (terminal-begin-frame terminal)
+          (unwind-protect
+               (progn
+                 (when clear
+                   ;; The screen is blank after the clear, so a line diff against
+                   ;; the region cache would skip "unchanged" rows - force the
+                   ;; full repaint.
+                   (terminal-clear-screen terminal)
+                   (scrollback-anchor-bottom (tui-app-renderer app))
+                   (setf force t))
+                 (when (shiftf (tui-app-render-reset-pending-p app) nil)
+                   (terminal-clear-screen terminal)
+                   ;; A hard reset during an open stream must keep the stream open.
+                   ;; Dropping it would let the reprint commit the half-streamed
+                   ;; event, and the next delta would re-open it behind the commit
+                   ;; boundary - inconsistent renderer geometry.
+                   (let* ((renderer (tui-app-renderer app))
+                          (streaming (scrollback-renderer-streaming-event renderer)))
+                     (scrollback-reset renderer)
+                     (when streaming
+                       (begin-scrollback-stream renderer streaming))
+                     (scrollback-anchor-bottom renderer))
+                   (setf force t))
+                 (prog1 (render-frame (tui-app-renderer app) terminal :force force)
+                   (setf (tui-app-render-fault-streak app) 0)))
+            (terminal-end-frame terminal)))
+        ;; Generic arm: no scrollback-renderer state to preserve, so clear and
+        ;; a consumed reset-pending both collapse to a forced full repaint.
+        ;; The surface-0 open-stream dance stays in the arm above -- switching
+        ;; back re-arms reset-pending via select -> redraw-tui-app.
+        (let ((force force)
+              (terminal (tui-app-terminal app))
+              (reset (shiftf (tui-app-render-reset-pending-p app) nil)))
+          (terminal-begin-frame terminal)
+          (unwind-protect
+               (progn
+                 (when (or clear reset)
+                   (terminal-clear-screen terminal)
+                   (setf force t))
+                 (prog1 (render-frame
+                         (surface-renderer (tui-app-active-surface app))
+                         terminal :force force)
+                   (setf (tui-app-render-fault-streak app) 0)))
+            (terminal-end-frame terminal))))))
 
 (defun redraw-tui-app (app)
   "Hard redraw: clear the visible screen and reprint everything from the model.
@@ -1038,10 +1186,22 @@ an off-thread frame corrupts it."
       (multiple-value-bind (columns rows) (process-terminal-size terminal)
         (apply-terminal-size app columns rows)))))
 
+(defun run-tui-app-route-interceptors (app event)
+  "Walk the interceptor chain in insertion order, stopping at the first FN
+that returns :handled. T when one consumed EVENT. A signaling interceptor is
+contained by the runtime-step behavior cell the caller already runs under."
+  (loop for (nil . fn) in (tui-app-route-interceptors app)
+          thereis (eq (funcall fn app event) :handled)))
+
 (defun route-tui-app-event (app event)
-  (route-input-event (tui-app-view app)
-                     event
-                     (tui-app-route-context app)))
+  (if (eq (input-event-kind event) :interrupt)
+      ;; Ctrl+C is the app's own arc, never a surface's: bypass the chain so
+      ;; a broken interceptor cannot swallow the quit path.
+      (route-input-event (tui-app-view app) event (tui-app-route-context app))
+      (or (run-tui-app-route-interceptors app event)
+          (let ((surface (tui-app-active-surface app)))
+            (route-input-event (surface-view surface) event
+                               (surface-route-context surface))))))
 
 (defun route-tui-app-events (app events)
   (dolist (event events)

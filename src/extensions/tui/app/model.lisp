@@ -137,4 +137,45 @@
    (tool-update-text
     :initform nil
     :accessor tui-app-tool-update-text
-    :documentation "Latest tool-execution progress update, shown after the working-indicator label by the working-indicator widget. Set by the update projection, cleared when the execution or turn ends.")))
+    :documentation "Latest tool-execution progress update, shown after the working-indicator label by the working-indicator widget. Set by the update projection, cleared when the execution or turn ends.")
+   (surfaces
+    :initform nil
+    :accessor tui-app-surfaces
+    :documentation "Ordered list of tui-surface records. Populated by make-tui-app, whose 0th record aliases the transcript/view/renderer slots, so it is never nil after init and surface 0 is always the transcript.")
+   (active-surface-index
+    :initform 0
+    :accessor tui-app-active-surface-index
+    :documentation "Index into SURFACES of the surface that owns render and route dispatch.")
+   (route-interceptors
+    :initform nil
+    :accessor tui-app-route-interceptors
+    :documentation "Alist of (id . fn) walked in insertion order ahead of the active surface's router. An interceptor returning :handled consumes the event. :interrupt events bypass the chain.")))
+
+(defclass tui-surface ()
+  ((id
+    :initarg :id
+    :reader surface-id)
+   (label
+    :initarg :label
+    :initform nil
+    :reader surface-label)
+   (view
+    :initarg :view
+    :reader surface-view)
+   (renderer
+    :initarg :renderer
+    :reader surface-renderer)
+   (route-context
+    :initarg :route-context
+    :initform nil
+    :reader surface-route-context))
+  (:documentation "One switchable full-screen unit: a view, the renderer that
+paints it, and the route context its input resolves handlers against."))
+
+(defun make-tui-surface (&key id label view renderer route-context)
+  (make-instance 'tui-surface
+                 :id id
+                 :label label
+                 :view view
+                 :renderer renderer
+                 :route-context route-context))

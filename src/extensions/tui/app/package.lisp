@@ -47,6 +47,7 @@
                 #:make-input-route-context
                 #:make-input-decoder
                 #:route-input-event
+                #:input-event-kind
                 #:input-decoder-buffer
                 #:input-decoder-flush
                 #:input-decoder-feed)
@@ -166,6 +167,28 @@
    #:run-pending-main-thread-tasks
    #:tui-app-render-fault-streak
    #:tui-app-render-reset-pending-p
-   #:poll-tui-app-spinner))
+   #:poll-tui-app-spinner
+
+   #:tui-surface
+   #:make-tui-surface
+   #:surface-id
+   #:surface-label
+   #:surface-view
+   #:surface-renderer
+   #:surface-route-context
+   #:tui-app-surfaces
+   #:tui-app-active-surface-index
+   #:tui-app-active-surface
+   #:tui-app-route-interceptors
+   #:add-tui-app-surface
+   #:remove-tui-app-surface
+   #:list-tui-app-surfaces
+   #:active-tui-app-surface
+   #:select-tui-app-surface
+   #:cycle-tui-app-surface
+   #:add-tui-app-route-interceptor
+   #:remove-tui-app-route-interceptor
+   #:run-tui-app-route-interceptors
+   #:request-tui-app-render))
 
 (in-package #:kli/tui/app)
