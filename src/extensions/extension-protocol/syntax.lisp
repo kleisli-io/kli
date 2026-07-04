@@ -313,11 +313,40 @@ also register the factory into that protocol."
   (values))
 
 (defun install-manifest-list (manifest-symbols protocol context)
-  "Install each manifest named in MANIFEST-SYMBOLS into PROTOCOL in order.
-   Each element is a symbol bound to a manifest factory thunk. Returns the
-   activated extensions as handles in install order."
-  (loop for sym in manifest-symbols
-        collect (install-manifest (symbol-value sym) protocol context)))
+  "Install each manifest named in MANIFEST-SYMBOLS into PROTOCOL. Each element
+   is a symbol bound to a manifest factory thunk. Activation order is
+   requirement-driven, not list-order-driven: a manifest whose declared
+   requirements are not yet satisfied is deferred and retried after the rest
+   of the list, so an extension may require a capability that a later entry
+   provides. Entries whose requirements are already satisfied activate in
+   declared order. When a full pass activates nothing, signals an error naming
+   every blocked extension and its missing requirements. Returns the activated
+   extensions as handles in activation order."
+  (let ((pending manifest-symbols)
+        (handles '()))
+    (loop while pending
+          do (let ((deferred '())
+                   (blocked '()))
+               (dolist (sym pending)
+                 (let* ((extension (funcall (symbol-value sym)))
+                        (missing (unsatisfied-extension-requirements
+                                  protocol extension context)))
+                   (cond
+                     (missing
+                      (push sym deferred)
+                      (push (cons extension missing) blocked))
+                     (t
+                      (activate-extension protocol extension context)
+                      (push extension handles)))))
+               (when (= (length deferred) (length pending))
+                 (error "Extensions have unsatisfied requirements:~:{~%  ~S: ~{~S~^, ~}~}"
+                        (mapcar (lambda (entry)
+                                  (list (object-id (car entry))
+                                        (mapcar #'requirement-designator
+                                                (cdr entry))))
+                                (nreverse blocked))))
+               (setf pending (nreverse deferred))))
+    (nreverse handles)))
 
 (defun retract-installed-extensions (installed-extensions protocol context)
   "Deactivate INSTALLED-EXTENSIONS in reverse activation order."

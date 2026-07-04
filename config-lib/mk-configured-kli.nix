@@ -73,6 +73,7 @@ let
   manifestAssertion = concatMapStringsSep "\n" (sym: ''
     (unless (member '${sym} kli/profiles:*nix-declared-extension-manifests*)
       (format *error-output* "~&ERROR: nix-declared manifest ${sym} missing from the dumped image~%")
+      (finish-output *error-output*)
       (sb-posix:exit 1))
   '') manifestSymbols;
 

@@ -324,12 +324,24 @@ snapshot. Invoked at image-dump time, after every extension has loaded, so the
 dumped image carries the installed protocol ready to reuse. The config service
 loads whatever settings the build environment carries (none), so boot must rebind
 and reload before reuse. Clears the debug REPL handles main sets, so a booted
-image starts clean."
-  (let ((*image-dump-in-progress* t))
-    (setf *boot-snapshot-context*
-          (main :profile *default-profile* :settings (load-settings))
-          *current-context* nil
-          *current-app* nil))
+image starts clean. A condition escaping the install is reported on the stream
+bound at entry -- the process stderr at dump time -- before exiting nonzero:
+main's diagnostics capture rebinds the output streams, so the script debugger's
+report of an unhandled error would land in the capture buffer and vanish with
+the dying process."
+  (let ((stderr *error-output*))
+    (handler-bind ((serious-condition
+                     (lambda (condition)
+                       (format stderr "~&Fatal: boot snapshot install failed: ~A~%"
+                               condition)
+                       (sb-debug:print-backtrace :stream stderr :count 60)
+                       (finish-output stderr)
+                       (sb-posix:exit 1))))
+      (let ((*image-dump-in-progress* t))
+        (setf *boot-snapshot-context*
+              (main :profile *default-profile* :settings (load-settings))
+              *current-context* nil
+              *current-app* nil))))
   *boot-snapshot-context*)
 
 (defun boot-snapshot-usable-p (settings &key (argv (uiop:command-line-arguments))

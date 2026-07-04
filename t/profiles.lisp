@@ -90,6 +90,54 @@ symbol boots as a baseline child of whichever profile is selected."
             "profile ~S splices the nix-declared hook into its group"
             (kli:object-id extension))))))
 
+(ext:defextension deferral-provider-extension
+  (:provides
+   (capability deferral-probe)))
+
+(ext:defextension deferral-requirer-extension
+  (:requires
+   (:capability :deferral-probe))
+  (:provides
+   (event-type :deferral/probe-installed)))
+
+(ext:defextension deferral-profile-extension
+  (:provides
+   (profile :deferral-probe
+     (list '*deferral-requirer-extension-extension-manifest*
+           '*deferral-provider-extension-extension-manifest*))))
+
+(test profile-defers-members-until-requirements-satisfied
+  "A profile member may require a capability that a member declared after it
+provides: group activation is requirement-driven, not list-order-driven. The
+requirer is deferred past the provider and the activation record holds the
+handles in actual activation order."
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context)))
+    (install-extension context *deferral-profile-extension-extension-manifest*)
+    (is (ext:extension-loaded-p protocol :deferral-provider-extension))
+    (is (ext:extension-loaded-p protocol :deferral-requirer-extension))
+    (let ((record (profiles:protocol-profile-activation protocol
+                                                        :deferral-probe)))
+      (is (equal '(:deferral-provider-extension :deferral-requirer-extension)
+                 (mapcar #'kli:object-id
+                         (profiles:profile-activation-extensions record)))
+          "the deferred requirer activates after the provider"))))
+
+(ext:defextension unsatisfiable-profile-extension
+  (:provides
+   (profile :unsatisfiable-probe
+     (list '*deferral-requirer-extension-extension-manifest*))))
+
+(test profile-install-errors-on-unsatisfiable-member
+  "A member whose requirements no group entry can ever satisfy still fails the
+install loudly instead of deferring forever."
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context)))
+    (signals error
+      (install-extension context
+                         *unsatisfiable-profile-extension-extension-manifest*))
+    (is (not (ext:extension-loaded-p protocol :deferral-requirer-extension)))))
+
 (test profile-activation-isolates-across-protocols
   (let* ((ctx-a (kli:make-kernel-host))
          (proto-a (switch-to-extension-protocol ctx-a))

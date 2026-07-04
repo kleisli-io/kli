@@ -831,10 +831,12 @@ let
               (format *error-output*
                       "~&ERROR: blessed SONAMEs not dont-save-flagged: ~{~A~^, ~}~%"
                       unflagged)
+              (finish-output *error-output*)
               (sb-posix:exit 1))
             (when (null kli/runtime/relocation:*blessed-sonames*)
               (format *error-output*
                       "~&ERROR: *blessed-sonames* empty -- no directory-less shared object found at preDump~%")
+              (finish-output *error-output*)
               (sb-posix:exit 1))
             (format t "~&Relocatable-boot seam: blessed ~{~A~^, ~} (dont-save set)~%"
                     kli/runtime/relocation:*blessed-sonames*))

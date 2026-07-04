@@ -846,22 +846,24 @@ place. Lookup errors signal outside the dispatch scope."
                (requirement-satisfied-p protocol requirement context))
              (extension-requirement-list extension)))
 
+(defun requirement-designator (requirement)
+  "Readable (kind name [:contract c] [:provider-id p]) list for error reports."
+  (remove nil
+          (list (requirement-kind requirement)
+                (requirement-name requirement)
+                (when (requirement-contract requirement)
+                  :contract)
+                (requirement-contract requirement)
+                (when (requirement-provider-id requirement)
+                  :provider-id)
+                (requirement-provider-id requirement))))
+
 (defun check-extension-requirements (protocol extension context)
   (let ((missing (unsatisfied-extension-requirements protocol extension context)))
     (when missing
       (error "Extension ~S has unsatisfied requirements: ~{~S~^, ~}"
              (object-id extension)
-             (mapcar (lambda (requirement)
-                       (remove nil
-                               (list (requirement-kind requirement)
-                                     (requirement-name requirement)
-                                     (when (requirement-contract requirement)
-                                       :contract)
-                                     (requirement-contract requirement)
-                                     (when (requirement-provider-id requirement)
-                                       :provider-id)
-                                     (requirement-provider-id requirement))))
-                     missing)))))
+             (mapcar #'requirement-designator missing)))))
 
 (defmethod protocol-load-extension ((protocol extension-protocol)
                                     (extension extension)
