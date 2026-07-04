@@ -1,0 +1,5 @@
+# ubuntu-24.04-arm is a GitHub-hosted aarch64 Linux runner; actionlint's
+# built-in label list lags behind GitHub's runner availability.
+self-hosted-runner:
+  labels:
+    - ubuntu-24.04-arm

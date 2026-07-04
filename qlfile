@@ -1,0 +1,19 @@
+;; External Common Lisp dependencies for the qlot build of kli.
+;; Pins are drift-checked in CI against the canonical dependency set.
+
+;; Quicklisp-dist systems (versions tracked via nixpkgs sbcl.pkgs.*):
+ql com.inuoe.jzon
+ql drakma
+ql ironclad
+ql cl-base64
+ql cl-ppcre
+
+;; GitHub-pinned systems (:ref mirrors the canonical cl-deps rev). The 3bmd repo
+;; also provides 3bmd-ext-code-blocks and 3bmd-ext-tables.
+github 3bmd 3b/3bmd :ref "f850c88c34ac6f8c6a63e61aba2e677a6844648f"
+github colorize kingcons/colorize :ref "c41fcc5833ebcf184f48aaf31ab89a9a1c230464"
+github cl-difflib wiseman/cl-difflib :ref "98eb335c693f1881584b83ca7be4a0fe05355c4e"
+
+;; Not in the Quicklisp dist (vendored / forked upstream):
+github let-over-lambda thephoeron/let-over-lambda :ref "9b3751213b1cb0bc1ddf11cd7a53f8f620fe9125"
+github sqlite TeMPOraL/cl-sqlite :ref "be2fcc193f98e3d5bdc85958a806d612cc48740c"

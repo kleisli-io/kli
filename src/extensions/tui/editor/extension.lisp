@@ -1,0 +1,22 @@
+(in-package #:kli/tui/editor)
+
+(defextension tui-editor
+  (:provides
+   (method render-lines () (editor-view t) (view width)
+     (render-editor-lines view width))
+   (method cursor-position () (editor-view t) (view width)
+     (editor-cursor-position view width))
+   (method handle-input () (editor-view t) (view input)
+     (handle-editor-input view input))
+   (method handle-paste () (editor-view t) (view text)
+     (handle-editor-paste view text))
+   (method invalidate () (editor-view) (view)
+     (invalidate-editor view))
+   (method dismiss-overlay () (editor-view) (editor)
+     (dismiss-editor-completion editor))
+   (method set-focused () (editor-view t) (view state)
+     (set-editor-focused view state))
+   (method submit-editor () (editor-view) (editor)
+     (submit-editor* editor))
+   (method recode-tui-behavior () (editor-view) (editor &rest args)
+     (apply #'recode-editor editor args))))

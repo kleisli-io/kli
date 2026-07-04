@@ -1,0 +1,20 @@
+(in-package #:kli/tui/terminal)
+
+(defextension tui-terminal
+  (:provides
+   (method write-terminal () (memory-terminal t) (terminal string)
+     (write-memory-terminal terminal string))
+   (method write-terminal () (process-terminal t) (terminal string)
+     (write-process-terminal terminal string))
+   (method terminal-size () (memory-terminal) (terminal)
+     (terminal-size* terminal))
+   (method terminal-size () (process-terminal) (terminal)
+     (process-terminal-size terminal))
+   (method render-frame () (screen-frame t) (frame terminal &key force)
+     (render-screen-frame frame terminal :force force))
+   (method handle-input () (screen-frame t) (frame input)
+     (handle-frame-input frame input))
+   (method invalidate () (screen-frame) (frame)
+     (invalidate-frame frame))
+   (method recode-tui-behavior () (screen-frame) (frame &rest args)
+     (apply #'recode-screen-frame frame args))))

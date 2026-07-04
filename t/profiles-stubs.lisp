@@ -1,0 +1,40 @@
+(in-package #:kli/tests)
+(in-suite all)
+
+(defun stub-profile-protocol (manifest)
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context)))
+    (install-extension context manifest)
+    protocol))
+
+(test (human-in-loop-installs-interactive-base-with-approval-seam :fixture interactive-authority)
+  "human-in-loop is a principled stub -- it boots the interactive-terminal base and declares the approval policy seam as first-class activation metadata, while core ships no policy extension behind that seam."
+  (let* ((protocol (stub-profile-protocol
+                    profiles:*human-in-loop-extension-manifest*))
+         (record (profiles:protocol-profile-activation protocol :human-in-loop)))
+    (is (not (null record)))
+    (is (eq :human-in-loop (profiles:profile-activation-id record)))
+    (is (equal '(:approval) (profiles:profile-activation-seam record))
+        "declares the approval seam as first-class metadata")
+    (is (ext:extension-loaded-p protocol :agent-session))
+    (is (ext:extension-loaded-p protocol :tui-app)
+        "human-in-loop carries the interactive-terminal base")
+    (is (not (ext:extension-loaded-p protocol :approval))
+        "core ships no policy extension behind the seam")))
+
+(test (autonomous-installs-headless-base-with-policy-seam :fixture interactive-authority)
+  "autonomous is a principled stub -- it boots the headless base and declares the autonomy policy seam as first-class activation metadata, while core ships no policy extension behind that seam."
+  (let* ((protocol (stub-profile-protocol
+                    profiles:*autonomous-extension-manifest*))
+         (record (profiles:protocol-profile-activation protocol :autonomous)))
+    (is (not (null record)))
+    (is (eq :autonomous (profiles:profile-activation-id record)))
+    (is (equal '(:planner :scheduler :watchdog :recovery)
+               (profiles:profile-activation-seam record))
+        "declares the autonomy policy seam as first-class metadata")
+    (is (ext:extension-loaded-p protocol :agent-session))
+    (is (not (ext:extension-loaded-p protocol :tui-app))
+        "autonomous boots the headless base, no terminal UI")
+    (dolist (policy '(:planner :scheduler :watchdog :recovery))
+      (is (not (ext:extension-loaded-p protocol policy))
+          "core ships no policy extension behind the seam"))))

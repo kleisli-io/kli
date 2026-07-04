@@ -1,0 +1,206 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# Draft-then-promote flow:
+#   draft     creates a draft release
+#   build     matrix-builds the per-target tarball; uploads as workflow artifacts
+#   finalize  downloads artifacts, writes checksums.txt, flips draft=false
+#
+# A failure anywhere before `finalize` succeeds leaves a *draft* release. Only a
+# non-draft release is sealed and immutable.
+
+jobs:
+  draft:
+    name: Create draft release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          # Pull this version's section out of CHANGELOG.md — the block between its
+          # "## [x.y.z]" header and the next version header. Falls back to a bare
+          # title so a tag with no changelog entry still drafts.
+          awk "/^## \\[?$VERSION/{f=1;next} /^## \\[?[0-9]/{if(f)exit} f" CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "Release $TAG" > notes.md
+          fi
+
+      - name: Create or refresh draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" --json isDraft --jq .isDraft >/tmp/state 2>/dev/null; then
+            if [ "$(cat /tmp/state)" = "false" ]; then
+              echo "Refusing: $TAG is already published (sealed)."
+              exit 1
+            fi
+            echo "Refreshing existing draft for $TAG"
+            gh release edit "$TAG" --draft --title "$TAG" --notes-file notes.md
+          else
+            echo "Creating draft for $TAG"
+            gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md
+          fi
+
+  build:
+    name: Build ${{ matrix.artifact }}
+    needs: draft
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+            artifact: kli-linux-x86_64
+          - os: ubuntu-24.04-arm
+            system: aarch64-linux
+            artifact: kli-linux-aarch64
+          - os: macos-14
+            system: aarch64-darwin
+            artifact: kli-darwin-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build kli bundle
+        run: nix build ".#packages.${{ matrix.system }}.kli-relocatable" -o result
+
+      - name: Assemble tarball
+        run: |
+          # The top directory MUST be kli-<os>-<arch>/: install.sh strips it with
+          # --strip-components=1 and update.lisp reconstructs the name. The bundle
+          # is already self-contained (loader/dylibs + dlopen'd libs + resources +
+          # launcher), so this just lifts it out of the store under that top dir.
+          DIST="${{ matrix.artifact }}"
+          mkdir -p "$DIST"
+          tar -C result -chf - . | tar -C "$DIST" -xf -
+          chmod -R u+w "$DIST"
+          chmod +x "$DIST/bin/kli" "$DIST/bin/.kli-wrapped"
+
+      - name: Validate darwin relocation
+        if: runner.os == 'macOS'
+        run: |
+          # DIST/ is outside /nix/store, so with the bundle's lib/ on
+          # DYLD_LIBRARY_PATH any dylib still resolving under /nix/store is a
+          # dependency we failed to bundle. Exec the image directly and trace
+          # every load: the /bin/sh launcher is SIP-restricted and would strip
+          # DYLD_* set in its parent env, so the trace var is set on the image
+          # exec itself -- exercising the identical DYLD_LIBRARY_PATH value the
+          # launcher sets internally.
+          set -uo pipefail
+          DIST="${{ matrix.artifact }}"
+          root="$PWD/$DIST"
+          trace=$(DYLD_LIBRARY_PATH="$root/lib" KLI_DATA_DIR="$root/share/kli" \
+                  DYLD_PRINT_LIBRARIES=1 "$root/bin/.kli-wrapped" -- version 2>&1) || true
+          printf '%s\n' "$trace"
+          if printf '%s\n' "$trace" | grep '/nix/store/' | grep -q '\.dylib'; then
+            echo "FAIL: dylibs still resolve to /nix/store; bundle incomplete." >&2
+            exit 1
+          fi
+          printf '%s\n' "$trace" | grep -q 'kli 0.1.0' \
+            || { echo "FAIL: kli version did not run under direct exec." >&2; exit 1; }
+          # The self-locating /bin/sh launcher path also boots end to end.
+          "$root/bin/kli" version
+
+      - name: Pack tarball
+        run: tar -czf "${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  install-gate:
+    name: Install gate ${{ matrix.artifact }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: kli-linux-x86_64
+            containers: true
+            resolver: true
+          - os: ubuntu-24.04-arm
+            artifact: kli-linux-aarch64
+            containers: true
+            resolver: false
+          - os: macos-14
+            artifact: kli-darwin-aarch64
+            containers: false
+            resolver: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+
+      - name: Prove install.sh installs and boots
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+          EXPECT_VERSION: kli 0.1.0
+          RUN_CONTAINERS: ${{ matrix.containers }}
+          RUN_RESOLVER_TEST: ${{ matrix.resolver }}
+        run: sh .github/ci/install-gate.sh
+
+  update-gate:
+    name: Update verify gate
+    needs: draft
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Prove kli update authenticates its downloads over TLS
+        env:
+          RUN_CONTAINERS: "true"
+        run: sh .github/ci/update-gate.sh
+
+  finalize:
+    name: Upload assets and promote
+    needs: [draft, build, install-gate, update-gate]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum kli-*.tar.gz > checksums.txt
+
+      - name: Upload assets to draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release upload "$TAG" --clobber kli-*.tar.gz checksums.txt
+
+      - name: Promote draft to published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release edit "$TAG" --draft=false
