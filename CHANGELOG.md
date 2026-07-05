@@ -4,6 +4,12 @@ All notable changes to kli are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-07-05
+
+### Fixed
+
+- Extensions installed from a source bundle now serve their bundled prompts and resources. A directory unit may carry a generated `resources.sexp` manifest mapping resource-root keys to unit-relative directories; the loader registers each key against the placed tree, so `kli mcp-serve <ext>` exposes the extension's prompt templates over `prompts/list` and `resources/list`, and the interactive session mounts them as slash commands. Previously only extensions compiled into the image resolved their bundled resources.
+
 ## [0.1.2] - 2026-07-04
 
 ### Fixed

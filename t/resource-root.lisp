@@ -38,3 +38,57 @@
         (let ((resolved (buildlisp/resources:resource-root "kli/skills")))
           (is (probe-file resolved))
           (is (not (search (namestring root) (namestring resolved)))))))))
+
+;;;; The unit-root resource manifest. A source-distributed directory unit has
+;;;; no baked registration forms, so its resources.sexp maps each declared key
+;;;; to a unit-relative directory and the loader registers key -> placed tree.
+
+(defun call-with-temp-unit-dir (thunk)
+  "Create a temp unit root, call THUNK with it, clean up."
+  (let ((dir (uiop:ensure-directory-pathname
+              (merge-pathnames
+               (format nil "kli-unit-manifest-test-~A/" (random (expt 2 32)))
+               (uiop:default-temporary-directory)))))
+    (ensure-directories-exist dir)
+    (unwind-protect (funcall thunk dir)
+      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
+
+(test unit-resource-manifest-registers-roots
+  "A manifest entry (KEY . RELATIVE-DIR) makes resource-root resolve KEY
+   against the unit's placed tree."
+  (call-with-temp-unit-dir
+   (lambda (dir)
+     (let ((prompts (merge-pathnames "src/prompts/" dir)))
+       (ensure-directories-exist prompts)
+       (with-open-file (out (merge-pathnames "resources.sexp" dir)
+                            :direction :output)
+         (write-string "((\"kli/manifest-probe/prompts\" . \"src/prompts/\"))"
+                       out))
+       (with-env-var ("KLI_DATA_DIR" nil)
+         (app::register-unit-resource-roots dir)
+         (is (equal (truename prompts)
+                    (truename (buildlisp/resources:resource-root
+                               "kli/manifest-probe/prompts")))))))))
+
+(test unit-resource-manifest-degrades-on-malformed-entries
+  "Entries that are not string pairs naming a relative directory are skipped;
+   nothing signals and the keys stay unresolved."
+  (call-with-temp-unit-dir
+   (lambda (dir)
+     (with-open-file (out (merge-pathnames "resources.sexp" dir)
+                          :direction :output)
+       (write-string
+        "((:not-a-string . 42) (\"kli/manifest-probe/skipped\" . :kw) \"loose\"
+          (\"kli/manifest-probe/absolute\" . \"/etc/\"))"
+        out))
+     (with-env-var ("KLI_DATA_DIR" nil)
+       (finishes (app::register-unit-resource-roots dir))
+       (signals error
+         (buildlisp/resources:resource-root "kli/manifest-probe/skipped"))
+       (signals error
+         (buildlisp/resources:resource-root "kli/manifest-probe/absolute"))))))
+
+(test unit-resource-manifest-absent-is-a-no-op
+  (call-with-temp-unit-dir
+   (lambda (dir)
+     (finishes (app::register-unit-resource-roots dir)))))

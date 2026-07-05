@@ -472,11 +472,15 @@ the temp stage so the live installed set is untouched."
                                             expected-sha))
                 (let ((entry (index-unit protocol (first (discover-units stage)))))
                   (if entry
-                      (let ((leaf (declared-id-leaf
-                                   (user-extension-entry-id entry))))
-                        (safe-replace-dir
-                         stage (merge-pathnames (format nil "~A/" leaf) root))
+                      (let* ((leaf (declared-id-leaf
+                                    (user-extension-entry-id entry)))
+                             (final (merge-pathnames (format nil "~A/" leaf) root)))
+                        (safe-replace-dir stage final)
                         (setf stage nil)
+                        ;; The trial load registered resource roots against the
+                        ;; staged tree; re-point them at the placed home so the
+                        ;; installing process resolves them without a reboot.
+                        (register-unit-resource-roots final)
                         (values entry leaf))
                       (values nil :index-failed)))
                 (values nil :integrity-failed))))

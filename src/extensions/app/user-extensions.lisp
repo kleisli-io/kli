@@ -231,6 +231,27 @@ present, else a synthesized per-unit package so cross-file definitions resolve."
       (let ((*package* (ensure-synth-package (synth-package-name dir))))
         (dolist (file files) (load file)))))
 
+(defparameter +resource-manifest-file+ "resources.sexp"
+  "Unit-root manifest mapping resource-root keys to unit-relative directories.
+A source-distributed bundle carries this generated file in place of the
+resource registrations a compiled build bakes into its fasls.")
+
+(defun register-unit-resource-roots (dir)
+  "Register each (KEY . RELATIVE-DIR) entry of DIR's resource manifest, so the
+resource-root keys the unit's extensions declare resolve against the placed
+tree. Fail-soft at every level: an unreadable manifest or an entry that is not
+a pair of strings naming a relative directory contributes nothing, leaving
+those keys unresolved -- the same state as carrying no manifest."
+  (let ((manifest (merge-pathnames +resource-manifest-file+ dir)))
+    (when (uiop:file-exists-p manifest)
+      (dolist (entry (ignore-errors (uiop:safe-read-file-form manifest)))
+        (when (and (consp entry) (stringp (car entry)) (stringp (cdr entry)))
+          (let ((root (ignore-errors
+                       (uiop:ensure-directory-pathname
+                        (uiop:subpathname dir (cdr entry))))))
+            (when root
+              (buildlisp/resources:register-resource-root (car entry) root))))))))
+
 (defstruct (manifest-loader (:constructor make-manifest-loader (kind detect load)))
   "A directory-unit manifest strategy. KIND names it; DETECT maps a directory to
 a manifest value or NIL; LOAD loads the unit given (dir manifest files)."
@@ -251,7 +272,7 @@ manifest value; (values nil nil) when none applies and the convention governs."
         (return (values loader manifest))))))
 
 (defun load-files-for-unit (unit)
-  "Load UNIT's source under its package regime. A single file loads in kli/author. A directory dispatches on its manifest kind — an .asd loads via ASDF, honoring its declared component order; otherwise it honors its own package.lisp if present, else loads under a synthesized per-unit package so cross-file definitions resolve."
+  "Load UNIT's source under its package regime. A single file loads in kli/author. A directory first registers any bundled resource roots its manifest declares, then dispatches on its manifest kind — an .asd loads via ASDF, honoring its declared component order; otherwise it honors its own package.lisp if present, else loads under a synthesized per-unit package so cross-file definitions resolve."
   (kli/ext:require-capability :image/eval)
   (call-reporting-load-warnings
    (lambda ()
@@ -261,6 +282,7 @@ manifest value; (values nil nil) when none applies and the convention governs."
           (load (second unit))))
        (:dir
         (destructuring-bind (dir files) (rest unit)
+          (register-unit-resource-roots dir)
           (multiple-value-bind (loader manifest) (dir-manifest-loader dir)
             (if loader
                 (funcall (manifest-loader-load loader) dir manifest files)
