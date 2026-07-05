@@ -17,7 +17,14 @@ session unbound and the bridge still serves."
                                    :agent-session-service)))
     (when service
       (handler-case
-          (reset-agent-session service +mcp-serve-mode-id+ context)
+          ;; Session switching is capability-gated and the ambient boot
+          ;; subject carries no grants. The bind is the serve loop's own
+          ;; boot act, so it runs under a subject bounded to exactly the
+          ;; one capability it needs.
+          (let ((kli/ext:*call-subject*
+                  (kli/ext:make-subject
+                   :capabilities '(:agent/session/switch))))
+            (reset-agent-session service +mcp-serve-mode-id+ context))
         (error (condition)
           (format *error-output* "kli mcp-serve: session bind skipped (~A)~%"
                   condition))))))

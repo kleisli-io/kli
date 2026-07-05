@@ -260,6 +260,49 @@
                                      :find-command :scoped))
             "the bundled prompt is invisible when its extension is absent")))))
 
+(test prompts-refresh-rescans-late-loaded-extension
+  "An extension installed after the prompt-templates effect surfaces its
+   bundled prompt only through refresh-prompt-template-commands, and a
+   retraction plus refresh withdraws it."
+  (let* ((root (temp-config-root))
+         (global-dir (make-config-test-dir root "global"))
+         (builtin-dir (make-config-test-dir root "bundle-prompts")))
+    (write-prompt-file builtin-dir "scoped.md"
+                       (format nil "---~%description: Bundled scoped~%---~%Bundled $1"))
+    (let ((context (kli:make-kernel-host)))
+      (switch-to-extension-protocol context)
+      (let ((config:*global-config-dir* global-dir)
+            (config:*project-start-directory* (make-config-test-dir root "proj"))
+            (config:*extension-resource-roots* '()))
+        (config:register-extension-resource-roots
+         'bundle-fixture :prompts "kli/bundle-fixture/prompts")
+        (call-with-resource-root
+         "kli/bundle-fixture/prompts" builtin-dir
+         (lambda ()
+           (install-extensions context
+                               obj:*standard-object-extension-manifest*
+                               event:*events-extension-manifest*
+                               commands:*commands-extension-manifest*
+                               config:*config-extension-manifest*
+                               prompts:*prompt-templates-extension-manifest*)
+           (let ((provider (command-provider context))
+                 (protocol (kli:active-protocol context)))
+             (is (null (ext:provider-call provider :find-command :scoped))
+                 "the fixture's declared root is invisible before it loads")
+             (let ((handle (install-extension
+                            context *bundle-fixture-extension-manifest*)))
+               (is (null (ext:provider-call provider :find-command :scoped))
+                   "a late install alone does not re-scan prompt roots")
+               (prompts:refresh-prompt-template-commands context)
+               (is (not (null (ext:provider-call provider
+                                                 :find-command :scoped)))
+                   "refresh surfaces the late-loaded extension's prompt")
+               (with-extension-load-authority
+                 (ext:retract-manifest handle protocol context))
+               (prompts:refresh-prompt-template-commands context)
+               (is (null (ext:provider-call provider :find-command :scoped))
+                   "refresh withdraws a retracted extension's prompt")))))))))
+
 (defun install-prompt-stack-on-tui (context root body)
   (let ((global-dir (make-config-test-dir root "global")))
     (write-prompt-file (make-config-test-dir global-dir "prompts")

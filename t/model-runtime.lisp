@@ -450,6 +450,37 @@ request, so it leaks nothing into the runtime request table."
           (is (string= "summary text" text))
           (is (= before (hash-table-count (rt:runtime-requests runtime)))))))))
 
+(test (complete-text-returns-usage-as-second-value :fixture interactive-authority)
+  "The isolated completion grades its result: the provider-reported usage plist
+rides as the second value, NIL when the provider omits usage."
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (_session _agent-context sealed-context)
+        (make-runtime-session-and-context context)
+      (declare (ignore _session _agent-context))
+      (multiple-value-bind (_provider _model selection)
+          (register-runtime-model context "graded-provider" "graded-model"
+                                  :auth-required-p nil
+                                  :metadata '(:fake-deltas ("graded")
+                                              :fake-usage (:input-tokens 30
+                                                           :output-tokens 5)))
+        (declare (ignore _provider _model))
+        (multiple-value-bind (text usage)
+            (rt:complete-text (model-runtime-service context)
+                              selection sealed-context context)
+          (is (string= "graded" text))
+          (is (equal '(:input-tokens 30 :output-tokens 5) usage))))
+      (multiple-value-bind (_provider _model selection)
+          (register-runtime-model context "ungraded-provider" "ungraded-model"
+                                  :auth-required-p nil
+                                  :metadata '(:fake-deltas ("ungraded")))
+        (declare (ignore _provider _model))
+        (multiple-value-bind (text usage)
+            (rt:complete-text (model-runtime-service context)
+                              selection sealed-context context)
+          (is (string= "ungraded" text))
+          (is (null usage)))))))
+
 (test (complete-text-threads-instructions-onto-request :fixture interactive-authority)
   "INSTRUCTIONS ride on the isolated request as the system prompt for the call."
   (let ((captured nil))

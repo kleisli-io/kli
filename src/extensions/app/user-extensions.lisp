@@ -183,10 +183,14 @@ unambiguous system, so they fall through to the file-ordering convention."
 *error-output* itself - whether the compiler prints its diagnostics depends on
 how the image was started (sbcl --script suppresses them), so the report
 cannot be left to it. Each warning is muffled after reporting so environments
-that do print do not duplicate it."
+that do print do not duplicate it. Redefinition warnings are muffled without
+report: a source unit legitimately installs its cross-file macros twice
+(compile-time evaluation, then the fasl load), and a reload redefines every
+definition by design."
   (handler-bind ((warning (lambda (condition)
-                            (format *error-output* "~&~S: ~A~%"
-                                    (type-of condition) condition)
+                            (unless (typep condition 'sb-kernel:redefinition-warning)
+                              (format *error-output* "~&~S: ~A~%"
+                                      (type-of condition) condition))
                             (when (find-restart 'muffle-warning condition)
                               (muffle-warning condition)))))
     (funcall thunk)))
@@ -335,6 +339,10 @@ sparse deltas take the first word without replacing the config layer."
     (setf (gethash (user-extension-entry-id entry)
                    (installed-user-handles protocol))
           handle)
+    ;; The prompt-templates effect scans extension prompt roots at its own
+    ;; install; an extension arriving later must trigger a re-scan or its
+    ;; bundled prompts never become commands.
+    (kli/prompts:refresh-prompt-template-commands context)
     handle))
 
 (defun retract-user-extension (protocol id context)
@@ -342,6 +350,7 @@ sparse deltas take the first word without replacing the config layer."
     (when handle
       (retract-manifest handle protocol context)
       (remhash id (installed-user-handles protocol))
+      (kli/prompts:refresh-prompt-template-commands context)
       t)))
 
 (defun remote-install-pins (protocol)

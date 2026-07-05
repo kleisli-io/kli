@@ -5,12 +5,14 @@
 (defgeneric complete-text (runtime model-selection sealed-context context
                            &key instructions on-request)
   (:documentation "Run one isolated synchronous completion over SEALED-CONTEXT and
-return the response text. The request is built but never registered as a loop
-request, and the response is never appended to a session, so callers obtain
-summary or title text without mutating conversation state. INSTRUCTIONS rides on
-the request as the system prompt for the isolated call. ON-REQUEST, when given,
-is called with the request before streaming starts, handing callers the handle
-abort-model-request needs to interrupt the otherwise-anonymous call."))
+return (values text usage) -- the response text and the provider-reported usage
+plist, NIL when the provider omits usage. The request is built but never
+registered as a loop request, and the response is never appended to a session,
+so callers obtain summary or title text without mutating conversation state.
+INSTRUCTIONS rides on the request as the system prompt for the isolated call.
+ON-REQUEST, when given, is called with the request before streaming starts,
+handing callers the handle abort-model-request needs to interrupt the
+otherwise-anonymous call."))
 (defgeneric register-model-stream-adapter (runtime api adapter context))
 (defgeneric unregister-model-stream-adapter (runtime api context))
 (defgeneric find-model-stream-adapter (runtime api))
@@ -187,8 +189,9 @@ can surface the real cause instead of a missing-parameter error."
                                            :instructions instructions)))
       (when on-request
         (funcall on-request request))
-      (model-response-content
-       (stream-model-response provider request context)))))
+      (let ((response (stream-model-response provider request context)))
+        (values (model-response-content response)
+                (getf (model-response-metadata response) :usage))))))
 
 (defun convert-agent-message (message)
   (let ((role (message-role message)))

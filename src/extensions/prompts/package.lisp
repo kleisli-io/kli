@@ -3,8 +3,12 @@
   (:import-from #:kli
                 #:active-protocol)
   (:import-from #:kli/ext
+                #:contribution-name
                 #:contribution-state
                 #:defextension
+                #:effect-contribution
+                #:normalize-extension-id
+                #:protocol-installed-contributions
                 #:provider-call
                 #:require-capability-provider)
   (:import-from #:kli/interaction/commands
@@ -34,6 +38,7 @@
 
    #:register-prompt-template-commands
    #:unregister-prompt-template-commands
+   #:refresh-prompt-template-commands
    #:*prompt-templates-extension-manifest*))
 
 (in-package #:kli/prompts)

@@ -589,6 +589,7 @@ let
     ./t/debug.lisp
     ./t/relocation.lisp
     ./t/resource-root.lisp
+    ./t/load-warnings.lisp
     ./t/version.lisp
     ./t/dispatch.lisp
     ./t/cli-grammar.lisp

@@ -4,6 +4,14 @@ All notable changes to kli are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-07-05
+
+### Fixed
+
+- Prompt templates bundled by a runtime-installed extension now surface as slash commands. Installing or retracting a user extension re-runs the prompt-template scan, so `kli install <ext>` — and `/install`, `/uninstall`, `/enable`, `/disable`, `/reload` mid-session — immediately adds or withdraws the extension's prompt commands. Previously the scan ran once at profile install, so an extension loaded afterwards exposed its tools but none of its prompt commands.
+- `kli mcp-serve` no longer prints "session bind skipped (Subject lacks capability :AGENT/SESSION/SWITCH.)" on every serve. The serve loop's session bind runs under a subject carrying exactly the capability it needs, so the bind succeeds and tools that record a session id get a real one.
+- Cold-cache extension loads no longer print macro redefinition warnings. A source-distributed unit installs its cross-file macros twice by design (compile-time evaluation, then the fasl load); the resulting redefinition warnings are muffled while everything else still reports.
+
 ## [0.1.3] - 2026-07-05
 
 ### Fixed
