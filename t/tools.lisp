@@ -1370,8 +1370,27 @@ does, so Esc reaches a long eval instead of waiting it out."
              (is (string= "alpha gamma" (tool-result-text read-result)))))
       (ignore-errors (delete-file path)))))
 
-(test (write-tool-details-carry-old-and-new-content :fixture tool-authority)
-  "A new file writes with a nil old, and an overwrite captures the pre-supersede content, so the transcript can render the change as a diff."
+(defun tree-contains-key-p (tree key)
+  (cond ((atom tree) nil)
+        ((eq (car tree) key) t)
+        (t (or (tree-contains-key-p (car tree) key)
+               (tree-contains-key-p (cdr tree) key)))))
+
+(defun assert-private-diff-presentation (result path &key (require-hunks t))
+  (let* ((term (ext:tool-result-presentation result))
+         (updates (and (consp term) (getf term :updates)))
+         (update (first updates)))
+    (is (eq :diff (getf term :kind)))
+    (is (= 1 (length updates)))
+    (is (string= path (getf update :path)))
+    (when require-hunks
+      (is (consp (getf update :hunks))))
+    (dolist (key '(:old :new :preview-old :preview-new :patched :repaired))
+      (is (not (tree-contains-key-p term key))
+          (format nil "private presentation must not contain bulk key ~S" key)))))
+
+(test (write-tool-details-are-compact :fixture tool-authority)
+  "Write details expose model-facing mutation facts, not whole file bodies."
   (let* ((context (kli:make-kernel-host))
          (protocol (switch-to-extension-protocol context))
          (path (tool-test-path "write-details")))
@@ -1379,23 +1398,41 @@ does, so Esc reaches a long eval instead of waiting it out."
          (progn
            (install-extensions context
                                tools-filesystem:*write-tool-extension-manifest*)
-           (let ((details (ext:tool-result-details
-                           (ext:invoke-tool protocol
-                                            :write
-                                            (list :path (namestring path)
-                                                  :content "alpha")
-                                            context))))
+           (let* ((result (ext:invoke-tool protocol
+                                           :write
+                                           (list :path (namestring path)
+                                                 :content "alpha")
+                                           context))
+                  (details (ext:tool-result-details result)))
              (is (string= (namestring path) (getf details :path)))
+             (is (getf details :created-p))
+             (is (= 5 (getf details :characters)))
+             (is (= 1 (getf details :added)))
+             (is (= 0 (getf details :removed)))
              (is (null (getf details :old)))
-             (is (string= "alpha" (getf details :new))))
-           (let ((details (ext:tool-result-details
-                           (ext:invoke-tool protocol
-                                            :write
-                                            (list :path (namestring path)
-                                                  :content "beta")
-                                            context))))
-             (is (string= "alpha" (getf details :old)))
-             (is (string= "beta" (getf details :new)))))
+             (is (null (getf details :new)))
+             (is (stringp (getf details :new-sha256)))
+             (assert-private-diff-presentation result (namestring path))
+             (assert-compact-file-result-wire
+              (tool-result-responses-wire "write" result)
+              (namestring path)))
+           (let* ((result (ext:invoke-tool protocol
+                                           :write
+                                           (list :path (namestring path)
+                                                 :content "beta")
+                                           context))
+                  (details (ext:tool-result-details result)))
+             (is (getf details :overwritten-p))
+             (is (= 1 (getf details :added)))
+             (is (= 1 (getf details :removed)))
+             (is (null (getf details :old)))
+             (is (null (getf details :new)))
+             (is (stringp (getf details :old-sha256)))
+             (is (stringp (getf details :new-sha256)))
+             (assert-private-diff-presentation result (namestring path))
+             (assert-compact-file-result-wire
+              (tool-result-responses-wire "write" result)
+              (namestring path))))
       (ignore-errors (delete-file path)))))
 
 (test line-hash-fixtures
@@ -1460,7 +1497,7 @@ does, so Esc reaches a long eval instead of waiting it out."
                                           (list :path (namestring path))
                                           context)))
              (is (not (ext:tool-result-error-p result)))
-             (is (string= (format nil "1:~A alpha~%2:~A beta~%3:~A gamma"
+             (is (string= (format nil "1:~A|alpha~%2:~A|beta~%3:~A|gamma"
                                   (tools-filesystem:line-hash "alpha")
                                   (tools-filesystem:line-hash "beta")
                                   (tools-filesystem:line-hash "gamma"))
@@ -1481,6 +1518,34 @@ does, so Esc reaches a long eval instead of waiting it out."
                    (tools-filesystem:anchor-known-p protocol other 1 "aa"))))
       (ignore-errors (delete-file path))
       (ignore-errors (delete-file other)))))
+
+(test (read-tool-pipe-delimiter-disambiguates-indentation :fixture tool-authority)
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context))
+         (path (tool-test-typed-path "anchored-read-delimiter" "lisp"))
+         (lines (list "" " " "  (form)" "|symbol name|"))
+         (content (format nil "~{~A~%~}" lines)))
+    (unwind-protect
+         (progn
+           (install-extensions context
+                               tools-filesystem:*write-tool-extension-manifest*
+                               tools-filesystem:*read-tool-extension-manifest*)
+           (ext:invoke-tool protocol
+                            :write
+                            (list :path (namestring path) :content content)
+                            context)
+           (let ((result (ext:invoke-tool protocol
+                                          :read
+                                          (list :path (namestring path))
+                                          context)))
+             (is (not (ext:tool-result-error-p result)))
+             (is (string= (format nil "1:~A|~%2:~A| ~%3:~A|  (form)~%4:~A||symbol name|"
+                                  (tools-filesystem:line-hash "")
+                                  (tools-filesystem:line-hash " ")
+                                  (tools-filesystem:line-hash "  (form)")
+                                  (tools-filesystem:line-hash "|symbol name|"))
+                          (tool-result-text result)))))
+      (ignore-errors (delete-file path)))))
 
 (test (read-tool-range-slices-and-rejects-start-past-eof :fixture tool-authority)
   (let* ((context (kli:make-kernel-host))
@@ -1503,7 +1568,7 @@ does, so Esc reaches a long eval instead of waiting it out."
                                                 :end 99)
                                           context)))
              (is (not (ext:tool-result-error-p result)))
-             (is (string= (format nil "2:~A beta~%3:~A gamma"
+             (is (string= (format nil "2:~A|beta~%3:~A|gamma"
                                   (tools-filesystem:line-hash "beta")
                                   (tools-filesystem:line-hash "gamma"))
                           (tool-result-text result)))
@@ -1686,6 +1751,34 @@ than trust a read that happened in a session the user switched away from."
         (is (eq :replace (tools-filesystem:patch-op-kind op)))
         (is (null (tools-filesystem:patch-op-payload op)))))))
 
+(test hashline-parse-accepts-copied-pipe-anchors
+  (let ((sections (tools-filesystem:parse-hashline-patch
+                   (format nil "@@ /tmp/a.txt~%~
+                                + 2:ab|~%~
+                                ~~after~%~
+                                = 3:cc|..4:dd|~%~
+                                ~~replacement~%~
+                                - 5:ee|..6:ff|"))))
+    (destructuring-bind ((path . ops)) sections
+      (is (string= "/tmp/a.txt" path))
+      (is (= 3 (length ops)))
+      (let ((op (first ops)))
+        (is (eq :insert-after (tools-filesystem:patch-op-kind op)))
+        (is (= 2 (tools-filesystem:patch-op-start-line op)))
+        (is (string= "ab" (tools-filesystem:patch-op-start-hash op))))
+      (let ((op (second ops)))
+        (is (eq :replace (tools-filesystem:patch-op-kind op)))
+        (is (= 3 (tools-filesystem:patch-op-start-line op)))
+        (is (string= "cc" (tools-filesystem:patch-op-start-hash op)))
+        (is (= 4 (tools-filesystem:patch-op-end-line op)))
+        (is (string= "dd" (tools-filesystem:patch-op-end-hash op))))
+      (let ((op (third ops)))
+        (is (eq :delete (tools-filesystem:patch-op-kind op)))
+        (is (= 5 (tools-filesystem:patch-op-start-line op)))
+        (is (string= "ee" (tools-filesystem:patch-op-start-hash op)))
+        (is (= 6 (tools-filesystem:patch-op-end-line op)))
+        (is (string= "ff" (tools-filesystem:patch-op-end-hash op)))))))
+
 (test hashline-parse-rejects-malformed
   (signals error (tools-filesystem:parse-hashline-patch "= 1:aa..1:aa"))
   (signals error (tools-filesystem:parse-hashline-patch
@@ -1746,7 +1839,7 @@ than trust a read that happened in a session the user switched away from."
                                                         (tools-filesystem:line-hash "gamma")))
                                           context)))
              (is (not (ext:tool-result-error-p result)))
-             (is (string= (format nil "Edited ~A (+1 -2)~%2:~A BETA-GAMMA FUSED"
+             (is (string= (format nil "Edited ~A (+1 -2)~%2:~A|BETA-GAMMA FUSED"
                                   (namestring path)
                                   (tools-filesystem:line-hash "BETA-GAMMA FUSED"))
                           (tool-result-text result)))
@@ -1754,12 +1847,18 @@ than trust a read that happened in a session the user switched away from."
                     (file (first (getf details :files))))
                (is (= 1 (length (getf details :files))))
                (is (string= (namestring path) (getf file :path)))
-               (is (string= (format nil "alpha~%beta~%gamma~%delta-tail~%")
-                            (getf file :old)))
-               (is (string= (format nil "alpha~%BETA-GAMMA FUSED~%delta-tail~%")
-                            (getf file :new)))
                (is (= 1 (getf file :added)))
-               (is (= 2 (getf file :removed)))))
+               (is (= 2 (getf file :removed)))
+               (is (equal '((:start 2 :end 2))
+                          (getf file :changed-ranges)))
+               (is (null (getf file :old)))
+               (is (null (getf file :new)))
+               (is (stringp (getf file :old-sha256)))
+               (is (stringp (getf file :new-sha256)))
+               (assert-private-diff-presentation result (namestring path))
+               (assert-compact-file-result-wire
+                (tool-result-responses-wire "edit" result)
+                (namestring path))))
            (let ((read-result (ext:invoke-tool protocol
                                                :read
                                                (list :path (namestring path)
@@ -1824,7 +1923,7 @@ than trust a read that happened in a session the user switched away from."
                                                         (namestring path)))
                                           context)))
              (is (not (ext:tool-result-error-p result)))
-             (is (string= (format nil "Edited ~A (+2 -0)~%1:~A prepended~%4:~A appended"
+             (is (string= (format nil "Edited ~A (+2 -0)~%1:~A|prepended~%4:~A|appended"
                                   (namestring path)
                                   (tools-filesystem:line-hash "prepended")
                                   (tools-filesystem:line-hash "appended"))
@@ -1858,7 +1957,7 @@ than trust a read that happened in a session the user switched away from."
                                                         (tools-filesystem:line-hash "gamma")))
                                           context)))
              (is (not (ext:tool-result-error-p result)))
-             (is (string= (format nil "Edited ~A (+1 -1)~%2:~A inserted"
+             (is (string= (format nil "Edited ~A (+1 -1)~%2:~A|inserted"
                                   (namestring path)
                                   (tools-filesystem:line-hash "inserted"))
                           (tool-result-text result))))
@@ -1890,9 +1989,11 @@ than trust a read that happened in a session the user switched away from."
              (is (not (ext:tool-result-error-p result)))
              (is (string= (format nil "Edited ~A (+0 -2)" (namestring path))
                           (tool-result-text result)))
-             (is (string= "" (getf (first (getf (ext:tool-result-details result)
-                                                :files))
-                                   :new))))
+             (let ((file (first (getf (ext:tool-result-details result) :files))))
+               (is (= 0 (getf file :added)))
+               (is (= 2 (getf file :removed)))
+               (is (null (getf file :new)))
+               (is (stringp (getf file :new-sha256)))))
            (let ((read-result (ext:invoke-tool protocol
                                                :read
                                                (list :path (namestring path))
@@ -2157,9 +2258,6 @@ than trust a read that happened in a session the user switched away from."
                              (list :accept_repair candidate-id
                                    :path (namestring path))
                              context))
-                  (accepted-content (getf (first (getf (ext:tool-result-details accepted)
-                                                       :files))
-                                          :new))
                   (second-accept (ext:invoke-tool
                                   protocol
                                   :edit
@@ -2167,9 +2265,27 @@ than trust a read that happened in a session the user switched away from."
                                         :path (namestring path))
                                   context)))
              (is (not (ext:tool-result-error-p preview-result)))
+             (assert-private-diff-presentation preview-result (namestring path))
+             (let ((wire (tool-result-responses-wire "edit" preview-result)))
+               (is (search "\"repair-previews\":" wire))
+               (is (search "\"status\":\"repair-preview\"" wire))
+               (is (search "\"candidate-id\":" wire))
+               (is (search "\"patched-sha256\":" wire))
+               (is (search "\"repaired-sha256\":" wire))
+               (assert-no-bulk-file-result-wire wire))
              (is (not (ext:tool-result-error-p accepted)))
+             (assert-private-diff-presentation accepted (namestring path))
+             (assert-compact-file-result-wire
+              (tool-result-responses-wire "edit" accepted)
+              (namestring path))
              (is (search "Accepted repair" (tool-result-text accepted)))
-             (is (string= accepted-content (uiop:read-file-string path)))
+             (is (search "|" (tool-result-text accepted))
+                 "repair accept returns pipe-delimited fresh anchors")
+             (is (string= (getf (first (getf (ext:tool-result-details accepted)
+                                             :files))
+                                :new-sha256)
+                          (tools-filesystem::file-content-sha256
+                           (uiop:read-file-string path))))
              (is (ext:tool-result-error-p second-accept))
              (is (search "No pending edit repair candidate"
                          (tool-result-text second-accept)))))
@@ -2614,7 +2730,7 @@ Common Lisp source, leaves disk untouched, and keeps the candidate."
                                    :validate t :if-does-not-exist :ignore)))))
 
 (test (search-tool-anchors-matches-and-arms-cache :fixture tool-authority)
-  "Match lines carry *LINE:HH anchors and a matching file arms its whole anchor vector, so a search hit is directly editable."
+  "Match lines carry *LINE:HH| anchors and a matching file arms its whole anchor vector, so a search hit is directly editable."
   (let* ((context (kli:make-kernel-host))
          (protocol (switch-to-extension-protocol context))
          (path (tool-test-path "search-anchors")))
@@ -2635,7 +2751,7 @@ Common Lisp source, leaves disk untouched, and keeps the candidate."
                                            context))
                   (details (ext:tool-result-details result)))
              (is (not (ext:tool-result-error-p result)))
-             (is (string= (format nil "~A~%*1:~A alpha~%*3:~A alpha beta"
+             (is (string= (format nil "~A~%*1:~A|alpha~%*3:~A|alpha beta"
                                   (namestring (truename path))
                                   (tools-filesystem:line-hash "alpha")
                                   (tools-filesystem:line-hash "alpha beta"))
@@ -2669,7 +2785,7 @@ Common Lisp source, leaves disk untouched, and keeps the candidate."
                                                 :path (namestring path)
                                                 :context 1)
                                           context)))
-             (is (string= (format nil "~A~% 1:~A alpha~%*2:~A beta~% 3:~A alpha beta"
+             (is (string= (format nil "~A~% 1:~A|alpha~%*2:~A|beta~% 3:~A|alpha beta"
                                   (namestring (truename path))
                                   (tools-filesystem:line-hash "alpha")
                                   (tools-filesystem:line-hash "beta")
@@ -2702,7 +2818,7 @@ Common Lisp source, leaves disk untouched, and keeps the candidate."
              (is (search "one.txt" text))
              (is (search "three.txt" text))
              (is (not (search "two.txt" text)))
-             (is (search (format nil "*1:~A needle here"
+             (is (search (format nil "*1:~A|needle here"
                                  (tools-filesystem:line-hash "needle here"))
                          text)))
            (let ((result (ext:invoke-tool protocol
@@ -3050,7 +3166,15 @@ or allocating the whole content."
                     (details (ext:tool-result-details result)))
                (is (not (ext:tool-result-error-p result)))
                (is (null (getf details :old)))
-               (is (string= "beta" (getf details :new)))))
+               (is (null (getf details :new)))
+               (is (null (getf details :old-sha256)))
+               (is (stringp (getf details :new-sha256)))
+               (assert-private-diff-presentation result (namestring path)
+                                                 :require-hunks nil)
+               (is (search "re-read"
+                           (getf (first (getf (ext:tool-result-presentation result)
+                                              :updates))
+                                 :notice)))))
            (with-open-file (s path)
              (is (string= "beta" (read-line s)))))
       (ignore-errors (delete-file path)))))
@@ -3075,7 +3199,7 @@ or allocating the whole content."
                                          (list :pattern "beta"
                                                :path (namestring path))
                                          context)))
-             (is (search (format nil "*2:~A beta"
+             (is (search (format nil "*2:~A|beta"
                                  (tools-filesystem:line-hash "beta"))
                          (tool-result-text found))))
            (let ((edited (ext:invoke-tool protocol
@@ -3400,7 +3524,7 @@ full disk line, so the truncation is render-only."
                         (ext:invoke-tool protocol :read
                                          (list :path (namestring path))
                                          context))))
-             (is (string= (format nil "1:~A 0123456789[+10 chars]"
+             (is (string= (format nil "1:~A|0123456789[+10 chars]"
                                   (tools-filesystem:line-hash line))
                           text)
                  "head kept, tail quantified, anchor hashes the full line")
@@ -3633,7 +3757,7 @@ and no multi-match suffix."
                         (ext:invoke-tool protocol :search
                                          (list :pattern "beta" :path (namestring path))
                                          context))))
-             (is (search (format nil "*1:~A alpha beta"
+             (is (search (format nil "*1:~A|alpha beta"
                                  (tools-filesystem:line-hash "alpha beta"))
                          text))
              (is (not (search "[+" text)))

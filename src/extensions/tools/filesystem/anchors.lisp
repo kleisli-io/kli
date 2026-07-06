@@ -70,14 +70,22 @@ first *render-line-limit* chars."
                     (subseq line wstart wend)
                     (when (< wend len) (- len wend))))))))
 
+(defun render-anchored-row (line-number line &key (prefix "") rendered-line)
+  "Model-facing anchored source row. PREFIX is metadata before the anchor; the
+first | after LINE:HH is syntax, and source content starts after it."
+  (format nil "~A~D:~A|~A"
+          prefix line-number (line-hash line)
+          (or rendered-line (render-truncate-front line))))
+
 (defun render-anchored-lines (lines start end &optional (line-offset 0))
   (with-output-to-string (out)
     (loop for index from (1- start) below end
           for line = (svref lines index)
           do (unless (= index (1- start))
                (terpri out))
-             (format out "~D:~A ~A" (+ line-offset index 1) (line-hash line)
-                     (render-truncate-front line)))))
+             (write-string
+              (render-anchored-row (+ line-offset index 1) line)
+              out))))
 
 (defun render-raw-lines (lines start end)
   (with-output-to-string (out)

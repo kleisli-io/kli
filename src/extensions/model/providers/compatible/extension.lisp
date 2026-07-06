@@ -6,4 +6,7 @@
    (capability model/registry :contract model/registry/v1)
    (capability model/runtime :contract model/runtime/v1))
   (:provides
-   (effect compatible-provider #'install-compatible-providers #'retract-compatible-providers)))
+   (effect compatible-provider
+     #'install-compatible-providers
+     #'retract-compatible-providers
+     :refresh #'refresh-compatible-provider-contribution)))

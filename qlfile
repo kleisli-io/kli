@@ -7,6 +7,7 @@ ql drakma
 ql ironclad
 ql cl-base64
 ql cl-ppcre
+ql websocket-driver-client
 
 ;; GitHub-pinned systems (:ref mirrors the canonical cl-deps rev). The 3bmd repo
 ;; also provides 3bmd-ext-code-blocks and 3bmd-ext-tables.

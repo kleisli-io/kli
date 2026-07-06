@@ -10,6 +10,7 @@
                 #:tool-abort-requested-p
                 #:tool-parameter
                 #:required-tool-parameter
+                #:result-diff
                 #:tool-text-result)
   (:import-from #:kli/text
                 #:*render-line-limit*
@@ -28,7 +29,15 @@
                 #:create-scanner
                 #:scan)
   (:import-from #:difflib
-                #:unified-diff)
+                #:unified-diff
+                #:sequence-matcher
+                #:set-sequences
+                #:get-opcodes
+                #:opcode-tag
+                #:opcode-i1
+                #:opcode-i2
+                #:opcode-j1
+                #:opcode-j2)
   (:import-from #:paren-repair
                 #:repair
                 #:delimiter-imbalanced-p
@@ -49,7 +58,10 @@
    #:*search-output-limit*
    #:*search-scan-timeout-seconds*
    #:line-hash
+   #:render-anchored-row
    #:split-file-lines
+   #:compact-file-change-detail
+   #:file-diff-presentation-update
    #:clamp-range
    #:remember-read
    #:anchor-known-p

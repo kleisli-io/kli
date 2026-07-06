@@ -221,10 +221,18 @@ steer-agent keeps the synchronous idle catch-up."
         (emit-agent-event agent
                           context
                           :agent/message-end
-                          :payload (list :turn-id (object-id turn)
-                                         :request-id (object-id request)
-                                         :stop-reason (model-response-stop-reason
-                                                       response)))
+                          :payload (let ((base (list :turn-id (object-id turn)
+                                                     :request-id (object-id request)
+                                                     :stop-reason
+                                                     (model-response-stop-reason
+                                                      response)))
+                                         (timings (getf (model-response-metadata
+                                                        response)
+                                                       :timings)))
+                                     (if (and *capture-model-timings* timings)
+                                         (append base (list :timings
+                                                            (copy-tree timings)))
+                                         base)))
         response))))
 
 (defun register-response-tool-calls (turn response context)
@@ -363,11 +371,15 @@ unsupervised paths (steer drains, worker catch-ups) still surface.")
                                                  :state (agent-run-state run)
                                                  :text (run-final-response-text run)))
                                      (usage (latest-turn-usage
-                                             (agent-run-turns run))))
+                                             (agent-run-turns run)))
+                                     (timings (and *capture-model-timings*
+                                                   (latest-turn-timings
+                                                    (agent-run-turns run)))))
                                  (payload-with-duration
-                                  (if usage
-                                      (append base (list :usage usage))
-                                      base)
+                                  (append base
+                                          (when usage (list :usage usage))
+                                          (when timings
+                                            (list :timings timings)))
                                   (agent-run-started-at-real run))))
     ;; A steer or follow-up can land after the final turn's boundary drain
     ;; but before the :idle transition above -- no boundary remains to

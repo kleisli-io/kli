@@ -36,6 +36,15 @@
             ""))
   "A nine-event Codex Responses stream: reasoning then a two-fragment message.")
 
+(defparameter *responses-canned-websocket-stream*
+  (format nil "~{~A~%~}"
+          '("{\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}"
+            "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}"
+            "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Hello\"}"
+            "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}"
+            "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}"))
+  "Codex WebSocket messages as one JSON object per line.")
+
 (defun collect-responses-deltas (sse-string)
   (let ((deltas '()))
     (with-input-from-string (in sse-string)
@@ -384,6 +393,23 @@ content_filter reason does not, but keeps its usage."
                (transports:responses-url nil)))
   (is (string= "https://chatgpt.com/backend-api/codex/responses"
                (transports:responses-url "https://chatgpt.com/backend-api" "/codex/responses")))
+  (is (string= "wss://chatgpt.com:443/backend-api/codex/responses"
+               (transports::%codex-websocket-url
+                "https://chatgpt.com/backend-api/codex/responses")))
+  (let ((h (transports:build-codex-websocket-headers
+            "AT" "acct-1"
+            '(("openai-beta" . "responses=experimental") ("originator" . "kli"))
+            :session-id "sess-1"
+            :user-agent "kli (test)")))
+    (is (string= "Bearer AT" (cdr (assoc "authorization" h :test #'string=))))
+    (is (string= "responses_websockets=2026-02-06"
+                 (cdr (assoc "openai-beta" h :test #'string=))))
+    (is (string= "acct-1" (cdr (assoc "chatgpt-account-id" h :test #'string=))))
+    (is (string= "sess-1" (cdr (assoc "session_id" h :test #'string=))))
+    (is (string= "sess-1" (cdr (assoc "x-client-request-id" h :test #'string=))))
+    (is (string= "kli" (cdr (assoc "originator" h :test #'string=))))
+    (is (null (assoc "accept" h :test #'string-equal)))
+    (is (null (find "responses=experimental" h :key #'cdr :test #'string=))))
   (let ((cfg (models:make-provider-config
               :base-url "https://chatgpt.com/backend-api"
               :headers '(("openai-beta" . "responses=experimental") ("originator" . "kli")))))
@@ -392,7 +418,163 @@ content_filter reason does not, but keeps its usage."
     (is (string= "responses=experimental"
                  (cdr (assoc "openai-beta" (models:provider-config-headers cfg) :test #'string=))))))
 
-(defun responses-adapter-fixture (context &key transport-profile session-id instructions)
+(defun response-input-text (item)
+  (let ((content (gethash "content" item)))
+    (gethash "text" (if (vectorp content)
+                        (aref content 0)
+                        (first content)))))
+
+(defmacro with-rebound-function ((name function) &body body)
+  `(let ((original (fdefinition ',name)))
+     (unwind-protect
+          (progn
+            (setf (fdefinition ',name) ,function)
+            ,@body)
+       (setf (fdefinition ',name) original))))
+
+(test codex-websocket-continuation-builds-previous-response-delta
+  (let* ((state (transports::make-codex-websocket-session))
+         (first-body (transports::build-responses-body-object
+                      "gpt-5.5"
+                      '((:role :user :content "hi"))))
+         (collector (transports::make-responses-output-collector
+                     :response-id "resp-1"
+                     :text-fragments '("Hello"))))
+    (transports::%remember-codex-websocket-continuation
+     state first-body collector)
+    (let* ((next-body (transports::build-responses-body-object
+                       "gpt-5.5"
+                       '((:role :user :content "hi")
+                         (:role :assistant :content "Hello")
+                         (:role :user :content "again")))))
+      (multiple-value-bind (delta-body kind)
+          (transports::%websocket-request-body state next-body)
+        (is (eq :delta kind))
+        (is (string= "resp-1" (gethash "previous_response_id" delta-body)))
+        (is (= 1 (length (gethash "input" delta-body))))
+        (is (string= "again" (response-input-text (aref (gethash "input" delta-body) 0)))))))
+  (let* ((state (transports::make-codex-websocket-session))
+         (first-body (transports::build-responses-body-object
+                      "gpt-5.5"
+                      '((:role :user :content "hi"))
+                      :instructions "one"))
+         (collector (transports::make-responses-output-collector
+                     :response-id "resp-1"
+                     :text-fragments '("Hello"))))
+    (transports::%remember-codex-websocket-continuation
+     state first-body collector)
+    (let ((next-body (transports::build-responses-body-object
+                      "gpt-5.5"
+                      '((:role :user :content "hi")
+                        (:role :assistant :content "Hello")
+                        (:role :user :content "again"))
+                      :instructions "two")))
+      (multiple-value-bind (_body kind)
+          (transports::%websocket-request-body state next-body)
+        (declare (ignore _body))
+        (is (eq :full kind))
+        (is (null (transports::codex-websocket-session-continuation state)))))))
+
+(test codex-websocket-acquire-reuses-idle-cached-session
+  (let ((state (transports::make-codex-websocket-session))
+        (created 0))
+    (with-rebound-function
+        (transports::%make-codex-websocket
+         (lambda (url headers)
+           (declare (ignore url headers))
+           (list :socket (incf created))))
+      (let ((first (transports::%acquire-codex-websocket state "wss://example" nil)))
+        (is (transports::codex-websocket-acquisition-cached first))
+        (is (null (transports::codex-websocket-acquisition-reused first)))
+        (is (= 1 created))
+        (is (transports::codex-websocket-session-busy state))
+        (transports::%release-codex-websocket first t)))
+    (is (null (transports::codex-websocket-session-busy state)))
+    (with-rebound-function
+        (transports::%websocket-open-p
+         (lambda (socket)
+           (declare (ignore socket))
+           t))
+      (with-rebound-function
+          (transports::%make-codex-websocket
+           (lambda (url headers)
+             (declare (ignore url headers))
+             (list :socket (incf created))))
+        (let ((second (transports::%acquire-codex-websocket
+                       state "wss://example" nil)))
+          (is (transports::codex-websocket-acquisition-cached second))
+          (is (transports::codex-websocket-acquisition-reused second))
+          (is (= 1 created))
+          (is (eq (transports::codex-websocket-session-socket state)
+                  (transports::codex-websocket-acquisition-socket second)))
+          (transports::%release-codex-websocket second t))))))
+
+(test codex-websocket-busy-acquire-opens-one-off-and-leaves-cache-busy
+  (let ((state (transports::make-codex-websocket-session :busy t))
+        (created 0))
+    (with-rebound-function
+        (transports::%make-codex-websocket
+         (lambda (url headers)
+           (declare (ignore url headers))
+           (list :socket (incf created))))
+      (let ((acquisition (transports::%acquire-codex-websocket
+                          state "wss://example" nil)))
+        (is (null (transports::codex-websocket-acquisition-cached acquisition)))
+        (is (transports::codex-websocket-acquisition-busy-fallback acquisition))
+        (is (= 1 created))
+        (is (transports::codex-websocket-session-busy state))
+        (transports::%release-codex-websocket acquisition t)
+        (is (transports::codex-websocket-session-busy state))))))
+
+(test codex-websocket-acquire-errors-clear-only-owned-cache-claim
+  (let ((busy-state (transports::make-codex-websocket-session :busy t))
+        (idle-state (transports::make-codex-websocket-session)))
+    (with-rebound-function
+        (transports::%make-codex-websocket
+         (lambda (url headers)
+           (declare (ignore url headers))
+           (error "connect failed")))
+      (signals error
+        (transports::%acquire-codex-websocket busy-state "wss://example" nil))
+      (is (transports::codex-websocket-session-busy busy-state))
+      (signals error
+        (transports::%acquire-codex-websocket idle-state "wss://example" nil))
+      (is (null (transports::codex-websocket-session-busy idle-state))))))
+
+(test codex-websocket-busy-continuation-context-forces-full-body
+  (let* ((state (transports::make-codex-websocket-session))
+         (first-body (transports::build-responses-body-object
+                      "gpt-5.5"
+                      '((:role :user :content "hi"))))
+         (collector (transports::make-responses-output-collector
+                     :response-id "resp-1"
+                     :text-fragments '("Hello"))))
+    (transports::%remember-codex-websocket-continuation
+     state first-body collector)
+    (let ((continuation (transports::codex-websocket-session-continuation state)))
+      (setf (transports::codex-websocket-session-busy state) t)
+      (let* ((acquisition (transports::%claim-codex-websocket-session state))
+             (body-state (transports::%codex-websocket-body-state
+                          state acquisition t))
+             (cached-context-p
+               (transports::%codex-websocket-effective-cached-context-p
+                acquisition t))
+             (next-body (transports::build-responses-body-object
+                         "gpt-5.5"
+                         '((:role :user :content "hi")
+                           (:role :assistant :content "Hello")
+                           (:role :user :content "again")))))
+        (multiple-value-bind (request-body kind)
+            (transports::%websocket-request-body body-state next-body
+                                                 cached-context-p)
+          (is (eq :full kind))
+          (is (null (gethash "previous_response_id" request-body)))
+          (is (= 3 (length (gethash "input" request-body))))
+          (is (eq continuation
+                  (transports::codex-websocket-session-continuation state))))))))
+
+(defun responses-adapter-fixture (context &key transport-profile session-id
+                                            instructions transport-mode)
   "Register an openai-codex provider plus model and return (values provider request).
 TRANSPORT-PROFILE seeds provider wire-shape facts. SESSION-ID and INSTRUCTIONS ride
 along on the request for exercising the codex compatibility path."
@@ -410,10 +592,17 @@ along on the request for exercising the codex compatibility path."
                  registry
                  (models:make-model-definition
                   "openai-codex" "gpt-5.3-codex" :openai-responses
-                  :option-schemas (list (test-reasoning-effort-schema)))
+                  :option-schemas
+                  (append (list (test-reasoning-effort-schema))
+                          (when transport-mode
+                            (list (test-transport-schema)))))
                  context))
          (selection (models:select-model registry model context
-                                         :options (test-reasoning-options :high))))
+                                         :options
+                                         (append (test-reasoning-options :high)
+                                                 (when transport-mode
+                                                   (list :transport
+                                                         transport-mode))))))
     (multiple-value-bind (_session _agent sealed-context)
         (make-runtime-session-and-context context)
       (declare (ignore _session _agent))
@@ -451,6 +640,301 @@ along on the request for exercising the codex compatibility path."
               (is (string= " world" (rt:assistant-delta-text (sixth seq))))
               (is (equal '(:input-tokens 10 :output-tokens 5 :total-tokens 15 :cache-read-tokens 4)
                          (rt:usage-delta-usage (eighth seq)))))))))))
+
+(test (codex-websocket-adapter-sends-delta-after-first-full-request :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id"
+                                  :text-verbosity "low")
+             :session-id "sess-ws")
+          (let ((captured-bodies '())
+                (captured-headers nil))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url req))
+                      (push body captured-bodies)
+                      (setf captured-headers headers)
+                      (make-string-input-stream *responses-canned-websocket-stream*))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")
+                      (:role :assistant :content "Hello")
+                      (:role :user :content "again")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil)))
+            (let* ((bodies (reverse captured-bodies))
+                   (first-body (com.inuoe.jzon:parse (first bodies)))
+                   (second-body (com.inuoe.jzon:parse (second bodies))))
+              (is (= 2 (length bodies)))
+              (is (string= "response.create" (gethash "type" first-body)))
+              (is (null (gethash "previous_response_id" first-body)))
+              (is (= 1 (length (gethash "input" first-body))))
+              (is (string= "response.create" (gethash "type" second-body)))
+              (is (string= "resp-1" (gethash "previous_response_id" second-body)))
+              (is (= 1 (length (gethash "input" second-body))))
+              (is (string= "again"
+                           (response-input-text
+                            (aref (gethash "input" second-body) 0)))))
+            (is (string= "responses_websockets=2026-02-06"
+                         (cdr (assoc "openai-beta" captured-headers
+                                     :test #'string=))))
+            (is (string= "sess-ws"
+                         (cdr (assoc "session_id" captured-headers
+                                     :test #'string=))))
+            (let ((state (gethash "sess-ws"
+                                  transports::*codex-websocket-sessions*)))
+              (is (= 2 (transports::codex-websocket-session-requests state)))
+              (is (= 1 (transports::codex-websocket-session-full-requests state)))
+              (is (= 1 (transports::codex-websocket-session-delta-requests state))))))))))
+
+(test (codex-websocket-adapter-busy-cache-sends-full-body :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id"
+                                  :text-verbosity "low")
+             :session-id "sess-ws-busy")
+          (let ((captured-bodies '()))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url headers req))
+                      (push body captured-bodies)
+                      (make-string-input-stream *responses-canned-websocket-stream*))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (let* ((state (gethash "sess-ws-busy"
+                                     transports::*codex-websocket-sessions*))
+                     (continuation
+                       (transports::codex-websocket-session-continuation state)))
+                (setf (transports::codex-websocket-continuation-last-response-id
+                       continuation)
+                      "cached-resp"
+                      (transports::codex-websocket-session-busy state)
+                      t)
+                (setf (rt:model-request-model-messages request)
+                      '((:role :user :content "hi")
+                        (:role :assistant :content "Hello")
+                        (:role :user :content "again")))
+                (transports:openai-responses-adapter
+                 provider request context
+                 :emit (lambda (d) (declare (ignore d)) nil))
+                (let* ((bodies (reverse captured-bodies))
+                       (second-body (com.inuoe.jzon:parse (second bodies))))
+                  (is (= 2 (length bodies)))
+                  (is (null (gethash "previous_response_id" second-body)))
+                  (is (= 3 (length (gethash "input" second-body))))
+                  (is (string= "cached-resp"
+                               (transports::codex-websocket-continuation-last-response-id
+                                (transports::codex-websocket-session-continuation
+                                 state))))
+                  (is (transports::codex-websocket-session-busy state))
+                  (is (= 1 (transports::codex-websocket-session-requests state)))
+                  (is (= 1 (transports::codex-websocket-session-full-requests state)))
+                  (is (= 0 (transports::codex-websocket-session-delta-requests state))))))))))))
+
+(test (codex-transport-option-sse-forces-http-path :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id"
+                                  :text-verbosity "low")
+             :transport-mode :sse
+             :session-id "sess-sse")
+          (let ((http-called nil)
+                (websocket-called nil))
+            (let ((transports:*responses-http*
+                    (lambda (url body headers)
+                      (declare (ignore url body headers))
+                      (setf http-called t)
+                      (values (make-string-input-stream *responses-canned-stream*) 200)))
+                  (transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url body headers req))
+                      (setf websocket-called t)
+                      (make-string-input-stream *responses-canned-websocket-stream*))))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil)))
+            (is (eq t http-called))
+            (is (null websocket-called))
+            (is (null (gethash "sess-sse"
+                               transports::*codex-websocket-sessions*)))))))))
+
+(test (codex-websocket-transport-sends-full-bodies-without-cache :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id"
+                                  :text-verbosity "low")
+             :transport-mode :websocket
+             :session-id "sess-ws-full")
+          (let ((captured-bodies '()))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url headers req))
+                      (push body captured-bodies)
+                      (make-string-input-stream *responses-canned-websocket-stream*))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")
+                      (:role :assistant :content "Hello")
+                      (:role :user :content "again")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil)))
+            (let* ((bodies (reverse captured-bodies))
+                   (second-body (com.inuoe.jzon:parse (second bodies)))
+                   (state (gethash "sess-ws-full"
+                                   transports::*codex-websocket-sessions*)))
+              (is (= 2 (length bodies)))
+              (is (null (gethash "previous_response_id" second-body)))
+              (is (= 3 (length (gethash "input" second-body))))
+              (is (= 2 (transports::codex-websocket-session-requests state)))
+              (is (= 2 (transports::codex-websocket-session-full-requests state)))
+              (is (= 0 (transports::codex-websocket-session-delta-requests state)))
+              (is (null (transports::codex-websocket-session-continuation state))))))))))
+
+(test (codex-websocket-timings-include-transport-debug-fields :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (let ((rt:*capture-model-timings* t))
+    (multiple-value-bind (context protocol) (model-runtime-test-context)
+      (declare (ignore protocol))
+      (with-temp-credentials (path)
+        (let ((store (credential-store context)))
+          (auth:store-oauth-credential store "openai-codex" context
+                                       :access "AT" :refresh "RT"
+                                       :expires (+ (get-universal-time) 3600)
+                                       :account-id "acct-1" :path path)
+          (multiple-value-bind (provider request)
+              (responses-adapter-fixture
+               context
+               :transport-profile '(:developer-role t :session-identity t
+                                    :websocket-continuation t
+                                    :session-header "session-id"
+                                    :text-verbosity "low")
+               :transport-mode :websocket-cached
+               :session-id "sess-ws-timing")
+            (let ((stream (rt:make-model-stream request)))
+              (setf (rt:model-request-stream request) stream
+                    (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (let ((transports:*codex-websocket-stream*
+                      (lambda (url body headers req)
+                        (declare (ignore url body headers req))
+                        (make-string-input-stream *responses-canned-websocket-stream*))))
+                (transports:openai-responses-adapter
+                 provider request context
+                 :emit (lambda (d) (rt:handle-model-delta stream d context))))
+              (let* ((timings (getf (rt:inspect-model-stream stream) :timings))
+                     (payload (find :request-payload timings
+                                    :key (lambda (entry) (getf entry :key))))
+                     (detail (getf payload :detail))
+                     (stats (getf detail :websocket-stats)))
+                (is (eq :openai-codex-websocket (getf detail :api)))
+                (is (eq :websocket-cached (getf detail :transport-mode)))
+                (is (eq t (getf detail :cached-context)))
+                (is (eq :full (getf detail :request-kind)))
+                (is (= 1 (getf detail :input-items)))
+                (is (= 1 (getf detail :full-input-items)))
+                (is (null (getf detail :delta-input-items)))
+                (is (= 1 (getf stats :session-requests)))
+                (is (= 1 (getf stats :session-full-requests)))
+                (is (= 0 (getf stats :session-delta-requests)))))))))))
+
+(test (responses-adapter-records-transport-timings :fixture interactive-authority)
+  (let ((rt:*capture-model-timings* t))
+    (multiple-value-bind (context protocol) (model-runtime-test-context)
+      (declare (ignore protocol))
+      (with-temp-credentials (path)
+        (let ((store (credential-store context)))
+          (auth:store-oauth-credential store "openai-codex" context
+                                       :access "AT" :refresh "RT"
+                                       :expires (+ (get-universal-time) 3600)
+                                       :account-id "acct-1" :path path)
+          (multiple-value-bind (provider request) (responses-adapter-fixture context)
+            (let* ((stream (rt:make-model-stream request))
+                   (transports:*responses-http*
+                     (lambda (url body headers)
+                       (declare (ignore url body headers))
+                       (values (make-string-input-stream *responses-canned-stream*) 200))))
+              (setf (rt:model-request-stream request) stream)
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (rt:handle-model-delta stream d context)))
+              (let* ((timings (getf (rt:inspect-model-stream stream) :timings))
+                     (keys (mapcar (lambda (entry) (getf entry :key)) timings))
+                     (payload (find :request-payload timings
+                                    :key (lambda (entry) (getf entry :key))))
+                     (provider-event (find :first-provider-event timings
+                                           :key (lambda (entry) (getf entry :key)))))
+                (dolist (key '(:request-payload :http-response
+                               :first-provider-event :first-thinking-delta
+                               :first-visible-delta :first-usage-delta))
+                  (is (member key keys)))
+                (is (plusp (getf (getf payload :detail) :bytes)))
+                (is (eq :openai-responses (getf (getf payload :detail) :api)))
+                (is (equal '("reasoning.encrypted_content")
+                           (getf (getf payload :detail) :include)))
+                (is (string= "response.created"
+                             (getf (getf provider-event :detail)
+                                   :event-name)))))))))))
 
 (test (responses-adapter-tracks-stream-closer-through-lifecycle :fixture interactive-authority)
   (multiple-value-bind (context protocol) (model-runtime-test-context)

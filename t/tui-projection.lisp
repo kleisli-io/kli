@@ -183,18 +183,25 @@ bounded expanded preview on the call presentation."
                         buffer)))
       (is (eq :error (tui-transcript:event-status end))))))
 
-(test projection-tool-execution-end-carries-details
-  "The details plist travels payload to event by reference. A payload without details projects a nil slot, so non-file tools are untouched."
-  (let ((buffer (tui-transcript:make-projection-buffer))
-        (details '(:path "/tmp/x" :old "a" :new "b")))
+(test projection-tool-execution-end-carries-details-and-presentation
+  "Public details and private presentation terms travel on separate slots. A
+payload without details projects nil, so non-file tools are untouched."
+  (let* ((buffer (tui-transcript:make-projection-buffer))
+         (details '(:path "/tmp/x" :added 1 :removed 1
+                    :changed-ranges ((:start 1 :end 1))))
+         (term (ext:result-diff
+                :updates (list (tools-filesystem:file-diff-presentation-update
+                                "/tmp/x" "a" "b")))))
     (project :agent/tool-execution-start
              '(:execution-id :e7 :tool-name :edit) buffer)
     (let ((end (project :agent/tool-execution-end
                         (list :execution-id :e7 :error-p nil
                               :result-text "Edited /tmp/x (+1 -1)"
-                              :details details)
+                              :details details
+                              :result-term term)
                         buffer)))
-      (is (eq details (tui-transcript:event-details end))))
+      (is (eq details (tui-transcript:event-details end)))
+      (is (eq term (tui-transcript:event-presentation end))))
     (project :agent/tool-execution-start
              '(:execution-id :e8 :tool-name :bash) buffer)
     (let ((end (project :agent/tool-execution-end

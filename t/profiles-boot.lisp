@@ -1,6 +1,16 @@
 (in-package #:kli/tests)
 (in-suite all)
 
+(defun boot-write-prompt-file (dir name string)
+  (write-config-test-file (merge-pathnames name dir) string))
+
+(defun boot-skill-md (name description &key body extra)
+  (format nil "---~%name: ~A~%description: ~A~%~@[~A~%~]---~%~A"
+          name description extra (or body "Skill body.")))
+
+(defun boot-write-skill-file (dir string)
+  (write-config-test-file (merge-pathnames "SKILL.md" dir) string))
+
 (test select-profile-name-prefers-arg-then-env-then-default
   "Boot selects a profile by name -- a --profile argument, then the KLI_PROFILE environment fallback, then the default."
   (is (eq :headless
@@ -262,6 +272,147 @@ reuse must reread the runtime file so configured compatible models appear."
           (if old-profile
               (setf (uiop:getenv app::+profile-env-var+) old-profile)
               (sb-posix:unsetenv app::+profile-env-var+)))))))
+
+(test reuse-boot-snapshot-refreshes-runtime-prompt-commands
+  "Prompt templates added under the runtime config roots after snapshot capture
+surface when the boot snapshot is reused."
+  (let* ((root (temp-config-root))
+         (global-dir (make-config-test-dir root "global"))
+         (project-dir (make-config-test-dir root "proj"))
+         (settings (make-hash-table :test #'equal))
+         (old-profile (uiop:getenv app::+profile-env-var+)))
+    (let ((app::*boot-snapshot-context* nil)
+          (app:*current-context* nil)
+          (app:*current-app* nil)
+          (app:*default-profile* :interactive-terminal)
+          (config:*global-config-dir* global-dir)
+          (config:*project-start-directory* project-dir))
+      (unwind-protect
+           (progn
+             (sb-posix:unsetenv app::+profile-env-var+)
+             (let* ((snapshot (app:main :profile :interactive-terminal
+                                        :settings settings))
+                    (provider (command-provider snapshot)))
+               (is (null (ext:provider-call provider :find-command :snap)))
+               (boot-write-prompt-file (make-config-test-dir global-dir "prompts")
+                                       "snap.md"
+                                       (format nil "---~%description: Runtime snap~%---~%Hello $1"))
+               (setf app::*boot-snapshot-context* snapshot)
+               (let ((reused (app::reuse-boot-snapshot settings)))
+                 (is (eq snapshot reused))
+                 (let ((command (ext:provider-call provider :find-command :snap)))
+                   (is (not (null command)))
+                   (is (equal "Runtime snap"
+                              (commands:command-description command)))))))
+        (if old-profile
+            (setf (uiop:getenv app::+profile-env-var+) old-profile)
+            (sb-posix:unsetenv app::+profile-env-var+))))))
+
+(test reuse-boot-snapshot-refreshes-runtime-skills
+  "Skills added under runtime config roots after snapshot capture register their
+commands, advertisement, and sigil expansion when the boot snapshot is reused."
+  (let* ((root (temp-config-root))
+         (global-dir (make-config-test-dir root "global"))
+         (project-dir (make-config-test-dir root "proj"))
+         (settings (make-hash-table :test #'equal))
+         (old-profile (uiop:getenv app::+profile-env-var+)))
+    (let ((app::*boot-snapshot-context* nil)
+          (app:*current-context* nil)
+          (app:*current-app* nil)
+          (app:*default-profile* :interactive-terminal)
+          (config:*global-config-dir* global-dir)
+          (config:*project-start-directory* project-dir)
+          (skills:*user-agents-skills-directory*
+            (make-config-test-dir root "user-agents-absent")))
+      (unwind-protect
+           (progn
+             (sb-posix:unsetenv app::+profile-env-var+)
+             (let* ((snapshot (app:main :profile :interactive-terminal
+                                        :settings settings))
+                    (provider (command-provider snapshot))
+                    (service (agent-session-service snapshot)))
+               (is (null (ext:provider-call provider :find-command
+                                            "skill:grilling")))
+               (boot-write-skill-file
+                (make-config-test-dir global-dir "skills" "grilling")
+                (boot-skill-md "grilling" "Stress-test a plan."
+                               :body "Ask hard questions."))
+               (boot-write-skill-file
+                (make-config-test-dir global-dir "skills" "writing-great-skills")
+                (boot-skill-md "writing-great-skills"
+                               "Hidden skill."
+                               :body "Hidden body."
+                               :extra "disable-model-invocation: true"))
+               (setf app::*boot-snapshot-context* snapshot)
+               (let ((reused (app::reuse-boot-snapshot settings)))
+                 (is (eq snapshot reused))
+                 (is (not (null (ext:provider-call provider :find-command
+                                                   "skill:grilling"))))
+                 (multiple-value-bind (expanded images cancelled-p)
+                     (funcall (agent-session:session-prompt-expansion-policy
+                               service)
+                              :expand "$grilling" nil)
+                   (declare (ignore images cancelled-p))
+                   (is (search "<skill name=\"grilling\"" expanded))
+                   (is (search "Ask hard questions." expanded)))
+                 (let ((prompt
+                         (funcall (agent-session:session-context-transform-policy
+                                   service)
+                                  :system-prompt "")))
+                   (is (search "<name>grilling</name>" prompt))
+                   (is (not (search "writing-great-skills" prompt))
+                       "disable-model-invocation skills stay out of the model advertisement")))))
+        (if old-profile
+            (setf (uiop:getenv app::+profile-env-var+) old-profile)
+            (sb-posix:unsetenv app::+profile-env-var+))))))
+
+(test boot-context-falls-back-when-runtime-refresh-fails
+  "A refresh failure abandons snapshot reuse for this boot and records a
+diagnostic on the full profile install."
+  (let* ((root (temp-config-root))
+         (global-dir (make-config-test-dir root "global"))
+         (project-dir (make-config-test-dir root "proj"))
+         (settings (make-hash-table :test #'equal))
+         (old-profile (uiop:getenv app::+profile-env-var+)))
+    (let ((app::*boot-snapshot-context* nil)
+          (app:*current-context* nil)
+          (app:*current-app* nil)
+          (app:*default-profile* :interactive-terminal)
+          (config:*global-config-dir* global-dir)
+          (config:*project-start-directory* project-dir))
+      (unwind-protect
+           (progn
+             (sb-posix:unsetenv app::+profile-env-var+)
+             (let* ((snapshot (app:main :profile :interactive-terminal
+                                        :settings settings))
+                    (protocol (kli:active-protocol snapshot))
+                    (boom
+                      (ext:make-effect-contribution
+                       :name :refresh-boom
+                       :installer (lambda (protocol contribution context)
+                                    (declare (ignore protocol contribution context))
+                                    nil)
+                       :retractor (lambda (protocol contribution context)
+                                    (declare (ignore protocol contribution context))
+                                    nil)
+                       :refresh (lambda (protocol contribution context)
+                                  (declare (ignore protocol contribution context))
+                                  (error "refresh boom")))))
+               (ext:install-contribution protocol boom snapshot)
+               (setf app::*boot-snapshot-context* snapshot)
+               (let* ((booted (app::boot-context settings))
+                      (booted-protocol (kli:active-protocol booted)))
+                 (is (not (eq snapshot booted))
+                     "fallback uses a freshly installed context")
+                 (is (eq booted app:*current-context*))
+                 (is (ext:extension-loaded-p booted-protocol :tui-app))
+                 (is (some (lambda (entry)
+                             (and (eq (car entry) :snapshot-reuse)
+                                  (search "refresh boom" (cdr entry))))
+                           (app:extension-diagnostics booted-protocol))))))
+        (if old-profile
+            (setf (uiop:getenv app::+profile-env-var+) old-profile)
+            (sb-posix:unsetenv app::+profile-env-var+))))))
 
 (test extension-enabled-p-layers-profile-deltas-over-config
   (let ((entry (app::make-user-extension-entry :id :tool :metadata '()))

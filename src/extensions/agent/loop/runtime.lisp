@@ -92,12 +92,22 @@ pass. The rest wait for the next delivery point."
   (let ((response (agent-turn-response turn)))
     (and response (getf (model-response-metadata response) :usage))))
 
+(defun turn-response-timings (turn)
+  (let ((response (agent-turn-response turn)))
+    (and response (getf (model-response-metadata response) :timings))))
+
 (defun latest-turn-usage (turns)
   "Usage of the most recent turn that reported any, or NIL. This is the context-occupancy snapshot, not a sum. TURNS is newest-first, and each turn's input-tokens already subsumes every prior turn's messages, so the newest turn's total reflects the whole in-flight context. Summing across turns would re-count that context once per turn and overshoot the window. Returns a fresh list so the event payload does not alias the response metadata."
   (loop for turn in turns
         for usage = (turn-response-usage turn)
         when usage
           return (copy-list usage)))
+
+(defun latest-turn-timings (turns)
+  (loop for turn in turns
+        for timings = (turn-response-timings turn)
+        when timings
+          return (copy-tree timings)))
 
 (defun run-final-response-text (run)
   "Final assistant text of RUN: the newest completed turn's response content on a completed run, NIL when the run aborted, errored, or produced no completed response. Empty final content yields the empty string, not NIL, so callers can distinguish a silent reply from no reply. RUN turns are newest-first."

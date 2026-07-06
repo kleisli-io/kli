@@ -49,7 +49,8 @@ returns plain text and the loop terminates instead of re-emitting a tool call."
   (ext:make-tool-result
    :content (list (ext:make-tool-text-content "aborted"))))
 
-(defparameter *agent-loop-details-fixture* '(:path "/tmp/x" :old "a" :new "b"))
+(defparameter *agent-loop-details-fixture*
+  '(:path "/tmp/x" :added 1 :removed 1 :changed-ranges ((:start 1 :end 1))))
 
 (defun run-agent-loop-details-tool (tool parameters context &key call-id on-update)
   "Echo with a structured details plist, then swap to the reply selection so

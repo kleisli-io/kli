@@ -241,6 +241,47 @@ loop thread and resolve from the worker."
           (is (equal '(:message-start :message-end)
                      (mapcar (lambda (event) (getf event :type)) events))))))))
 
+(test (model-runtime-inspection-reports-stream-timings :fixture interactive-authority)
+  (let ((rt:*capture-model-timings* t))
+    (multiple-value-bind (context protocol)
+        (model-runtime-test-context)
+      (declare (ignore protocol))
+      (multiple-value-bind (_session _agent-context sealed-context)
+          (make-runtime-session-and-context context)
+        (declare (ignore _session _agent-context))
+        (multiple-value-bind (provider _model selection)
+            (register-runtime-model
+             context
+             "timing-provider"
+             "timing-model"
+             :auth-required-p nil
+             :metadata '(:fake-blocks
+                         ((:kind :thinking :text ("Thinking."))
+                          (:kind :text :text ("Visible.")))))
+          (declare (ignore _model))
+          (let* ((request (rt:make-model-request (model-runtime-service context)
+                                                 selection
+                                                 sealed-context
+                                                 context))
+                 (response (rt:stream-model-response provider request context))
+                 (stream (rt:model-request-stream request))
+                 (inspection (rt:inspect-model-stream stream))
+                 (timings (getf inspection :timings))
+                 (keys (mapcar (lambda (entry) (getf entry :key)) timings)))
+            (dolist (key '(:request-start :first-block-start
+                           :first-thinking-delta :first-visible-delta
+                           :completion))
+              (is (member key keys)))
+            (is (every (lambda (entry)
+                         (let ((elapsed (getf entry :elapsed-ms)))
+                           (and (integerp elapsed) (not (minusp elapsed)))))
+                       timings))
+            (is (equal timings (getf (rt:model-response-metadata response)
+                                     :timings)))
+            (is (equal timings (getf (getf (rt:inspect-model-response response)
+                                           :metadata)
+                                     :timings)))))))))
+
 (test (model-runtime-fake-provider-can-emit-tool-call :fixture interactive-authority)
   (multiple-value-bind (context protocol)
       (model-runtime-test-context)

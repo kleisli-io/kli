@@ -168,6 +168,11 @@ command workers finish requests concurrently.")))
    (events
     :initform '()
     :accessor model-stream-events)
+   (timings
+    :initform '()
+    :accessor model-stream-timings
+    :documentation "Newest-first timing markers for request/transport phases.
+Markers use internal-real-time ticks so latency offsets are monotonic.")
    (state
     :initform :pending
     :accessor model-stream-state)

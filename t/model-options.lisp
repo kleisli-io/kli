@@ -14,7 +14,10 @@
               (models:find-model-option-definition "service-tier"))))
   (is (equal '(:off :in-memory :24h)
              (models:model-option-definition-enum-values
-              (models:find-model-option-definition "prompt-cache-retention")))))
+              (models:find-model-option-definition "prompt-cache-retention"))))
+  (is (equal '(:auto :sse :websocket :websocket-cached)
+             (models:model-option-definition-enum-values
+              (models:find-model-option-definition "transport")))))
 
 (test model-options-schema-validation-and-canonicalization
   (let ((reasoning (models:make-model-option-schema

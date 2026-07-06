@@ -54,6 +54,10 @@ and the changed region's anchors are armed."
              (is (string= (format nil "(defun f ()~%  (* 3 4))~%") disk)
                  "the match is spliced byte-exact")
              (is (search "Edited" text))
+             (assert-private-diff-presentation result (namestring path))
+             (assert-compact-file-result-wire
+              (tool-result-responses-wire "edit-sexp" result)
+              (namestring path))
              (is (eq :valid (tools-filesystem:anchor-known-p
                              protocol path 2
                              (tools-filesystem:line-hash "  (* 3 4))")))
@@ -352,7 +356,7 @@ keeps its context indent and sibling forms stay byte-exact."
 
 (test (edit-sexp-shows-a-unified-diff :fixture tool-authority)
   "A replace that deletes lines renders a unified diff in the visible result --
-removed (-) old lines and added (+) new lines that keep their LINE:HH anchors --
+removed (-) old lines and added (+) new lines that keep their LINE:HH| anchors --
 so the change is legible without mining :details."
   (let* ((context (kli:make-kernel-host))
          (protocol (switch-to-extension-protocol context))
@@ -373,8 +377,11 @@ so the change is legible without mining :details."
                  "a removed line is shown with a - marker")
              (is (search "(push x acc))" text)
                  "the rest of the removed body is shown")
-             (is (search "+ 2:" text)
-                 "the added line keeps its LINE:HH anchor under a + marker")
+             (is (search (format nil "+ 2:~A|"
+                                 (tools-filesystem:line-hash
+                                  "  (loop for x in xs collect x))"))
+                         text)
+                 "the added line keeps its LINE:HH| anchor under a + marker")
              (is (search "(loop for x in xs collect x)" text)
                  "the added line's content is shown")))
       (ignore-errors (delete-file path)))))
@@ -421,8 +428,14 @@ edited line is still unread."
              (is (getf details :dry-run-p) "the result is marked a dry run")
              (is (search "Dry run" text) "the text says nothing was written")
              (is (search "(* 3 4)" text) "the diff shows the spliced line")
-             (is (search "(* 3 4)" (getf details :preview-new))
-                 "the preview content carries the spliced result")
+             (is (null (getf details :preview-old)))
+             (is (null (getf details :preview-new)))
+             (is (stringp (getf details :old-sha256)))
+             (is (stringp (getf details :new-sha256)))
+             (assert-private-diff-presentation result (namestring path))
+             (assert-compact-file-result-wire
+              (tool-result-responses-wire "edit-sexp" result)
+              (namestring path))
              (is (string= src (pr-disk-content path))
                  "the file on disk is byte-identical")
              (is (eq :unread (tools-filesystem:anchor-known-p

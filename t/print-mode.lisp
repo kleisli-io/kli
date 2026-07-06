@@ -23,6 +23,10 @@ boolean flags consume no value; stdin (newline-trimmed) is the fallback."
   (is (equal "explain"
              (app::print-positional-prompt
               '("-c" "--output-format" "stream-json" "explain"))))
+  (is (equal "run"
+             (app::print-positional-prompt
+              '("--model-option" "transport=sse" "--option"
+                "reasoning-effort=low" "run"))))
   (is (equal "edit the file"
              (app::print-positional-prompt '("--read-only" "edit the file"))))
   (is (null (app::print-positional-prompt '("--output-format" "json"))))
@@ -33,6 +37,22 @@ boolean flags consume no value; stdin (newline-trimmed) is the fallback."
                                 (format nil "piped text~%~%"))))
   (is (null (app::print-prompt '() "")))
   (is (null (app::print-prompt '() nil))))
+
+(test print-profile-name-defaults-to-print-and-honors-flag
+  "-p boots the print profile unless --profile selects another boot profile."
+  (is (eq :print (app::print-profile-name '())))
+  (is (eq :quiet (app::print-profile-name '("--profile" "quiet" "prompt"))))
+  (is (eq :headless
+          (app::print-profile-name
+           '("--output-format" "json" "--profile" "Headless" "prompt")))))
+
+(test print-model-option-assignments-parse-repeatable-flags
+  (is (equal '("transport" "sse" "reasoning-effort" "low")
+             (app::print-model-option-assignments
+              '("--model-option" "transport=sse"
+                "--option" "reasoning-effort=low" "prompt"))))
+  (signals error
+    (app::print-model-option-assignments '("--model-option" "transport"))))
 
 (test print-exit-code-maps-terminal-states
   "Completed is success, aborted is its own code, every other terminal state is
@@ -71,7 +91,46 @@ and the completed run state."
       (is (eql 0 code))
       (is (equal "result" (gethash "type" object)))
       (is (equal "the answer" (gethash "text" object)))
-      (is (equal "completed" (gethash "state" object))))))
+      (is (equal "completed" (gethash "state" object)))
+      (is (null (gethash "timings" object))))))
+
+(test run-print-session-json-emits-timings-when-requested
+  "The json formatter includes stream timings only when the print run opts in."
+  (multiple-value-bind (context protocol) (agent-session-test-context)
+    (declare (ignore protocol))
+    (agent-loop-register-model context "print-provider" "print-model"
+                               :metadata (list :fake-deltas '("the answer")))
+    (let* ((stream (make-string-output-stream))
+           (code (app::run-print-session context :json "q" stream
+                                         :timings t))
+           (object (com.inuoe.jzon:parse
+                    (string-right-trim '(#\Newline)
+                                       (get-output-stream-string stream))))
+           (timings (gethash "timings" object)))
+      (is (eql 0 code))
+      (is (vectorp timings))
+      (is (plusp (length timings))))))
+
+(test run-print-session-applies-cli-model-options
+  "Print-mode model options override the bound agent's selection before request
+construction, using the same validation path as interactive option changes."
+  (multiple-value-bind (context protocol) (agent-session-test-context)
+    (declare (ignore protocol))
+    (agent-loop-register-model
+     context "print-provider" "print-model"
+     :metadata (list :fake-deltas '("the answer"))
+     :option-schemas (list (test-reasoning-effort-schema))
+     :options '(:reasoning-effort :medium))
+    (let* ((stream (make-string-output-stream))
+           (code (app::run-print-session
+                  context :text "q" stream
+                  :model-options '("reasoning-effort" "low")))
+           (service (kli:find-live-object (kli:context-registry context)
+                                          :agent-session-service))
+           (selection (agent-session:mode-current-selection service :print context)))
+      (is (eql 0 code))
+      (is (eq :low (models:model-selection-option-value
+                    selection "reasoning-effort"))))))
 
 (test run-print-session-failed-run-exits-nonzero-with-stderr-note
   "A non-retryable provider failure degrades to exit code 1 and a stderr note,

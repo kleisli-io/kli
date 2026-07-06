@@ -93,10 +93,12 @@
    #:model-response-metadata
    #:model-stream-request
    #:model-stream-events
+   #:model-stream-timings
    #:model-stream-state
    #:model-stream-usage
    #:model-stream-provider-stop-reason
    #:model-stream-thinking-deltas
+   #:*capture-model-timings*
    #:model-delta-kind
    #:model-delta-content-index
    #:model-delta-timestamp
@@ -115,6 +117,8 @@
    #:parse-tool-call-arguments
    #:stream-model-response
    #:stream-thinking-blocks
+   #:note-model-stream-timing
+   #:model-stream-timing-summary
    #:register-model-stream-adapter
    #:unregister-model-stream-adapter
    #:find-model-stream-adapter

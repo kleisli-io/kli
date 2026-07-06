@@ -9,6 +9,9 @@
 (defparameter +print-mode-id+ :print
   "Session mode the print driver binds its lone agent under.")
 
+(defparameter +print-profile-id+ :print
+  "Default profile for one-shot print runs.")
+
 (defparameter +print-value-flags+
   (cli-command-value-flag-tokens :print)
   "Value-flags skipped when scanning argv for the prompt; derived from the :print
@@ -24,9 +27,35 @@ grammar. Boolean flags consume no value and are skipped directly.")
   "The token following FLAG in ARGS, or NIL when FLAG is absent."
   (loop for (a v) on args when (string= a flag) do (return v)))
 
+(defun print-flag-values (args flag)
+  "All values supplied for FLAG, including values supplied through its aliases."
+  (let* ((definition (cli-command-find-flag :print flag))
+         (tokens (if definition (cli-flag-tokens definition) (list flag))))
+    (loop for rest on args
+          for token = (first rest)
+          when (member token tokens :test #'string=)
+            collect (second rest))))
+
 (defun print-flag-present-p (args flag)
   "True when boolean FLAG appears anywhere in ARGS."
   (and (member flag args :test #'string=) t))
+
+(defun split-model-option-assignment (text)
+  (let ((pos (and (stringp text) (position #\= text))))
+    (unless (and pos
+                 (plusp pos)
+                 (< pos (1- (length text))))
+      (error "--model-option expects KEY=VALUE."))
+    (values (subseq text 0 pos)
+            (subseq text (1+ pos)))))
+
+(defun print-model-option-assignments (args)
+  "Repeated --model-option KEY=VALUE flags as a plist with string values. The
+selected model validates support and canonical values later."
+  (loop for assignment in (print-flag-values args "--model-option")
+        append (multiple-value-bind (option-id value)
+                   (split-model-option-assignment assignment)
+                 (list option-id value))))
 
 (defun print-positional-prompt (args)
   "The first non-flag token in ARGS, skipping value-flags and their values, or
@@ -77,6 +106,13 @@ construction. With no flag set, BASE is returned unchanged."
 this release, so any request fails closed at the call site."
   (print-flag-value args "--grants"))
 
+(defun print-profile-name (args)
+  "The boot profile for a one-shot print run."
+  (let ((requested (profile-arg-value args)))
+    (if requested
+        (normalize-extension-id requested)
+        +print-profile-id+)))
+
 (defun attenuate-bound-agent (binding context &key read-only no-bash)
   "Narrow the freshly bound print agent's run subject by the headless flags. The
 model's tool calls execute under the agent's own subject, so attenuating it here
@@ -88,6 +124,10 @@ model's tool calls execute under the agent's own subject, so attenuating it here
         (setf (kli/agent/loop:agent-subject agent)
               (attenuate-run-subject (kli/agent/loop:agent-subject agent)
                                      :read-only read-only :no-bash no-bash))))))
+
+(defun apply-print-model-options (service mode-id assignments context)
+  (loop for (option-id value) on assignments by #'cddr
+        do (set-agent-session-option service mode-id option-id value context)))
 
 (defun read-snapshot-file (path)
   "Read a durable snapshot datum, with read-time eval disabled since the file
@@ -108,7 +148,7 @@ the runtime/snapshot provider. Runs under *call-subject*, which carries the
 
 (defun run-print-session (context format prompt stream
                           &key (mode-id +print-mode-id+) read-only no-bash
-                               from-snapshot)
+                               from-snapshot timings model-options)
   "Drive one synchronous turn on CONTEXT's agent-session service: bind a fresh
 session, register the FORMAT formatter onto STREAM, submit PROMPT, and return a
 state-derived exit code. Setup runs under the first-party interactive subject,
@@ -126,13 +166,15 @@ has already reached STREAM through the formatter."
       (attenuate-bound-agent binding context :read-only read-only :no-bash no-bash))
     (when from-snapshot
       (restore-from-snapshot context from-snapshot))
-    (handler-case
-        (let ((agent (submit-agent-session-prompt service mode-id prompt context)))
-          (print-exit-code (kli/agent/loop:agent-state-value
-                            (kli/agent/loop:agent-state agent))))
-      (error (condition)
-        (format *error-output* "kli: ~A~%" condition)
-        1))))
+    (apply-print-model-options service mode-id model-options context)
+    (let ((kli/model/runtime:*capture-model-timings* timings))
+      (handler-case
+          (let ((agent (submit-agent-session-prompt service mode-id prompt context)))
+            (print-exit-code (kli/agent/loop:agent-state-value
+                              (kli/agent/loop:agent-state agent))))
+        (error (condition)
+          (format *error-output* "kli: ~A~%" condition)
+          1)))))
 
 (defun run-print (&optional args)
   "Boot the print profile and run one prompt to stdout, then exit. The prompt is
@@ -140,7 +182,8 @@ the inline positional argument or, absent that, stdin. With neither, report the
 miss on stderr and exit non-zero."
   (with-fatal-error-handler ()
     (let* ((settings (load-settings))
-           (context (main :profile :print :settings settings)))
+           (context (main :profile (print-profile-name args)
+                          :settings settings)))
       (boot-user-extensions context)
       (report-boot-diagnostics context)
       (with-headless-io ()
@@ -151,13 +194,17 @@ miss on stderr and exit non-zero."
         (let* ((format (parse-output-format (print-flag-value args "--output-format")))
                (read-only (print-flag-present-p args "--read-only"))
                (no-bash (print-flag-present-p args "--no-bash"))
+               (timings (print-flag-present-p args "--timings"))
                (from-snapshot (print-flag-value args "--from-snapshot"))
+               (model-options (print-model-option-assignments args))
                (prompt (print-prompt args (and (not (terminal-input-tty-p))
                                                (slurp-stream *standard-input*)))))
           (if (and prompt (plusp (length prompt)))
               (uiop:quit (run-print-session context format prompt *standard-output*
                                             :read-only read-only :no-bash no-bash
-                                            :from-snapshot from-snapshot))
+                                            :from-snapshot from-snapshot
+                                            :timings timings
+                                            :model-options model-options))
               (progn
                 (format *error-output*
                         "kli: no prompt (pass one as an argument or on stdin)~%")

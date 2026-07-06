@@ -140,23 +140,14 @@
                                (style-span (string #\▎) :fg bar) " " w
                                (make-string pad :initial-element #\Space)))))
 
-(defun file-update-list (details)
-  "Normalize a diff result's DETAILS plist to a list of file-update plists with
-   :path, :old, and :new keys, or NIL when the shape does not match. Edit-style
-   details carry (:files (...)) and must include both old and new content;
-   write-style details are flat and may use NIL old for a new file. A
-   normalizer, not a dispatcher: the :diff presentation kind already selected
-   this path."
-  (when (consp details)
-    (let ((files (getf details :files)))
-      (cond ((consp files)
-             (remove-if-not (lambda (update)
-                              (and (consp update)
-                                   (stringp (getf update :old))
-                                   (stringp (getf update :new))))
-                            files))
-            ((and (null files) (stringp (getf details :new)))
-             (list details))))))
+(defun file-update-list (term)
+  "Private diff updates from a :diff presentation term. Public result details
+   are model-facing metadata, not UI diff storage."
+  (when (and (consp term) (eq (presentation-kind term) :diff))
+    (remove-if-not (lambda (update)
+                     (and (consp update)
+                          (stringp (getf update :path))))
+                   (getf term :updates))))
 
 (defun file-update-heading (name update theme)
   "Card heading: bold tool name in toolTitle, then the path and change counts
@@ -179,7 +170,70 @@
 (defun file-update-hidden-hunks-line (hidden theme)
   (concatenate 'string " "
                (style theme "toolOutput"
-                      (format nil "… (+~D changed hunk~:P hidden · Ctrl+O)" hidden))))
+                      (format nil "… (+~D changed hunk~:P omitted; re-read for full context)" hidden))))
+
+(defun file-update-notice-lines (update theme width)
+  (let ((notice (getf update :notice)))
+    (when (and (stringp notice) (plusp (length notice)))
+      (loop for w in (wrap-text notice (max 1 (- width 2)))
+            for pad = (max 0 (- width (+ 2 (visible-width w))))
+            collect (concatenate 'string "  " (style theme "toolOutput" w)
+                                 (make-string pad :initial-element #\Space))))))
+
+(defun file-update-row-token (kind)
+  (case kind
+    (:context "toolDiffContext")
+    (:remove "toolDiffRemoved")
+    (:add "toolDiffAdded")
+    (otherwise "toolDiffContext")))
+
+(defun file-update-row-marker (kind)
+  (case kind
+    (:remove #\-)
+    (:add #\+)
+    (otherwise #\Space)))
+
+(defun file-update-gutter (row theme)
+  (let* ((kind (getf row :kind))
+         (token (file-update-row-token kind))
+         (old (or (getf row :old-line) ""))
+         (new (or (getf row :new-line) "")))
+    (style-span
+     (format nil "~v@a ~v@a ~C "
+             *file-update-gutter-width* old
+             *file-update-gutter-width* new
+             (file-update-row-marker kind))
+     :fg (theme-token theme token))))
+
+(defun file-update-row-lines (row theme width)
+  (let* ((kind (getf row :kind))
+         (token (file-update-row-token kind))
+         (text (normalize-text (or (getf row :text) ""))))
+    (prefix-wrap-segs
+     (file-update-gutter row theme)
+     (+ (* 2 *file-update-gutter-width*) 4)
+     (list (make-seg text (theme-token theme token)))
+     width)))
+
+(defun file-update-hunk-lines (hunk theme width)
+  (loop for row in (getf hunk :rows)
+        append (file-update-row-lines row theme width)))
+
+(defun file-update-presentation-lines (update theme width)
+  (let ((out '())
+        (first-hunk-p t))
+    (dolist (hunk (getf update :hunks))
+      (unless first-hunk-p
+        (push (file-update-hunk-separator-line theme) out))
+      (dolist (line (file-update-hunk-lines hunk theme width))
+        (push line out))
+      (setf first-hunk-p nil))
+    (append (nreverse out)
+            (when (and (getf update :truncated-p)
+                       (getf update :hidden-hunks))
+              (list (file-update-hidden-hunks-line
+                     (getf update :hidden-hunks) theme)))
+            (file-update-notice-lines update theme width))))
 
 (defun capped-hunk-preview-lines (blocks theme)
   "Render hunk BLOCKS up to *FILE-UPDATE-HUNK-PREVIEW-LINE-CAP* lines.
@@ -227,25 +281,12 @@ changed hunks are counted in a Ctrl+O indicator."
           lines))))
 
 (defun diff-card-lines (update theme width)
-  "Diff body of one file-update card. Collapsed output shows a hunk preview:
-every changed hunk with a small amount of context, separated when distant and
-capped with a hidden-hunk Ctrl+O indicator. Expanded output renders the full
-diff."
-  (let ((old (or (getf update :old) ""))
-        (new (getf update :new))
-        (lang (path->lang (getf update :path))))
-    (if *tool-output-expanded*
-        (render-diff old new theme width
-                     :lang lang :gutter-width *file-update-gutter-width*)
-        (let ((blocks (render-diff-hunk-blocks
-                       old new theme width
-                       :lang lang
-                       :context-lines *file-update-hunk-context-lines*
-                       :gutter-width *file-update-gutter-width*)))
-          (if blocks
-              (capped-hunk-preview-lines blocks theme)
-              (render-diff old new theme width
-                           :lang lang :gutter-width *file-update-gutter-width*))))))
+  "Diff body of one file-update card. The term already carries bounded private
+   hunk rows; expanded mode never reveals a hidden full before/after body."
+  (or (file-update-presentation-lines update theme width)
+      (file-update-notice-lines
+       (list :notice "No changed lines in private diff presentation.")
+       theme width)))
 
 (defun render-file-update (name updates theme width)
   "One diff card per updated file: heading line, then the old→new line diff.
@@ -549,7 +590,7 @@ diff."
         (case (presentation-kind term)
           (:summary (render-read-summary name term theme width))
           (:filesystem-summary (render-filesystem-summary name term theme width))
-          (:diff (let ((updates (file-update-list details)))
+          (:diff (let ((updates (file-update-list term)))
                    (if updates
                        (append (render-file-update name updates theme width)
                                (diff-note-lines term theme width))

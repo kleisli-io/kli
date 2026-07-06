@@ -378,29 +378,39 @@ No finish pass is needed -- Anthropic always closes its blocks on the wire."
                                (getf (model-provider-metadata provider) :instructions)
                                "You are a helpful assistant."))
              (selection (model-request-selection request))
+             (reasoning-effort (model-selection-option-value selection "reasoning-effort"))
              (state (make-anthropic-state)))
         (multiple-value-bind (body beta-p)
             (build-anthropic-body (model-request-model-id request)
                                   (model-request-model-messages request)
                                   :instructions instructions
-                                  :reasoning-effort (model-selection-option-value selection "reasoning-effort")
+                                  :reasoning-effort reasoning-effort
                                   :tools (model-request-tool-schemas request)
                                   :max-output max-output
                                   :thinking-mode thinking-mode
                                   :xhigh-effort xhigh-effort
                                   :midstream-system-p midstream-system-p)
+          (%note-request-payload request :anthropic-messages body
+                                 :url (anthropic-url base)
+                                 :message-count (length (model-request-model-messages request))
+                                 :reasoning-effort reasoning-effort
+                                 :thinking-mode thinking-mode
+                                 :max-output max-output
+                                 :interleaved-thinking-beta beta-p)
           (multiple-value-bind (stream status)
               (%anthropic-request request (anthropic-url base) body
                                   (build-anthropic-headers token extra
                                                            :beta-p beta-p))
             (unwind-protect
                  (progn
+                   (%note-http-response request status)
                    (unless (and (integerp status) (<= 200 status 299))
                      (error 'anthropic-api-error
                             :status status
                             :body (drain-capped-body stream)))
                    (stream-sse-events stream
                                       (lambda (ev data)
+                                        (%note-provider-event request ev data)
                                         (map-anthropic-event ev data state emit))))
               (setf (model-request-stream-closer request) nil)
               (ignore-errors (close stream)))))))))

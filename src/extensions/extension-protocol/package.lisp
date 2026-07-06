@@ -108,6 +108,8 @@
    #:install-contribution
    #:retract-contribution
    #:check-contribution-precondition
+   #:refresh-runtime-contribution
+   #:refresh-runtime-contributions
 
    #:live-object-contribution
    #:make-live-object-contribution
@@ -125,6 +127,7 @@
    #:make-effect-contribution
    #:contribution-installer
    #:contribution-retractor
+   #:contribution-refresh
    #:contribution-state
 
    #:tool-contribution
@@ -190,6 +193,7 @@
    #:tool-error-result
    #:tool-result-content
    #:tool-result-details
+   #:tool-result-presentation
    #:tool-result-error-p
    #:tool-parameter
    #:required-tool-parameter

@@ -61,6 +61,49 @@ otherwise-anonymous call."))
   (setf (gethash (object-id response) (runtime-responses runtime)) response)
   (runtime-register-live-object context response))
 
+(defun %timing-entry-key (entry)
+  (getf entry :key))
+
+(defun %stream-elapsed-ms (ticks base)
+  (when (and ticks base)
+    (round (* 1000 (- ticks base)) internal-time-units-per-second)))
+
+(defvar *capture-model-timings* nil
+  "When true, model streams record timing markers for explicit diagnostics.")
+
+(defun note-model-stream-timing (stream key &key detail replace)
+  (when (and *capture-model-timings* stream)
+    (when replace
+      (setf (model-stream-timings stream)
+            (remove key (model-stream-timings stream)
+                    :key #'%timing-entry-key
+                    :test #'eq)))
+    (unless (find key (model-stream-timings stream)
+                  :key #'%timing-entry-key
+                  :test #'eq)
+      (let ((entry (list :key key
+                         :at (get-universal-time)
+                         :ticks (get-internal-real-time))))
+        (when detail
+          (setf entry (append entry (list :detail detail))))
+        (push entry (model-stream-timings stream)))))
+  stream)
+
+(defun model-stream-timing-summary (stream)
+  (let* ((ordered (reverse (copy-list (model-stream-timings stream))))
+         (base (getf (first ordered) :ticks)))
+    (when ordered
+      (loop for entry in ordered
+            for detail = (getf entry :detail)
+            for out = (list :key (getf entry :key)
+                            :at (getf entry :at)
+                            :elapsed-ms (%stream-elapsed-ms
+                                         (getf entry :ticks)
+                                         base))
+            collect (if detail
+                        (append out (list :detail detail))
+                        out)))))
+
 (defmethod register-model-stream-adapter ((runtime model-runtime)
                                           api
                                           adapter
@@ -265,6 +308,7 @@ streamed token a second time for the life of the stream."
                                (delta usage-delta)
                                context)
   (declare (ignore context))
+  (note-model-stream-timing stream :first-usage-delta)
   (setf (model-stream-usage stream) (copy-list (usage-delta-usage delta)))
   delta)
 
@@ -272,6 +316,10 @@ streamed token a second time for the life of the stream."
                                (delta assistant-delta)
                                context)
   (declare (ignore context))
+  (when (plusp (length (or (assistant-delta-text delta) "")))
+    (note-model-stream-timing
+     stream :first-visible-delta
+     :detail (list :content-index (model-delta-content-index delta))))
   (push (assistant-delta-text delta) (model-stream-text-fragments stream))
   delta)
 
@@ -279,6 +327,13 @@ streamed token a second time for the life of the stream."
                                (delta thinking-delta)
                                context)
   (declare (ignore context))
+  (when (or (plusp (length (or (thinking-delta-text delta) "")))
+            (thinking-delta-signature delta)
+            (thinking-delta-redacted delta))
+    (note-model-stream-timing
+     stream :first-thinking-delta
+     :detail (list :content-index (model-delta-content-index delta)
+                   :redacted (and (thinking-delta-redacted delta) t))))
   (push delta (model-stream-thinking-deltas stream))
   delta)
 
@@ -286,6 +341,10 @@ streamed token a second time for the life of the stream."
                                (delta tool-call-delta)
                                context)
   (declare (ignore context))
+  (note-model-stream-timing
+   stream :first-tool-delta
+   :detail (list :content-index (model-delta-content-index delta)
+                 :name (tool-call-delta-name delta)))
   (push delta (model-stream-tool-call-deltas stream))
   delta)
 
@@ -293,12 +352,25 @@ streamed token a second time for the life of the stream."
                                (delta block-boundary-delta)
                                context)
   (declare (ignore context))
+  (when (typep delta 'block-start-delta)
+    (let ((kind (block-delta-content-kind delta)))
+      (note-model-stream-timing
+       stream :first-block-start
+       :detail (list :content-index (model-delta-content-index delta)
+                     :kind kind))
+      (case kind
+        (:text (note-model-stream-timing stream :first-text-block-start))
+        (:thinking (note-model-stream-timing stream :first-thinking-block-start))
+        (:toolcall (note-model-stream-timing stream :first-tool-block-start)))))
   delta)
 
 (defmethod handle-model-delta ((stream model-stream)
                                (delta stop-reason-delta)
                                context)
   (declare (ignore context))
+  (note-model-stream-timing
+   stream :first-stop-reason
+   :detail (list :reason (stop-reason-delta-reason delta)))
   (setf (model-stream-provider-stop-reason stream)
         (stop-reason-delta-reason delta))
   delta)
@@ -402,13 +474,19 @@ registered (complete-text requests, failed streams) evict as no-ops."
   "Finalize REQUEST from STREAM. A cross-thread abort unwinds the stream as
 clean EOF and lands here, so the :aborted state the aborter set is preserved
 rather than masked as :completed."
+  (note-model-stream-timing stream :completion :replace t)
   (let* ((runtime (find-live-object (context-registry context)
                                     :model-runtime-service))
          (stream-usage (model-stream-usage stream))
          (thinking-blocks (stream-thinking-blocks stream))
+         (stream-timings (model-stream-timing-summary stream))
+         (with-timings (if stream-timings
+                           (list* :timings stream-timings metadata)
+                           metadata))
          (with-thinking (if thinking-blocks
-                            (list* :thinking-blocks thinking-blocks metadata)
-                            metadata))
+                            (list* :thinking-blocks thinking-blocks
+                                   with-timings)
+                            with-timings))
          (effective-metadata (if stream-usage
                                  (list* :usage stream-usage with-thinking)
                                  with-thinking))
@@ -458,6 +536,11 @@ non-abort error still propagates."
            (stream (ensure-request-stream request context)))
       (setf (model-request-state request) :streaming
             (model-stream-state stream) :streaming)
+      (note-model-stream-timing
+       stream :request-start
+       :detail (list :provider-id (model-request-provider-id request)
+                     :model-id (model-request-model-id request)
+                     :api api))
       (record-stream-event
        stream
        (list :type :message-start
@@ -476,6 +559,10 @@ non-abort error still propagates."
             (funcall adapter provider request context :emit emit)
           (error (c)
             (unless (eq (model-request-state request) :aborted)
+              (note-model-stream-timing
+               stream :error
+               :detail (list :condition-type (class-name (class-of c)))
+               :replace t)
               ;; A failed request never reaches complete-model-request, and a
               ;; retry builds a fresh request -- note this one here so it
               ;; evicts instead of pinning the tables forever.
@@ -502,6 +589,7 @@ the stream closer, which shuts down the socket."
     (when closer (ignore-errors (funcall closer)))
     (when stream
       (setf (model-stream-state stream) :aborted)
+      (note-model-stream-timing stream :abort :replace t)
       (record-stream-event stream
                            (list :type :request-aborted
                                  :request-id (object-id request)))))
@@ -533,10 +621,12 @@ the stream closer, which shuts down the socket."
         :content (model-response-content response)
         :tool-calls (copy-list (model-response-tool-calls response))
         :stop-reason (model-response-stop-reason response)
-        :timestamp (model-response-timestamp response)))
+        :timestamp (model-response-timestamp response)
+        :metadata (copy-list (model-response-metadata response))))
 
 (defmethod inspect-model-stream ((stream model-stream))
   (list :id (object-id stream)
         :request-id (object-id (model-stream-request stream))
         :state (model-stream-state stream)
+        :timings (model-stream-timing-summary stream)
         :events (reverse (copy-list (model-stream-events stream)))))

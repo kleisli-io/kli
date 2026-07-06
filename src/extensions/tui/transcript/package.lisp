@@ -80,6 +80,7 @@
                 #:pad-right
                 #:visible-width
                 #:split-lines
+                #:normalize-text
                 #:blank-string-p)
   (:export
    #:project-event-to-transcript

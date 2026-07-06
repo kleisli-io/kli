@@ -4,6 +4,22 @@ All notable changes to kli are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-07-06
+
+### Added
+
+- The `openai-codex` provider can stream through the Responses WebSocket transport. The default `auto` transport uses WebSocket when the selected provider/model supports it, keeps SSE available as a fallback, and reuses cached context across same-session turns with `previous_response_id` deltas.
+- `kli -p` accepts repeated `--model-option KEY=VALUE` overrides, with `--option` as a shorter alias. Generated shell completions now include known option values such as `transport=sse`, `transport=websocket`, `transport=websocket-cached`, and reasoning-effort values.
+- `kli -p --timings` emits model request timing markers in JSON and stream-JSON output, including payload size, HTTP or WebSocket milestones, first provider event, first visible delta, tool/thinking events, and completion timing.
+
+### Fixed
+
+- `kli -p --profile ...` now boots the requested profile instead of always using the print profile.
+- JSON timing output now serializes details as JSON objects, arrays, booleans, and nulls instead of Lisp plist and symbol strings.
+- Built-in file mutation tools now keep model-visible result details compact. The TUI still renders bounded private diffs, and model transports reject accidental full-file `old`, `new`, preview, patched, or repaired payloads from those tools.
+- Anchored file rows shown to models now use `LINE:HH|content` instead of `LINE:HH content` across read, search, edit results, repair accepts, and `edit-sexp` diffs. The pipe delimiter is accepted when copied back into edit anchors and keeps Lisp indentation from being confused with row syntax.
+- Boot snapshot reuse now refreshes runtime-derived providers, prompt commands, and skills against the current config roots. If a runtime refresh fails, kli abandons the reused snapshot for that boot and falls back to a full profile install with a visible diagnostic.
+
 ## [0.1.4] - 2026-07-05
 
 ### Fixed

@@ -3,7 +3,8 @@
   (:import-from #:kli
                 #:active-protocol
                 #:context-registry
-                #:find-live-object)
+                #:find-live-object
+                #:object-id)
   (:import-from #:kli/ext
                 #:provider-call
                 #:require-capability-provider)
@@ -18,6 +19,13 @@
                 #:make-tool-call-delta
                 #:make-usage-delta
                 #:make-stop-reason-delta
+                #:assistant-delta
+                #:assistant-delta-text
+                #:tool-call-delta
+                #:tool-call-delta-call-id
+                #:tool-call-delta-name
+                #:tool-call-delta-arguments
+                #:model-delta-content-index
                 #:model-request-model-id
                 #:model-request-provider-id
                 #:model-request-model-messages
@@ -25,6 +33,8 @@
                 #:model-request-session-id
                 #:model-request-tool-schemas
                 #:model-request-selection
+                #:model-request-stream
+                #:note-model-stream-timing
                 #:model-request-stream-closer)
   (:import-from #:kli/model/registry
                 #:model-provider-credential-provider-id
@@ -44,6 +54,7 @@
    #:openai-api-error-body
    #:terminal-openai-usage-limit-error-p
    #:*responses-http*
+   #:*codex-websocket-stream*
    #:*transport-connect*
    #:open-cancellable-stream
    #:stream-sse-events
@@ -67,6 +78,7 @@
    #:build-responses-body
    #:responses-url
    #:build-responses-headers
+   #:build-codex-websocket-headers
    #:%responses-endpoint
    #:openai-completions-adapter
    #:*completions-http*

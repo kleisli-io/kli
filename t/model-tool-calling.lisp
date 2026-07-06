@@ -45,6 +45,38 @@
       (dolist (data events) (transports:map-responses-event nil data #'emit)))
     (rt::stream-tool-calls stream)))
 
+(defparameter +forbidden-file-result-wire-keys+
+  '("\"old\":" "\"new\":" "\"preview-old\":" "\"preview-new\":"
+    "\"patched\":" "\"repaired\":"))
+
+(defun plain-tool-result-text (result)
+  (apply #'concatenate 'string
+         (loop for item in (ext:tool-result-content result)
+               collect (or (getf item :text) ""))))
+
+(defun tool-result-responses-wire (tool-name result)
+  (responses-tool-result-wire
+   (list :role :tool-result
+         :content (plain-tool-result-text result)
+         :tool-call-id "call_1"
+         :tool-name tool-name
+         :error-p (ext:tool-result-error-p result)
+         :details (ext:tool-result-details result))))
+
+(defun assert-compact-file-result-wire (wire path)
+  (is (search "<tool-result-details>" wire))
+  (is (search path wire))
+  (is (search "\"added\":" wire))
+  (is (search "\"removed\":" wire))
+  (is (search "\"changed-ranges\":" wire))
+  (is (search "\"new-sha256\":" wire))
+  (assert-no-bulk-file-result-wire wire))
+
+(defun assert-no-bulk-file-result-wire (wire)
+  (dolist (key +forbidden-file-result-wire-keys+)
+    (is (not (search key wire))
+        (format nil "wire output must not contain bulk detail key ~A" key))))
+
 (test tool-parameters-convert-to-json-schema
   "The kli param DSL converts to JSON Schema."
   (let ((schema (transports:tool-parameters->json-schema
@@ -234,6 +266,17 @@ A detail-less result keeps its plain text."
             (format nil "~A carries the structured value" label))
         (is (string= "ran" (funcall (cdr probe) plain))
             (format nil "~A keeps a detail-less result's plain text" label))))))
+
+(test file-mutation-tool-result-wire-rejects-forbidden-bulk-detail-keys
+  "Built-in file mutation tools fail closed if public details regress to whole
+file bodies."
+  (let ((message '(:role :tool-result :content "Edited /tmp/x"
+                   :tool-call-id "call_1"
+                   :tool-name "edit"
+                   :error-p nil
+                   :details (:files ((:path "/tmp/x" :old "a" :new "b"))))))
+    (signals error
+      (responses-tool-result-wire message))))
 
 (test responses-converts-assistant-tool-use
   "Assistant tool_use round-trips on Responses."

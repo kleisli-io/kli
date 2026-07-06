@@ -38,8 +38,93 @@ DSL is (:object (:NAME :TYPE [:optional t]) ...). NIL yields an empty object sch
 (defun %tools-vector (descriptors spec-fn)
   (coerce (mapcar spec-fn descriptors) 'vector))
 
+(defun %body-byte-size (body)
+  (length (flexi-streams:string-to-octets body :external-format :utf-8)))
+
+(defun %note-request-payload (request api body &rest detail)
+  (note-model-stream-timing
+   (model-request-stream request)
+   :request-payload
+   :detail (list* :api api
+                  :bytes (%body-byte-size body)
+                  detail)))
+
+(defun %note-http-response (request status)
+  (note-model-stream-timing
+   (model-request-stream request)
+   :http-response
+   :detail (list :status status)))
+
+(defun %note-provider-event (request event-name data)
+  (note-model-stream-timing
+   (model-request-stream request)
+   :first-provider-event
+   :detail (list :event-name event-name
+                 :payload-chars (length data))))
+
 (defun %blankp (s)
   (or (not (stringp s)) (blank-string-p s)))
+
+(defparameter +file-mutation-tool-names+ '("write" "edit" "edit-sexp"))
+(defparameter +forbidden-file-mutation-detail-keys+
+  '("old" "new" "preview-old" "preview-new" "patched" "repaired"))
+
+(defun %detail-key-name (key)
+  (etypecase key
+    (symbol (string-downcase (symbol-name key)))
+    (string (string-downcase key))))
+
+(defun %plist-like-p (value)
+  (and (listp value)
+       (evenp (length value))
+       (loop for (key nil) on value by #'cddr
+             always (or (symbolp key) (stringp key)))))
+
+(defun %file-mutation-tool-p (name)
+  (member (etypecase name
+            (null "")
+            (symbol (string-downcase (symbol-name name)))
+            (string (string-downcase name)))
+          +file-mutation-tool-names+
+          :test #'string=))
+
+(defun %forbidden-file-mutation-detail-key-p (key)
+  (and (or (symbolp key) (stringp key))
+       (member (%detail-key-name key)
+               +forbidden-file-mutation-detail-keys+
+               :test #'string=)))
+
+(defun %forbidden-file-mutation-detail-keys (value)
+  (let ((found '()))
+    (labels ((scan (node)
+               (cond
+                 ((hash-table-p node)
+                  (maphash (lambda (key value)
+                             (when (%forbidden-file-mutation-detail-key-p key)
+                               (pushnew (%detail-key-name key) found :test #'string=))
+                             (scan value))
+                           node))
+                 ((%plist-like-p node)
+                  (loop for (key value) on node by #'cddr
+                        do (when (%forbidden-file-mutation-detail-key-p key)
+                             (pushnew (%detail-key-name key) found :test #'string=))
+                           (scan value)))
+                 ((consp node)
+                  (dolist (item node)
+                    (scan item)))
+                 ((vectorp node)
+                  (loop for item across node do (scan item))))))
+      (scan value))
+    (sort found #'string<)))
+
+(defun %assert-model-safe-file-mutation-details (message)
+  (let ((tool-name (getf message :tool-name))
+        (details (getf message :details)))
+    (when (and details (%file-mutation-tool-p tool-name))
+      (let ((forbidden (%forbidden-file-mutation-detail-keys details)))
+        (when forbidden
+          (error "Built-in file mutation tool ~A returned forbidden model-visible detail key~P: ~{~A~^, ~}"
+                 tool-name (length forbidden) forbidden))))))
 
 (defun %tool-result-content (m)
   "Wire content for a converted tool-result message: its text with any structured
@@ -47,6 +132,7 @@ details appended as a labeled JSON block the model can read, identical across
 transports. A detail-less result keeps its plain text."
   (let ((content (princ-to-string (getf m :content)))
         (details (getf m :details)))
+    (%assert-model-safe-file-mutation-details m)
     (if details
         (format nil "~A~2%<tool-result-details>~A</tool-result-details>"
                 content (com.inuoe.jzon:stringify (jsonify details)))
@@ -170,8 +256,10 @@ Shared by every transport, so capability facts read from one place."
 
 (defun transport-supports-option-p (api profile option-id)
   "True when API/PROFILE has request lowering for semantic OPTION-ID."
-  (declare (ignore profile))
   (cond
+    ((string= option-id "transport")
+     (and (eq api :openai-responses)
+          (%transport-profile-value profile :websocket-continuation)))
     ((string= option-id "reasoning-effort")
      (member api '(:openai-completions :openai-responses :anthropic-messages)))
     ((member api '(:openai-completions :openai-responses))

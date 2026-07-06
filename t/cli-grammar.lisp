@@ -31,7 +31,8 @@ reverse) breaks this guard. The :tui id is the default arm and carries no token.
   "+print-value-flags+ is the :print command's value-flag tokens, no more."
   (is (equal app::+print-value-flags+
              (app::cli-command-value-flag-tokens :print)))
-  (is (equal '("--from-snapshot" "--grants" "--output-format" "--profile")
+  (is (equal '("--from-snapshot" "--grants" "--model-option" "--option"
+               "--output-format" "--profile")
              (sort (copy-list app::+print-value-flags+) #'string<))))
 
 (test cli-grammar-update-flags-match-parser
@@ -116,6 +117,9 @@ profile names, a path sentinel, or nothing."
     (let ((profiles (c '("-p" "--profile"))))
       (is-true (member "headless" profiles :test #'string=))
       (is-true (member "interactive-terminal" profiles :test #'string=)))
+    (let ((options (c '("-p" "--model-option"))))
+      (is-true (member "transport=sse" options :test #'string=))
+      (is-true (member "reasoning-effort=low" options :test #'string=)))
     ;; Path positions answer with the sentinel alone.
     (is (equal (list app::+completion-file-sentinel+) (c '("-p" "--from-snapshot"))))
     (is (equal (list app::+completion-file-sentinel+) (c '("--extension"))))

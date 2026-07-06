@@ -113,11 +113,17 @@ extension root contributes nothing."
         (provider-call config :unregister-resource-kind context :prompts)
         (provider-call config :register-resource-kind context :prompts prior))))
 
-(defun refresh-prompt-template-commands (context)
+(defun refresh-prompt-template-contribution (protocol contribution context)
   "Re-run the prompt-templates effect against the current extension set, so a
 prompt root declared by an extension loaded or retracted after the effect's
-install surfaces or withdraws its commands. No-op when the effect is not
-installed (headless profiles)."
+install surfaces or withdraws its commands."
+  (unregister-prompt-template-commands protocol contribution context)
+  (setf (contribution-state contribution)
+        (register-prompt-template-commands protocol contribution context))
+  contribution)
+
+(defun refresh-prompt-template-commands (context)
+  "Refresh the installed prompt-templates effect, when present."
   (let* ((protocol (active-protocol context))
          (contribution
            (find-if (lambda (candidate)
@@ -126,9 +132,7 @@ installed (headless profiles)."
                                (normalize-extension-id 'prompt-templates))))
                     (protocol-installed-contributions protocol))))
     (when contribution
-      (unregister-prompt-template-commands protocol contribution context)
-      (setf (contribution-state contribution)
-            (register-prompt-template-commands protocol contribution context)))))
+      (refresh-prompt-template-contribution protocol contribution context))))
 
 (defextension prompt-templates
   (:requires
@@ -137,4 +141,5 @@ installed (headless profiles)."
   (:provides
    (effect prompt-templates
      #'register-prompt-template-commands
-     #'unregister-prompt-template-commands)))
+     #'unregister-prompt-template-commands
+     :refresh #'refresh-prompt-template-contribution)))

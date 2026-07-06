@@ -173,19 +173,23 @@ contribution-states the retractor drains."
                   (eq (contribution-name contribution) :compatible-provider)))
            (protocol-installed-contributions protocol)))
 
-(defun refresh-compatible-providers (protocol context)
+(defun refresh-compatible-provider-contribution (protocol contribution context)
   "Reread providers.json for an already-loaded compatible-provider effect.
 
 Boot snapshot reuse can carry a compatible-provider contribution installed in the
 dump environment, before the user's runtime providers.json existed. Refreshing
 drains the recorded per-spec registrations, then reruns the installer in place so
 the contribution stays part of the loaded extension and remains retractable."
+  (retract-compatible-providers protocol contribution context)
+  (setf (contribution-state contribution)
+        (install-compatible-providers protocol contribution context))
+  contribution)
+
+(defun refresh-compatible-providers (protocol context)
+  "Refresh the installed compatible-provider effect, when present."
   (let ((contribution (installed-compatible-provider-contribution protocol)))
     (when contribution
-      (retract-compatible-providers protocol contribution context)
-      (setf (contribution-state contribution)
-            (install-compatible-providers protocol contribution context))
-      contribution)))
+      (refresh-compatible-provider-contribution protocol contribution context))))
 
 (defun retract-compatible-providers (protocol contribution context)
   "Drain each per-spec contribution-state install returned, reversing every

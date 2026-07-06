@@ -359,9 +359,8 @@ install, since the snapshot only carries the default profile."
 (defun reuse-boot-snapshot (settings)
   "Rehydrate the baked snapshot for this boot: rebind the config service to the
 runtime config dirs, reload the user's settings, re-apply the wiring overlay,
-and refresh dynamic provider catalogues over the runtime config. Returns the
-context, or NIL when no usable snapshot matches so the caller does a full
-install."
+and refresh runtime-derived contribution state. Returns the context, or NIL when
+no usable snapshot matches so the caller does a full install."
   (when (boot-snapshot-usable-p settings)
     (let* ((context *boot-snapshot-context*)
            (protocol (active-protocol context))
@@ -371,18 +370,37 @@ install."
       (record-settings-overlay protocol overlay)
       (swap-settings-overlay context overlay)
       (with-system-authority
-        (refresh-compatible-providers protocol context))
+        (refresh-runtime-contributions protocol context))
       (setf *current-context* context *current-app* nil)
       context)))
+
+(defun profile-install-context (settings &key snapshot-failure)
+  (let ((context (with-boot-stage ("profile-install")
+                   (main :profile (select-profile-name :settings settings)
+                         :settings settings))))
+    (when snapshot-failure
+      (record-extension-diagnostic
+       (active-protocol context)
+       :snapshot-reuse
+       (format nil "Snapshot reuse failed; fell back to full profile install: ~A"
+               snapshot-failure)))
+    context))
+
+(defun boot-context (settings)
+  (multiple-value-bind (snapshot-context snapshot-failure)
+      (handler-case
+          (values (with-boot-stage ("snapshot-reuse")
+                    (reuse-boot-snapshot settings))
+                  nil)
+        (error (condition)
+          (values nil condition)))
+    (or snapshot-context
+        (profile-install-context settings :snapshot-failure snapshot-failure))))
 
 (defun run-tui-main ()
   (with-fatal-error-handler ()
     (let* ((settings (with-boot-stage ("load-settings") (load-settings)))
-           (context (or (with-boot-stage ("snapshot-reuse")
-                          (reuse-boot-snapshot settings))
-                        (with-boot-stage ("profile-install")
-                          (main :profile (select-profile-name :settings settings)
-                                :settings settings)))))
+           (context (boot-context settings)))
       (with-boot-stage ("user-extensions") (boot-user-extensions context))
       (run-selected-profile context
                             :extra-manifests (fault-injection-manifests)))))

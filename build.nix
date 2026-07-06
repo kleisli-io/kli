@@ -719,6 +719,7 @@ let
         "cl-ppcre"
         "sqlite"
         "paren-repair"
+        "websocket-driver-client"
         "sb-posix"
       ];
       dependsForms = lib.concatMapStringsSep " " (s: ''"${s}"'') dependsOn;
@@ -765,6 +766,7 @@ let
       lisp.cl-ppcre
       lisp.sqlite
       lisp.paren-repair
+      lisp.websocket-driver-client
       (buildLisp.bundled "sb-posix")
       (buildLisp.bundled "asdf")
     ];

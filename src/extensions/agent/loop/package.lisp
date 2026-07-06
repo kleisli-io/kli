@@ -44,7 +44,8 @@
                 #:model-response-metadata
                 #:model-response-stop-reason
                 #:model-response-tool-calls
-                #:parse-tool-call-arguments)
+                #:parse-tool-call-arguments
+                #:*capture-model-timings*)
   (:import-from #:kli/session/log
                 #:agent-message-p
                 #:message-content

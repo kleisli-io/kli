@@ -472,9 +472,10 @@ both changed hunks."
     (let* ((proto (make-tui-rendering-fixture))
            (ev (tui-transcript:make-transcript-event
                 :tool-result nil "Edited /tmp/x (+1 -1)" :name "edit" :status :ok
-                :presentation (ext:result-diff)
-                :details '(:files ((:path "/tmp/x" :old "a" :new "b"
-                                    :added 1 :removed 1)))))
+                :presentation
+                (ext:result-diff
+                 :updates (list (tools-filesystem:file-diff-presentation-update
+                                 "/tmp/x" "a" "b")))))
            (lines (tui-core:render-transcript-event :tool-result proto ev theme 40)))
       (is (string= " edit /tmp/x (+1 -1)" (md-visible (first lines)))
           "diff result keeps a bold tool heading")

@@ -178,6 +178,19 @@ are preserved."
       (make-command-result
        :content (list (make-command-text-content "Skills refreshed."))))))
 
+(defun refresh-skill-commands (protocol contribution context)
+  "Re-discover skills for an already-loaded skills effect."
+  (let ((state (contribution-state contribution)))
+    (drain-skill-registrations context state)
+    (let ((fresh (rebuild-skill-registrations protocol contribution context)))
+      (setf (contribution-state contribution)
+            (list :registrations (getf fresh :registrations)
+                  :advertisement (getf fresh :advertisement)
+                  :expander (getf fresh :expander)
+                  :refresh-registration (getf state :refresh-registration)
+                  :prior-resource-kind (getf state :prior-resource-kind)))))
+  contribution)
+
 (defun register-skill-commands (protocol contribution context)
   (let ((commands (commands-provider context))
         (config (config-provider context))
@@ -230,4 +243,5 @@ are preserved."
   (:provides
    (effect skills
      #'register-skill-commands
-     #'unregister-skill-commands)))
+     #'unregister-skill-commands
+     :refresh #'refresh-skill-commands)))

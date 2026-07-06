@@ -115,12 +115,12 @@ when nothing was added), and ADDED/REMOVED changed-line counts."
 
 (defparameter *edit-diff-line-cap* 40
   "Most removed+added lines edit-sexp renders as a unified diff in its visible
-result. A larger change shows only the (+N -M) summary; the full before/after
-still rides :details.")
+result. A larger change shows only the (+N -M) summary; compact details carry
+hashes and ranges for follow-up reads.")
 
 (defun render-edit-diff (old-lines new-lines start end added removed)
   "A bounded unified diff of the changed region: removed (-) OLD lines, then
-added (+) NEW lines that keep their LINE:HH anchors for follow-up edits. START is
+added (+) NEW lines that keep their LINE:HH| anchors for follow-up edits. START is
 the 1-based first changed line, shared by both sides since the common prefix is
 byte-identical; END the inclusive last NEW line. Returns NIL when the change is
 empty or exceeds *edit-diff-line-cap* lines, so the caller falls back to the bare
@@ -134,8 +134,7 @@ empty or exceeds *edit-diff-line-cap* lines, so the caller falls back to the bar
                      rows))
       (loop for index from (1- start) below end
             for line = (svref new-lines index)
-            do (push (format nil "+ ~D:~A ~A" (1+ index) (line-hash line)
-                             (render-truncate-front line))
+            do (push (render-anchored-row (1+ index) line :prefix "+ ")
                      rows))
       (format nil "~{~A~^~%~}" (nreverse rows)))))
 
@@ -258,15 +257,24 @@ real edit would auto-repair it first.~%")
 ~D-line cap, so no line anchors are shown; re-read the file to refresh them)"
                                    added removed *edit-diff-line-cap*)))))
                     :details (if dry-run
-                                 (list :dry-run-p t
-                                       :path (namestring path)
-                                       :preview-old original
-                                       :preview-new final
-                                       :added added
-                                       :removed removed)
+                                 (compact-file-change-detail
+                                  (namestring path)
+                                  original
+                                  final
+                                  :added added
+                                  :removed removed
+                                  :status :dry-run
+                                  :dry-run-p t)
                                  (list :files
-                                       (list (list :path (namestring path)
-                                                   :old original
-                                                   :new final
-                                                   :added added
-                                                   :removed removed)))))))))))))))
+                                       (list (compact-file-change-detail
+                                              (namestring path)
+                                              original
+                                              final
+                                              :added added
+                                              :removed removed))))
+                    :presentation
+                    (result-diff
+                     :updates
+                     (list (file-diff-presentation-update
+                            (namestring path) original final
+                            :added added :removed removed))))))))))))))

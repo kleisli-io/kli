@@ -50,6 +50,35 @@ final text and run state."
     (is (equal "the answer" (gethash "text" object)))
     (is (equal "completed" (gethash "state" object)))))
 
+(test output-format-json-emits-timings-when-present
+  "Timing payloads serialize as JSON objects when an upstream opt-in includes
+them on :agent/end."
+  (let* ((line (output-format-run
+                #'app::make-json-formatter
+                (event:make-event
+                 :agent/end
+                 :payload (list :text "the answer"
+                                :state :completed
+                                :timings
+                                (list (list :key :request-start
+                                            :elapsed-ms 0
+                                            :detail
+                                            (list :api :openai-responses
+                                                  :provider-id "openai-codex"
+                                                  :session-id-present t)))))))
+         (object (com.inuoe.jzon:parse line))
+         (timings (gethash "timings" object))
+         (entry (and (vectorp timings) (aref timings 0))))
+    (is (typep entry 'hash-table))
+    (is (equal "request-start" (gethash "key" entry)))
+    (is (equal 0 (gethash "elapsed-ms" entry)))
+    (is (equal "openai-responses"
+               (gethash "api" (gethash "detail" entry))))
+    (is (equal "openai-codex"
+               (gethash "provider-id" (gethash "detail" entry))))
+    (is (eq t (gethash "session-id-present"
+                       (gethash "detail" entry))))))
+
 (test output-format-stream-json-emits-one-object-per-event
   "The stream-json formatter writes one parseable object per relevant event."
   (let* ((out (output-format-run

@@ -109,11 +109,13 @@
       :source ',extension-id)))
 
 (defcontribution-kind :effect (extension-id form)
-  (unless (= (length form) 4)
+  (unless (or (= (length form) 4)
+              (and (>= (length form) 6)
+                   (evenp (length form))))
     (error "Effect contribution must specify both installer and retractor: ~S.~@
             Use :no-op as the retractor for effects that intentionally need no cleanup."
            form))
-  (destructuring-bind (_ name installer-form retractor-form) form
+  (destructuring-bind (_ name installer-form retractor-form &key refresh) form
     (declare (ignore _))
     `(make-effect-contribution
       :name ',(normalize-extension-id name)
@@ -122,6 +124,7 @@
                       '(lambda (protocol contribution context)
                          (declare (ignore protocol contribution context)))
                       retractor-form)
+      :refresh ,refresh
       :source ',extension-id)))
 
 (defcontribution-kind :method (extension-id form)

@@ -108,7 +108,11 @@
                (make-model-option-definition
                 "prompt-cache-retention" :enum
                 :label "Prompt cache retention"
-                :enum-values '(:off :in-memory :24h))))
+                :enum-values '(:off :in-memory :24h))
+               (make-model-option-definition
+                "transport" :enum
+                :label "Transport"
+                :enum-values '(:auto :sse :websocket :websocket-cached))))
       (setf (gethash (model-option-definition-id definition) table)
             definition))
     table))

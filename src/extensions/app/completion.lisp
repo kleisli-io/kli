@@ -22,10 +22,25 @@
       (mapcar (lambda (name) (string-downcase (symbol-name name)))
               (append (known-profile-names) data-names)))))
 
+(defun model-option-completion-candidates ()
+  "KEY=VALUE candidates from global option definitions. Runtime still validates
+support against the selected model."
+  (sort
+   (loop for definition in (registered-model-option-definitions)
+         for id = (model-option-definition-id definition)
+         append (case (model-option-definition-type definition)
+                  (:enum
+                   (loop for value in (model-option-definition-enum-values definition)
+                         collect (format nil "~A=~(~A~)" id (symbol-name value))))
+                  (t (list (format nil "~A=" id)))))
+   #'string<))
+
 (defun flag-value-completion (flag)
   "Value-FLAG's argument: static candidates, profile names, a path sentinel, or NIL."
   (cond ((cli-flag-candidates flag) (cli-flag-candidates flag))
         ((eq (cli-flag-source flag) :profiles) (profile-completion-candidates))
+        ((eq (cli-flag-source flag) :model-options)
+         (model-option-completion-candidates))
         ((eq (cli-flag-source flag) :file) (list +completion-file-sentinel+))
         ((eq (cli-flag-source flag) :dir) (list +completion-dir-sentinel+))
         (t nil)))

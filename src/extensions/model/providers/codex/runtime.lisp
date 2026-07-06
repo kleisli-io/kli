@@ -32,6 +32,7 @@ credential-reference."
                                              :developer-role t
                                              :session-identity t
                                              :session-header "session-id"
+                                             :websocket-continuation t
                                              :prompt-cache-key :session-id
                                              :client-request-id :session-id
                                              :account-id-header "chatgpt-account-id"
@@ -43,7 +44,10 @@ credential-reference."
                                :context-window (getf m :ctx)
                                :option-schemas (list (make-model-option-schema "reasoning-effort"
                                                                                :values '(:off :minimal :low :medium :high :xhigh)
-                                                                               :default :off))
+                                                                               :default :off)
+                                                     (make-model-option-schema "transport"
+                                                                               :values '(:auto :sse :websocket :websocket-cached)
+                                                                               :default :auto))
                                :transport-profile (list :max-output (getf m :max-out)
                                                         :developer-role t)))))
 

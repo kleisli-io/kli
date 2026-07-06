@@ -36,6 +36,12 @@
                                     :values values
                                     :default default))
 
+(defun test-transport-schema (&key (values '(:auto :sse :websocket :websocket-cached))
+                                (default :auto))
+  (models:make-model-option-schema "transport"
+                                    :values values
+                                    :default default))
+
 (defun test-reasoning-options (level)
   (and level (list :reasoning-effort level)))
 

@@ -4,13 +4,16 @@
                 #:active-protocol)
   (:import-from #:kli/ext
                 #:defextension
+                #:result-diff
                 #:tool-text-result
                 #:tool-parameter
                 #:required-tool-parameter)
   (:import-from #:kli/tools/filesystem
                 #:remember-read
-                #:line-hash
-                #:split-file-lines)
+                #:render-anchored-row
+                #:split-file-lines
+                #:compact-file-change-detail
+                #:file-diff-presentation-update)
   (:import-from #:kli/text
                 #:render-truncate-front)
   (:import-from #:difflib

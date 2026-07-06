@@ -35,8 +35,10 @@
 (defun result-summary (&key path lines start end raw truncated)
   (list :kind :summary :path path :lines lines :start start :end end
         :raw (and raw t) :truncated (and truncated t)))
-(defun result-diff (&optional note)
-  (if note (list :kind :diff :note note) (list :kind :diff)))
+(defun result-diff (&key note updates)
+  (append (list :kind :diff)
+          (when note (list :note note))
+          (when updates (list :updates updates))))
 (defun result-listing () (list :kind :listing))
 (defun result-filesystem-summary (summary-kind &rest fields)
   (list* :kind :filesystem-summary :summary-kind summary-kind fields))
@@ -203,8 +205,13 @@
 (defun diff-result-presenter (tool result)
   "File-update diff, noting a paren-repair when the runner appended one."
   (declare (ignore tool))
-  (result-diff (and (result-mentions-repair-p result)
-                    "paren-repair: balanced delimiters")))
+  (let ((term (tool-result-presentation result))
+        (note (and (result-mentions-repair-p result)
+                   "paren-repair: balanced delimiters")))
+    (cond ((and term note (not (getf term :note)))
+           (append term (list :note note)))
+          (term term)
+          (t (result-diff :note note)))))
 
 (defun listing-result-presenter (tool result)
   (declare (ignore tool result))

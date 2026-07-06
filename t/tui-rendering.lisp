@@ -403,10 +403,16 @@ the row is padded to exactly WIDTH; (C) a raw tab is normalised out."
 (defun rendering-visible-lines (lines)
   (mapcar #'rendering-visible-line lines))
 
-(test styled-tool-result-diff-without-old-content-falls-back
-  "A malformed edit diff missing old content must not treat :new as a whole new file;
-otherwise replayed/partial metadata can make a one-line edit look like the entire
-file was added."
+(defun test-diff-update (path old new &key added removed old-known-p)
+  (tools-filesystem:file-diff-presentation-update
+   path old new :added added :removed removed :old-known-p old-known-p))
+
+(defun test-diff-presentation (&rest updates)
+  (ext:result-diff :updates updates))
+
+(test styled-tool-result-diff-ignores-public-file-details
+  "Public file details are model-facing metadata. A :diff term without private
+updates falls back instead of rendering any public old/new bodies."
   (let* ((proto (make-tui-rendering-fixture))
          (tui-style:*color-mode* :truecolor)
          (theme (builtin-theme "dark.json"))
@@ -425,23 +431,26 @@ file was added."
     (is (notany (lambda (line) (search "+ beta" line)) visible))))
 
 (test styled-tool-result-file-update-renders-diff-card
-  "Edit details render one diff card per file: a toolTitle heading with path and counts, then the old to new gutter diff with char-level inverse on a single-line replace."
+  "Private presentation updates render one diff card per file: a toolTitle
+heading with path and counts, then bounded remove/add rows."
   (let* ((proto (make-tui-rendering-fixture))
          (tui-style:*color-mode* :truecolor)
          (theme (builtin-theme "dark.json"))
          (event (tui-transcript:make-transcript-event
                  :tool-result nil "Edited /tmp/x (+1 -1)" :name "edit" :status :ok
-                 :presentation (ext:result-diff)
-                 :details '(:files ((:path "/tmp/x" :old "alpha beta"
-                                     :new "alpha gamma" :added 1 :removed 1)))))
+                 :presentation
+                 (test-diff-presentation
+                  (test-diff-update "/tmp/x" "alpha beta" "alpha gamma"))))
          (lines (tui-core:render-transcript-event
-                 :tool-result proto event theme 40)))
-    (is (equal (cons (file-update-heading-line theme "edit" " /tmp/x (+1 -1)")
-                     (tui-markdown:render-diff "alpha beta" "alpha gamma" theme 40
-                                               :gutter-width tui-transcript::*file-update-gutter-width*))
-               lines))
-    (is (search (format nil "~C[7m" #\Esc) (second lines))
-        "a single-line replace carries char-level inverse highlight")))
+                 :tool-result proto event theme 40))
+         (visible (rendering-visible-lines lines)))
+    (is (equal '(" edit /tmp/x (+1 -1)"
+                 "  1     - alpha beta"
+                 "      1 + alpha gamma")
+               visible))
+    (is (search (tui-style:fg-truecolor
+                 (tui-style:theme-token theme "toolDiffAdded"))
+                (third lines)))))
 
 (test styled-tool-result-multi-file-update-renders-card-per-file
   (let* ((proto (make-tui-rendering-fixture))
@@ -449,21 +458,20 @@ file was added."
          (theme (builtin-theme "dark.json"))
          (event (tui-transcript:make-transcript-event
                  :tool-result nil "Edited a, b" :name "edit" :status :ok
-                 :presentation (ext:result-diff)
-                 :details '(:files ((:path "a" :old "x" :new "y"
-                                     :added 1 :removed 1)
-                                    (:path "b" :old "p" :new "q"
-                                     :added 1 :removed 1)))))
+                 :presentation
+                 (test-diff-presentation
+                  (test-diff-update "a" "x" "y")
+                  (test-diff-update "b" "p" "q"))))
          (lines (tui-core:render-transcript-event
-                 :tool-result proto event theme 40)))
-    (is (equal (append
-                (cons (file-update-heading-line theme "edit" " a (+1 -1)")
-                      (tui-markdown:render-diff "x" "y" theme 40
-                                                :gutter-width tui-transcript::*file-update-gutter-width*))
-                (cons (file-update-heading-line theme "edit" " b (+1 -1)")
-                      (tui-markdown:render-diff "p" "q" theme 40
-                                                :gutter-width tui-transcript::*file-update-gutter-width*)))
-               lines))))
+                 :tool-result proto event theme 40))
+         (visible (rendering-visible-lines lines)))
+    (is (equal '(" edit a (+1 -1)"
+                 "  1     - x"
+                 "      1 + y"
+                 " edit b (+1 -1)"
+                 "  1     - p"
+                 "      1 + q")
+               visible))))
 
 (test styled-tool-result-multi-file-update-unifies-gutter-across-differing-lengths
   "Cards for files of different lengths share one gutter width, so content lines
@@ -480,23 +488,14 @@ file renders behind the same three-column gutter as the twenty-line file."
                                  collect (if (= i 1) "L01" (format nil "l~2,'0D" i)))))
          (event (tui-transcript:make-transcript-event
                  :tool-result nil "Edited short, long" :name "edit" :status :ok
-                 :presentation (ext:result-diff)
-                 :details (list :files (list (list :path "short" :old short-old
-                                                   :new short-new :added 1 :removed 1)
-                                             (list :path "long" :old long-old
-                                                   :new long-new :added 1 :removed 1)))))
+                 :presentation
+                 (test-diff-presentation
+                  (test-diff-update "short" short-old short-new)
+                  (test-diff-update "long" long-old long-new))))
          (tui-transcript:*tool-output-expanded* t)
          (lines (tui-core:render-transcript-event
                  :tool-result proto event theme 40))
          (visible (rendering-visible-lines lines)))
-    (is (equal (append
-                (cons (file-update-heading-line theme "edit" " short (+1 -1)")
-                      (tui-markdown:render-diff short-old short-new theme 40
-                                                :gutter-width tui-transcript::*file-update-gutter-width*))
-                (cons (file-update-heading-line theme "edit" " long (+1 -1)")
-                      (tui-markdown:render-diff long-old long-new theme 40
-                                                :gutter-width tui-transcript::*file-update-gutter-width*)))
-               lines))
     (is (member "  1     - x" visible :test #'string=)
         "the one-line file still renders behind the shared three-column gutter")
     (is (member "  1     - l01" visible :test #'string=)
@@ -511,15 +510,17 @@ file renders behind the same three-column gutter as the twenty-line file."
          (event (tui-transcript:make-transcript-event
                  :tool-result nil "Wrote 11 characters to /tmp/new.txt."
                  :name "write" :status :ok
-                 :presentation (ext:result-diff)
-                 :details (list :path "/tmp/new.txt" :characters 11
-                                :old nil :new new-content)))
+                 :presentation
+                 (test-diff-presentation
+                  (test-diff-update "/tmp/new.txt" nil new-content
+                                    :old-known-p t))))
          (lines (tui-core:render-transcript-event
-                 :tool-result proto event theme 40)))
-    (is (equal (cons (file-update-heading-line theme "write" " /tmp/new.txt")
-                     (tui-markdown:render-diff "" new-content theme 40
-                                               :gutter-width tui-transcript::*file-update-gutter-width*))
-               lines))
+                 :tool-result proto event theme 40))
+         (visible (rendering-visible-lines lines)))
+    (is (equal '(" write /tmp/new.txt (+2 -0)"
+                 "      1 + hello"
+                 "      2 + world")
+               visible))
     (is (= 3 (length lines)) "heading plus one added line per content line")
     (is (every (lambda (l) (search "+ " l)) (rest lines)))
     (is (notany (lambda (l) (search "- " l)) (rest lines))
@@ -528,9 +529,9 @@ file renders behind the same three-column gutter as the twenty-line file."
 (defun file-update-fixture-event (old new)
   (tui-transcript:make-transcript-event
    :tool-result nil "Edited /tmp/x (+1 -1)" :name "edit" :status :ok
-   :presentation (ext:result-diff)
-   :details (list :files (list (list :path "/tmp/x" :old old :new new
-                                     :added 1 :removed 1)))))
+   :presentation (test-diff-presentation
+                  (test-diff-update "/tmp/x" old new
+                                    :added 1 :removed 1))))
 
 (test styled-file-update-collapsed-shows-every-hunk
   "Collapsed file-update cards show each separated changed hunk with three context
@@ -597,37 +598,71 @@ changed window."
                             collect (if (member i '(2 6 10))
                                         (format nil "B~2,'0D" i)
                                         (format nil "l~2,'0D" i)))))
+         (tools-filesystem::*file-diff-presentation-line-cap* 5)
          (event (file-update-fixture-event old new))
          (tui-transcript:*tool-output-expanded* nil)
-         (tui-transcript::*file-update-hunk-preview-line-cap* 5)
          (lines (tui-core:render-transcript-event
                  :tool-result proto event theme 40))
          (visible (rendering-visible-lines lines)))
     (is (equal '(" edit /tmp/x (+1 -1)"
                  "  1   1   l01" "  2     - l02" "      2 + B02" "  3   3   l03" "  4   4   l04"
-                 " … (+3 changed hunks hidden · Ctrl+O)")
-               visible))
+                 " … (+3 changed hunks omitted; re-read for full context)")
+               (subseq visible 0 7)))
     (is (notany (lambda (line) (search "B06" line)) visible))
-    (is (some (lambda (line) (search "Ctrl+O" line)) visible))))
+    (is (some (lambda (line) (search "re-read" line)) visible))))
 
-(test styled-file-update-expanded-renders-full-diff
+(test styled-file-update-expanded-keeps-bounded-presentation
   (let* ((proto (make-tui-rendering-fixture))
          (tui-style:*color-mode* :truecolor)
          (theme (builtin-theme "dark.json"))
-         (numbers (loop for i from 1 to 20 collect i))
-         (old (format nil "~{l~2,'0D~^~%~}" numbers))
+         (old (format nil "~{~A~^~%~}"
+                      (loop for i from 1 to 12 collect (format nil "l~2,'0D" i))))
          (new (format nil "~{~A~^~%~}"
-                      (loop for i in numbers
-                            collect (if (= i 15) "B15" (format nil "l~2,'0D" i)))))
+                      (loop for i from 1 to 12
+                            collect (if (member i '(2 6 10))
+                                        (format nil "B~2,'0D" i)
+                                        (format nil "l~2,'0D" i)))))
+         (tools-filesystem::*file-diff-presentation-line-cap* 5)
          (event (file-update-fixture-event old new))
          (tui-transcript:*tool-output-expanded* t)
          (lines (tui-core:render-transcript-event
-                 :tool-result proto event theme 40)))
-    (is (equal (cons (file-update-heading-line theme "edit" " /tmp/x (+1 -1)")
-                     (tui-markdown:render-diff old new theme 40
-                                               :gutter-width tui-transcript::*file-update-gutter-width*))
-               lines)
-        "expanded renders the full diff with no indicator")))
+                 :tool-result proto event theme 40))
+         (visible (rendering-visible-lines lines)))
+    (is (notany (lambda (line) (search "B06" line)) visible)
+        "expanded mode does not recover a hidden full diff from session data")
+    (is (some (lambda (line) (search "re-read" line)) visible))))
+
+(test styled-session-replay-file-update-uses-private-presentation
+  "Session replay keeps model-facing details compact while the TUI renders the
+file diff from the private presentation term stored alongside the result."
+  (let* ((proto (make-tui-rendering-fixture))
+         (tui-style:*color-mode* :truecolor)
+         (theme (builtin-theme "dark.json"))
+         (details '(:files ((:path "/tmp/x" :added 1 :removed 1
+                             :changed-ranges ((:start 1 :end 1))
+                             :old-sha256 "old-hash"
+                             :new-sha256 "new-hash"))))
+         (presentation
+           (test-diff-presentation (test-diff-update "/tmp/x" "a" "b")))
+         (event (first
+                 (tui-transcript:session-entry-transcript-events
+                  (sess:make-message-entry
+                   (sess:make-tool-result-message
+                    "Edited /tmp/x (+1 -1)"
+                    :tool-name "edit"
+                    :metadata (list :details details
+                                    :presentation presentation))))))
+         (lines (tui-core:render-transcript-event
+                 :tool-result proto event theme 40))
+         (visible (rendering-visible-lines lines)))
+    (is (eq details (tui-transcript:event-details event)))
+    (is (eq presentation (tui-transcript:event-presentation event)))
+    (is (not (tree-contains-key-p details :old)))
+    (is (not (tree-contains-key-p details :new)))
+    (is (equal '(" edit /tmp/x (+1 -1)"
+                 "  1     - a"
+                 "      1 + b")
+               visible))))
 
 (test (styled-system-notice-dim-dot :fixture interactive-authority)
   (let* ((proto (make-tui-rendering-fixture))

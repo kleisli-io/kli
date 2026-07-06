@@ -20,6 +20,7 @@
                 #:make-extension-protocol
                 #:normalize-extension-id
                 #:protocol-storage
+                #:refresh-runtime-contributions
                 #:provider-call
                 #:require-capability-provider
                 #:retract-manifest
@@ -53,8 +54,6 @@
                 #:settings-value)
   (:import-from #:kli/config/wiring
                 #:swap-settings-overlay)
-  (:import-from #:kli/model/providers/compatible
-                #:refresh-compatible-providers)
   (:import-from #:kli/profiles
                 #:find-profile-manifest
                 #:known-profile-names
@@ -74,6 +73,7 @@
                 #:resume-agent-session
                 #:focus-agent-session-mode
                 #:submit-agent-session-prompt
+                #:set-agent-session-option
                 #:mode-binding-agent-id
                 #:session-mode-bindings
                 #:mode-binding-context-binding
@@ -82,6 +82,11 @@
                 #:mode-current-selection
                 #:make-session-event-listener
                 #:register-session-event-listener)
+  (:import-from #:kli/model/registry
+                #:registered-model-option-definitions
+                #:model-option-definition-id
+                #:model-option-definition-type
+                #:model-option-definition-enum-values)
   (:import-from #:kli/event
                 #:event-type
                 #:event-payload)

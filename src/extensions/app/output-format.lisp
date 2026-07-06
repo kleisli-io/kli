@@ -18,12 +18,37 @@
         do (setf (gethash key table) value)
         finally (return table)))
 
+(defun json-plist-p (value)
+  (and (consp value)
+       (evenp (length value))
+       (loop for (key _value) on value by #'cddr
+             always (keywordp key))))
+
+(defun json-value (value)
+  (cond ((json-plist-p value)
+         (loop with table = (make-hash-table :test #'equal)
+               for (key child) on value by #'cddr
+               do (setf (gethash (json-key key) table) (json-value child))
+               finally (return table)))
+        ((stringp value)
+         value)
+        ((listp value)
+         (mapcar #'json-value value))
+        ((vectorp value)
+         (map 'vector #'json-value value))
+        ((eq value t)
+         t)
+        ((symbolp value)
+         (string-downcase (symbol-name value)))
+        (t value)))
+
 (defun payload->json-obj (payload)
   "A string-keyed jzon object mirroring an event PAYLOAD plist, lowercasing the
-keyword keys. Values pass through jzon's own coercion."
+keyword keys. Timing payloads are coerced from plists to JSON objects."
   (loop with table = (make-hash-table :test #'equal)
         for (key value) on payload by #'cddr
-        do (setf (gethash (json-key key) table) value)
+        do (setf (gethash (json-key key) table)
+                 (if (eq key :timings) (json-value value) value))
         finally (return table)))
 
 (defun end-event-final-text (event)
@@ -58,8 +83,11 @@ serialization fault degrades to the plain final text plus a stderr note."
                                    "state" (string-downcase
                                             (princ-to-string
                                              (getf payload :state)))))
-                  (usage (getf payload :usage)))
+                  (usage (getf payload :usage))
+                  (timings (getf payload :timings)))
               (when usage (setf (gethash "usage" object) usage))
+              (when timings
+                (setf (gethash "timings" object) (json-value timings)))
               (write-json-line object stream))
           (error (condition)
             (write-line (or (getf payload :text) "") stream)

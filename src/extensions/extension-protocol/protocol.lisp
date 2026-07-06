@@ -326,6 +326,10 @@ BASE."
    (retractor
     :initarg :retractor
     :reader contribution-retractor)
+   (refresh
+    :initarg :refresh
+    :initform nil
+    :reader contribution-refresh)
    (state
     :initform nil
     :accessor contribution-state)))
@@ -367,6 +371,10 @@ BASE."
     :initarg :details
     :initform nil
     :reader tool-result-details)
+   (presentation
+    :initarg :presentation
+    :initform nil
+    :reader tool-result-presentation)
    (error-p
     :initarg :error-p
     :initform nil
@@ -417,18 +425,22 @@ BASE."
                  :provider provider
                  :source source))
 
-(defun make-effect-contribution (&key name installer retractor source)
+(defun make-effect-contribution (&key name installer retractor refresh source)
   (unless installer
     (error "Effect contribution ~S requires an installer." name))
   (unless retractor
     (error "Effect contribution ~S requires a retractor. ~@
             Use a no-op lambda explicitly if the effect needs no cleanup."
            name))
+  (when (and refresh (not (functionp refresh)))
+    (error "Effect contribution ~S refresh hook is not a function: ~S."
+           name refresh))
   (make-instance 'effect-contribution
                  :kind :effect
                  :name (normalize-extension-id name)
                  :installer installer
                  :retractor retractor
+                 :refresh refresh
                  :source source))
 
 (defun tool-display-name (name)
@@ -459,10 +471,11 @@ BASE."
                    :renderer renderer
                    :metadata metadata)))
 
-(defun make-tool-result (&key content details error-p)
+(defun make-tool-result (&key content details presentation error-p)
   (make-instance 'tool-result
                  :content content
                  :details details
+                 :presentation presentation
                  :error-p error-p))
 
 (defun make-tool-text-content (text)
@@ -517,10 +530,11 @@ BASE."
           (error "Tool parameter ~S is required." name)
           value))))
 
-(defun tool-text-result (text &key details error-p)
+(defun tool-text-result (text &key details presentation error-p)
   (make-tool-result
    :content (list (make-tool-text-content text))
    :details details
+   :presentation presentation
    :error-p error-p))
 
 (defmethod smoke-test-protocol ((protocol extension-protocol) context)
@@ -1015,6 +1029,27 @@ place. Lookup errors signal outside the dispatch scope."
                  context))
   (push contribution (protocol-installed-contributions protocol))
   contribution)
+
+(defgeneric refresh-runtime-contribution (protocol contribution context)
+  (:documentation "Reconcile an installed contribution with runtime config/cwd/env after boot snapshot reuse. The default is no-op. Methods must preserve installed topology and mutate only runtime-derived state."))
+
+(defmethod refresh-runtime-contribution ((protocol extension-protocol)
+                                         (contribution contribution)
+                                         context)
+  (declare (ignore protocol contribution context))
+  nil)
+
+(defmethod refresh-runtime-contribution ((protocol extension-protocol)
+                                         (contribution effect-contribution)
+                                         context)
+  (let ((refresh (contribution-refresh contribution)))
+    (when refresh
+      (funcall refresh protocol contribution context))))
+
+(defun refresh-runtime-contributions (protocol context)
+  "Run the runtime-rebind lifecycle over installed contributions."
+  (dolist (contribution (protocol-installed-contributions protocol))
+    (refresh-runtime-contribution protocol contribution context)))
 
 (defmethod check-contribution-precondition ((protocol extension-protocol)
                                             (contribution tool-contribution)

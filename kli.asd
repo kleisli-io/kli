@@ -5,7 +5,7 @@
   :version (:read-file-form "version.sexp")
   :author "Kleisli.IO"
   :license "MIT"
-  :depends-on ("let-over-lambda" "com.inuoe.jzon" "drakma" "ironclad" "cl-base64" "3bmd" "3bmd-ext-code-blocks" "3bmd-ext-tables" "colorize" "cl-difflib" "cl-ppcre" "sqlite" "paren-repair" "sb-posix")
+  :depends-on ("let-over-lambda" "com.inuoe.jzon" "drakma" "ironclad" "cl-base64" "3bmd" "3bmd-ext-code-blocks" "3bmd-ext-tables" "colorize" "cl-difflib" "cl-ppcre" "sqlite" "paren-repair" "websocket-driver-client" "sb-posix")
   :serial t
   :components ((:file "vendor/buildlisp-resources")
                (:file "src/package")

@@ -110,22 +110,30 @@ to page further)"
                                 :truncated clamped)))))))))
 
 (defun run-write-tool (tool parameters context &key call-id on-update)
-  "Write CONTENT to PATH, capturing the pre-supersede content in details
-so the transcript can render the change as a diff. A new file carries a
-nil old."
   (declare (ignore tool context call-id on-update))
   (let* ((path (file-pathname parameters))
          (content (required-tool-parameter parameters :content))
-         (old (and (probe-file path)
+         (existed-p (probe-file path))
+         (old (and existed-p
                    (not (oversized-file-p path))
                    (read-file-string path))))
     (write-file-string path content)
-    (tool-text-result
-     (format nil "Wrote ~D characters to ~A." (length content) path)
-     :details (list :path (namestring path)
-                    :characters (length content)
-                    :old old
-                    :new content))))
+    (let ((old-known-p (or (not existed-p) (stringp old))))
+      (tool-text-result
+       (format nil "Wrote ~D characters to ~A." (length content) path)
+       :details (compact-file-change-detail
+                 (namestring path)
+                 old
+                 content
+                 :old-known-p old-known-p
+                 :characters (length content)
+                 :created-p (not existed-p)
+                 :overwritten-p (and existed-p t))
+       :presentation
+       (result-diff
+        :updates (list (file-diff-presentation-update
+                        (namestring path) old content
+                        :old-known-p old-known-p)))))))
 
 (defparameter *walk-entry-limit* 100000
   "Most filesystem entries one find/search glob walk visits. A store-scale
@@ -492,13 +500,16 @@ line of the budget."
           when (= 1 (sbit show i))
             do (let ((text (if (= 1 (sbit match i))
                                (destructuring-bind (mstart mend count) (gethash i windows)
-                                 (format nil "~%*~D:~A ~A~@[ (+~D more matches on this line)~]"
-                                         (+ line-offset i 1) (line-hash line)
-                                         (render-window line mstart mend)
+                                 (format nil "~%~A~@[ (+~D more matches on this line)~]"
+                                         (render-anchored-row
+                                          (+ line-offset i 1) line
+                                          :prefix "*"
+                                          :rendered-line (render-window line mstart mend))
                                          (when (> count 1) (1- count))))
-                               (format nil "~% ~D:~A ~A"
-                                       (+ line-offset i 1) (line-hash line)
-                                       (render-truncate-front line)))))
+                               (format nil "~%~A"
+                                       (render-anchored-row
+                                        (+ line-offset i 1) line
+                                        :prefix " ")))))
                  (when (and (plusp emitted)
                             (> (+ spent (length text)) char-budget))
                    (setf truncated t)
@@ -537,13 +548,16 @@ line of the budget."
                           (text (if record
                                     (destructuring-bind (rindex mstart mend count) record
                                       (declare (ignore rindex))
-                                      (format nil "~%*~D:~A ~A~@[ (+~D more matches on this line)~]"
-                                              (1+ index) (line-hash line)
-                                              (render-window line mstart mend)
+                                      (format nil "~%~A~@[ (+~D more matches on this line)~]"
+                                              (render-anchored-row
+                                               (1+ index) line
+                                               :prefix "*"
+                                               :rendered-line (render-window line mstart mend))
                                               (when (> count 1) (1- count))))
-                                    (format nil "~% ~D:~A ~A"
-                                            (1+ index) (line-hash line)
-                                            (render-truncate-front line)))))
+                                    (format nil "~%~A"
+                                            (render-anchored-row
+                                             (1+ index) line
+                                             :prefix " ")))))
                      (when (and (plusp emitted)
                                 (> (+ spent (length text)) char-budget))
                        (setf truncated t)
@@ -846,6 +860,226 @@ output limit -- narrow the pattern or path)"
     (values (1+ prefix) (- nl suffix)
             (- nl suffix prefix) (- ol suffix prefix))))
 
+(defun compact-changed-ranges (start end added removed)
+  (when (plusp (+ added removed))
+    (list (list :start start :end end))))
+
+(defparameter *file-diff-presentation-context-lines* 3
+  "Unchanged lines retained around each private file-diff hunk.")
+
+(defparameter *file-diff-presentation-line-cap* 200
+  "Most diff rows persisted in one private file-diff presentation update.")
+
+(defparameter *file-diff-presentation-line-char-cap* 1000
+  "Longest single diff row text persisted in private presentation data.")
+
+(defun diff-presentation-opcodes (old-lines new-lines)
+  (let ((matcher (make-instance 'sequence-matcher :test-function #'equal)))
+    (set-sequences matcher (coerce old-lines 'list) (coerce new-lines 'list))
+    (get-opcodes matcher)))
+
+(defun diff-presentation-window (op context-lines)
+  (list :i-start (max 0 (- (opcode-i1 op) context-lines))
+        :i-end (+ (opcode-i2 op) context-lines)
+        :j-start (max 0 (- (opcode-j1 op) context-lines))
+        :j-end (+ (opcode-j2 op) context-lines)
+        :hunks 1))
+
+(defun merge-diff-presentation-windows (windows)
+  (let ((out '()))
+    (dolist (window windows (nreverse out))
+      (let ((last (first out)))
+        (if (and last
+                 (<= (getf window :i-start) (getf last :i-end))
+                 (<= (getf window :j-start) (getf last :j-end)))
+            (setf (getf last :i-end) (max (getf last :i-end)
+                                          (getf window :i-end))
+                  (getf last :j-end) (max (getf last :j-end)
+                                          (getf window :j-end))
+                  (getf last :hunks) (+ (getf last :hunks)
+                                        (getf window :hunks)))
+            (push (copy-list window) out))))))
+
+(defun clip-diff-presentation-segment (op window)
+  (let ((tag (opcode-tag op))
+        (i1 (opcode-i1 op))
+        (i2 (opcode-i2 op))
+        (j1 (opcode-j1 op))
+        (j2 (opcode-j2 op))
+        (wi1 (getf window :i-start))
+        (wi2 (getf window :i-end))
+        (wj1 (getf window :j-start))
+        (wj2 (getf window :j-end)))
+    (ecase tag
+      (:equal
+       (let* ((lo (max i1 wi1 (+ i1 (- wj1 j1))))
+              (hi (min i2 wi2 (+ i1 (- wj2 j1)))))
+         (when (< lo hi)
+           (list :equal lo hi (+ j1 (- lo i1)) (+ j1 (- hi i1))))))
+      (:delete
+       (when (< (max i1 wi1) (min i2 wi2))
+         (list :delete i1 i2 j1 j2)))
+      (:insert
+       (when (< (max j1 wj1) (min j2 wj2))
+         (list :insert i1 i2 j1 j2)))
+      (:replace
+       (when (or (< (max i1 wi1) (min i2 wi2))
+                 (< (max j1 wj1) (min j2 wj2)))
+         (list :replace i1 i2 j1 j2))))))
+
+(defun bounded-diff-presentation-line (line)
+  (if (<= (length line) *file-diff-presentation-line-char-cap*)
+      line
+      (format nil "~A …"
+              (subseq line 0 *file-diff-presentation-line-char-cap*))))
+
+(defun diff-presentation-row (kind old-line new-line text)
+  (append (list :kind kind)
+          (when old-line (list :old-line old-line))
+          (when new-line (list :new-line new-line))
+          (list :text (bounded-diff-presentation-line text))))
+
+(defun diff-presentation-segment-rows (segment old-lines new-lines)
+  (destructuring-bind (tag i1 i2 j1 j2) segment
+    (ecase tag
+      (:equal
+       (loop for i from i1 below i2
+             for j from j1 below j2
+             collect (diff-presentation-row :context (1+ i) (1+ j)
+                                            (svref old-lines i))))
+      (:delete
+       (loop for i from i1 below i2
+             collect (diff-presentation-row :remove (1+ i) nil
+                                            (svref old-lines i))))
+      (:insert
+       (loop for j from j1 below j2
+             collect (diff-presentation-row :add nil (1+ j)
+                                            (svref new-lines j))))
+      (:replace
+       (append
+        (loop for i from i1 below i2
+              collect (diff-presentation-row :remove (1+ i) nil
+                                             (svref old-lines i)))
+        (loop for j from j1 below j2
+              collect (diff-presentation-row :add nil (1+ j)
+                                             (svref new-lines j))))))))
+
+(defun diff-presentation-window-rows (window opcodes old-lines new-lines)
+  (loop for op in opcodes
+        for clipped = (clip-diff-presentation-segment op window)
+        when clipped
+          append (diff-presentation-segment-rows clipped old-lines new-lines)))
+
+(defun sum-window-hunks (windows)
+  (loop for window in windows sum (or (getf window :hunks) 1)))
+
+(defun diff-presentation-hunks (old-lines new-lines)
+  (let* ((opcodes (diff-presentation-opcodes old-lines new-lines))
+         (windows (merge-diff-presentation-windows
+                   (loop for op in opcodes
+                         unless (eq (opcode-tag op) :equal)
+                           collect (diff-presentation-window
+                                    op *file-diff-presentation-context-lines*))))
+         (cap *file-diff-presentation-line-cap*)
+         (used 0)
+         (blocks '())
+         (truncated-p nil)
+         (hidden-hunks 0))
+    (loop while windows
+          for window = (pop windows)
+          for rows = (diff-presentation-window-rows window opcodes
+                                                    old-lines new-lines)
+          for row-count = (length rows)
+          do (cond ((<= (+ used row-count) cap)
+                    (push (list :rows rows :hunks (getf window :hunks))
+                          blocks)
+                    (incf used row-count))
+                   (t
+                    (let ((space (max 0 (- cap used))))
+                      (when (plusp space)
+                        (push (list :rows (subseq rows 0 (min space row-count))
+                                    :hunks (getf window :hunks))
+                              blocks))
+                      (setf truncated-p t
+                            hidden-hunks (+ (or (getf window :hunks) 1)
+                                            (sum-window-hunks windows))
+                            windows nil)))))
+    (values (nreverse blocks) truncated-p hidden-hunks)))
+
+(defun file-diff-presentation-update (path old-content new-content
+                                      &key old-known-p added removed)
+  (let* ((old-known (if old-known-p t (stringp old-content)))
+         (new-lines (split-file-lines new-content))
+         (old-lines (and old-known
+                         (split-file-lines (or old-content "")))))
+    (multiple-value-bind (start end computed-added computed-removed)
+        (if old-known
+            (line-change-summary old-lines new-lines)
+            (values nil nil nil nil))
+      (declare (ignore start end))
+      (let ((base (append
+                   (list :path (namestring (pathname path)))
+                   (list :old-known-p old-known)
+                   (when (or added computed-added)
+                     (list :added (or added computed-added)))
+                   (when (or removed computed-removed)
+                     (list :removed (or removed computed-removed))))))
+        (if old-known
+            (multiple-value-bind (hunks truncated-p hidden-hunks)
+                (diff-presentation-hunks old-lines new-lines)
+              (append base
+                      (list :hunks hunks)
+                      (when truncated-p
+                        (list :truncated-p t
+                              :hidden-hunks hidden-hunks
+                              :notice "Diff truncated; re-read the file for full context."))))
+            (append base
+                    (list :truncated-p t
+                          :notice "Diff omitted because previous content was not retained; re-read the file for current content.")))))))
+
+(defun compact-file-change-detail (path old-content new-content
+                                   &key old-known-p characters created-p
+                                     overwritten-p added removed repair status
+                                     candidate-id classification dry-run-p)
+  (let* ((old-known (if old-known-p t (stringp old-content)))
+         (new-lines (split-file-lines new-content))
+         (old-lines (and old-known
+                         (split-file-lines (or old-content "")))))
+    (multiple-value-bind (start end computed-added computed-removed)
+        (if old-known
+            (line-change-summary old-lines new-lines)
+            (values nil nil nil nil))
+      (let ((added-count (or added computed-added))
+            (removed-count (or removed computed-removed)))
+        (append
+         (list :path (namestring (pathname path)))
+         (when characters
+           (list :characters characters))
+         (when (not (null created-p))
+           (list :created-p (and created-p t)))
+         (when (not (null overwritten-p))
+           (list :overwritten-p (and overwritten-p t)))
+         (when status
+           (list :status status))
+         (when dry-run-p
+           (list :dry-run-p t))
+         (when candidate-id
+           (list :candidate-id candidate-id))
+         (when added-count
+           (list :added added-count))
+         (when removed-count
+           (list :removed removed-count))
+         (when (and start end added-count removed-count)
+           (list :changed-ranges
+                 (compact-changed-ranges start end added-count removed-count)))
+         (when (stringp old-content)
+           (list :old-sha256 (file-content-sha256 old-content)))
+         (list :new-sha256 (file-content-sha256 new-content))
+         (when repair
+           (list :repair repair))
+         (when classification
+           (list :classification classification)))))))
+
 (defun final-edit-change (old-content new-content)
   "Return NEW-LINES, REGIONS, ADDED, and REMOVED for content-level writes."
   (let ((old-lines (split-file-lines old-content))
@@ -985,32 +1219,45 @@ original is never auto-safe."
                          :repair :accepted
                          :classification classification
                          :repair-diff diff))
-                 (let* ((canonical-path (canonical-file-namestring path))
-                        (base-hash (file-content-sha256 old-content))
-                        (patched-hash (file-content-sha256 patched-content))
-                        (repaired-hash (file-content-sha256 repaired-content))
-                        (id (make-repair-candidate-id canonical-path base-hash
-                                                      patched-hash repaired-hash))
-                        (candidate (list :id id
-                                         :path canonical-path
-                                         :display-path path
-                                         :base-hash base-hash
-                                         :patched-hash patched-hash
-                                         :repaired-hash repaired-hash
-                                         :repaired repaired-content
-                                         :classification classification
-                                         :diff diff
-                                         :timestamp (get-universal-time))))
-                   (list :status :preview
-                         :path path
-                         :candidate-id id
-                         :candidate candidate
-                         :patched patched-content
-                         :repaired repaired-content
-                         :patched-hash patched-hash
-                         :repaired-hash repaired-hash
-                         :classification classification
-                         :repair-diff diff))))))))))
+                 (multiple-value-bind (repaired-start repaired-end
+                                       repaired-added repaired-removed)
+                     (line-change-summary (split-file-lines old-content)
+                                          (split-file-lines repaired-content))
+                   (let* ((canonical-path (canonical-file-namestring path))
+                          (base-hash (file-content-sha256 old-content))
+                          (patched-hash (file-content-sha256 patched-content))
+                          (repaired-hash (file-content-sha256 repaired-content))
+                          (id (make-repair-candidate-id canonical-path base-hash
+                                                        patched-hash repaired-hash))
+                          (candidate (list :id id
+                                           :path canonical-path
+                                           :display-path path
+                                           :base-hash base-hash
+                                           :patched-hash patched-hash
+                                           :repaired-hash repaired-hash
+                                           :repaired repaired-content
+                                           :classification classification
+                                           :diff diff
+                                           :timestamp (get-universal-time))))
+                     (list :status :preview
+                           :path path
+                           :candidate-id id
+                           :candidate candidate
+                           :base-hash base-hash
+                           :patched-hash patched-hash
+                           :repaired-hash repaired-hash
+                           :added repaired-added
+                           :removed repaired-removed
+                           :changed-ranges
+                           (compact-changed-ranges repaired-start repaired-end
+                                                   repaired-added repaired-removed)
+                           :classification classification
+                           :repair-diff diff
+                           :presentation-update
+                           (file-diff-presentation-update
+                            path old-content repaired-content
+                            :added repaired-added
+                            :removed repaired-removed))))))))))))
 
 (defun render-repair-preview (preview)
   (with-output-to-string (out)
@@ -1066,11 +1313,19 @@ original is never auto-safe."
                      (terpri out)
                      (write-string (render-anchored-lines new-lines start end) out)))
                  :details (list :files
-                                (list (list :path canonical-path
-                                            :old current
-                                            :new repaired
-                                            :added added
-                                            :removed removed))))))))))))
+                                (list (compact-file-change-detail
+                                       canonical-path current repaired
+                                       :added added
+                                       :removed removed
+                                       :status :repair-accepted
+                                       :repair :accepted
+                                       :candidate-id candidate-id)))
+                 :presentation
+                 (result-diff
+                  :updates (list (file-diff-presentation-update
+                                  canonical-path current repaired
+                                  :added added
+                                  :removed removed))))))))))))
 
 (defun run-transactional-edit-tool (parameters context)
   (let* ((input (required-tool-parameter parameters :input))
@@ -1102,30 +1357,44 @@ original is never auto-safe."
                                         (list :path (getf preview :path)
                                               :status :repair-preview
                                               :candidate-id (getf preview :candidate-id)
-                                              :patched (getf preview :patched)
-                                              :repaired (getf preview :repaired)
-                                              :patched-hash (getf preview :patched-hash)
-                                              :repaired-hash (getf preview :repaired-hash)
-                                              :classification (getf preview :classification)
-                                              :repair-diff (getf preview :repair-diff)))
-                                      previews))))
+                                              :base-sha256 (getf preview :base-hash)
+                                              :patched-sha256 (getf preview :patched-hash)
+                                              :repaired-sha256 (getf preview :repaired-hash)
+                                              :added (getf preview :added)
+                                              :removed (getf preview :removed)
+                                              :changed-ranges
+                                              (getf preview :changed-ranges)
+                                              :classification
+                                              (getf preview :classification)))
+                                      previews))
+               :presentation
+               (result-diff
+                :updates (mapcar (lambda (preview)
+                                   (getf preview :presentation-update))
+                                 previews))))
             (let ((blocks '())
-                  (files '()))
+                  (files '())
+                  (updates '()))
               (dolist (decision decisions)
                 (let ((path (getf decision :path))
                       (new-content (getf decision :new))
                       (new-lines (getf decision :new-lines)))
                   (write-file-string path new-content)
                   (remember-read protocol path new-lines)
-                  (push (list :path path
-                              :old (getf decision :old)
-                              :new new-content
-                              :added (getf decision :added)
-                              :removed (getf decision :removed)
-                              :repair (getf decision :repair)
-                              :classification (getf decision :classification)
-                              :repair-diff (getf decision :repair-diff))
+                  (push (compact-file-change-detail
+                         path
+                         (getf decision :old)
+                         new-content
+                         :added (getf decision :added)
+                         :removed (getf decision :removed)
+                         :repair (getf decision :repair)
+                         :classification (getf decision :classification))
                         files)
+                  (push (file-diff-presentation-update
+                         path (getf decision :old) new-content
+                         :added (getf decision :added)
+                         :removed (getf decision :removed))
+                        updates)
                   (push (render-edit-success-block path
                                                    (getf decision :added)
                                                    (getf decision :removed)
@@ -1136,7 +1405,8 @@ original is never auto-safe."
                         blocks)))
               (tool-text-result
                (format nil "~{~A~^~%~}" (nreverse blocks))
-               :details (list :files (nreverse files)))))))))
+               :details (list :files (nreverse files))
+               :presentation (result-diff :updates (nreverse updates)))))))))
 
 (defun run-edit-tool (tool parameters context &key call-id on-update)
   "Apply or accept a hashline edit transaction. Invalid, unsafe, or stale edits

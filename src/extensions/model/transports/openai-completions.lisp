@@ -217,29 +217,43 @@ lowers to an untrusted_text fence."
                              (getf (model-provider-metadata provider) :instructions)
                              "You are a helpful assistant."))
            (selection (model-request-selection request))
+           (reasoning-effort (model-selection-option-value selection "reasoning-effort"))
+           (text-verbosity (model-selection-option-value selection "text-verbosity"))
+           (service-tier (model-selection-option-value selection "service-tier"))
+           (prompt-cache-retention
+             (model-selection-option-value selection "prompt-cache-retention"))
            (model-meta (%request-model-metadata request context))
            (model-profile (%metadata-transport-profile model-meta))
            (developer-role-p (%transport-profile-value model-profile :developer-role))
            (body (build-completions-body (model-request-model-id request)
                                          (model-request-model-messages request)
                                          :instructions instructions
-                                         :reasoning-effort (model-selection-option-value selection "reasoning-effort")
-                                         :text-verbosity (model-selection-option-value selection "text-verbosity")
-                                         :service-tier (model-selection-option-value selection "service-tier")
-                                         :prompt-cache-retention (model-selection-option-value selection "prompt-cache-retention")
+                                         :reasoning-effort reasoning-effort
+                                         :text-verbosity text-verbosity
+                                         :service-tier service-tier
+                                         :prompt-cache-retention prompt-cache-retention
                                          :tools (model-request-tool-schemas request)
                                          :developer-role-p developer-role-p))
            (state (make-completions-state)))
+      (%note-request-payload request :openai-completions body
+                             :url (completions-url base)
+                             :message-count (length (model-request-model-messages request))
+                             :reasoning-effort reasoning-effort
+                             :service-tier service-tier
+                             :prompt-cache-retention prompt-cache-retention
+                             :text-verbosity text-verbosity)
       (multiple-value-bind (stream status)
           (%completions-request request (completions-url base) body
                                 (build-completions-headers token extra))
         (unwind-protect
             (progn
+              (%note-http-response request status)
               (unless (and (integerp status) (<= 200 status 299))
                 (error 'openai-api-error :status status
                        :body (drain-capped-body stream)))
               (stream-sse-events stream
-                                 (lambda (ev data) (declare (ignore ev))
+                                 (lambda (ev data)
+                                   (%note-provider-event request ev data)
                                    (map-completions-chunk data state emit)))
               (finish-completions state emit))
           (setf (model-request-stream-closer request) nil)
