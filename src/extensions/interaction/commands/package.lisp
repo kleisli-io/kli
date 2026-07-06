@@ -38,6 +38,7 @@
    #:command-arguments
    #:command-runner
    #:command-completer
+   #:*command-completion-mode*
    #:command-renderer
    #:command-metadata
    #:command-result

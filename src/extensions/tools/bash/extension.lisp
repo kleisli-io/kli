@@ -50,7 +50,8 @@
 (defextension bash-command
   (:requires
    (capability commands :contract commands/v1)
-   (tool bash))
+   (tool bash)
+   (extension bash-jobs))
   (:provides
    (effect bash-command
      #'register-bash-command

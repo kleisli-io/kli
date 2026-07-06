@@ -777,6 +777,11 @@ let
       deps = [
         lisp.fiveam
       ];
+      commandTools = {
+        bash = pkgs.bashInteractive;
+        bash-completion = pkgs.bash-completion;
+        coreutils = pkgs.coreutils;
+      };
       srcs = testSrcs;
       expression = "(fiveam:run! 'kli/tests::all)";
     };

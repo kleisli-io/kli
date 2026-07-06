@@ -1,5 +1,9 @@
 (in-package #:kli/interaction/commands)
 
+(defvar *command-completion-mode* :passive
+  "How a command completer is being queried: :passive for live hints/popups,
+:manual for an explicit completion request.")
+
 (defclass command-service (live-object)
   ((commands
     :initform (make-hash-table :test #'equal)

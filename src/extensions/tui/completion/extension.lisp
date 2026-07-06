@@ -20,8 +20,8 @@
              (:file (file-candidates protocol))
              (:path (path-candidates protocol query))))
          :argument-help
-         (lambda (protocol name tail)
-           (argument-help protocol name tail)))))
+         (lambda (protocol name tail &key (mode :passive))
+           (argument-help protocol name tail :mode mode)))))
 
 (defextension tui-completion
   (:provides

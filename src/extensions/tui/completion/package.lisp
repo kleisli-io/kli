@@ -11,6 +11,7 @@
                 #:command-description
                 #:command-arguments
                 #:command-completer
+                #:*command-completion-mode*
                 #:command-signature)
   (:import-from #:kli/tui/editor
                 #:make-completion-candidate)

@@ -325,6 +325,7 @@ note captured into :compiler-notes rather than aborting the redefinition."
     (install-extensions context
                         commands:*commands-extension-manifest*
                         tools-bash:*bash-tool-extension-manifest*
+                        tools-bash:*bash-jobs-extension-manifest*
                         tools-bash:*bash-command-extension-manifest*)
     (let* ((commands (ext:require-capability-provider protocol
                                                       :commands
@@ -340,12 +341,110 @@ note captured into :compiler-notes rather than aborting the redefinition."
                    (getf (first (commands:command-result-content result))
                          :text))))))
 
+(test (bash-command-forwards-timeout-option :fixture tool-authority)
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context)))
+    (install-extensions context
+                        commands:*commands-extension-manifest*
+                        tools-bash:*bash-tool-extension-manifest*
+                        tools-bash:*bash-jobs-extension-manifest*
+                        tools-bash:*bash-command-extension-manifest*)
+    (let* ((commands (ext:require-capability-provider protocol
+                                                      :commands
+                                                      :contract :commands/v1))
+           (result (ext:provider-call commands
+                                      :invoke-command
+                                      :bash
+                                      '(:tail "--timeout 1 sleep 30")
+                                      context)))
+      (is (commands:command-result-error-p result))
+      (is (= 1 (getf (commands:command-result-details result)
+                     :timeout-seconds)))
+      (is (search "timed out"
+                  (getf (first (commands:command-result-content result))
+                        :text))))))
+
+(test (bash-command-forwards-background-option :fixture tool-authority)
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context)))
+    (install-extensions context
+                        commands:*commands-extension-manifest*
+                        tools-bash:*bash-tool-extension-manifest*
+                        tools-bash:*bash-jobs-extension-manifest*
+                        tools-bash:*bash-command-extension-manifest*)
+    (let* ((commands (ext:require-capability-provider protocol
+                                                      :commands
+                                                      :contract :commands/v1))
+           (result (ext:provider-call commands
+                                      :invoke-command
+                                      :bash
+                                      '(:tail "--background printf bg-ok")
+                                      context))
+           (details (commands:command-result-details result)))
+      (is (not (commands:command-result-error-p result)))
+      (is (getf details :background-p))
+      (is (string= "printf bg-ok" (getf details :command)))
+      (is (search "bash-" (getf details :job-id))))))
+
+(test (bash-job-commands-poll-list-and-kill-background-jobs :fixture tool-authority)
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context)))
+    (install-extensions context
+                        commands:*commands-extension-manifest*
+                        tools-bash:*bash-tool-extension-manifest*
+                        tools-bash:*bash-jobs-extension-manifest*
+                        tools-bash:*bash-command-extension-manifest*)
+    (let* ((commands (ext:require-capability-provider protocol
+                                                      :commands
+                                                      :contract :commands/v1))
+           (short (ext:provider-call commands
+                                     :invoke-command
+                                     :bash
+                                     '(:tail "--background printf command-bg")
+                                     context))
+           (short-id (getf (commands:command-result-details short) :job-id))
+           (long (ext:provider-call commands
+                                    :invoke-command
+                                    :bash
+                                    '(:tail "--background sleep 30")
+                                    context))
+           (long-id (getf (commands:command-result-details long) :job-id)))
+      (is (ext:provider-call commands :find-command :bash-output))
+      (is (ext:provider-call commands :find-command :bash-kill))
+      (is (ext:provider-call commands :find-command :bash-jobs))
+      (loop repeat 20
+            for poll = (ext:provider-call commands
+                                          :invoke-command
+                                          :bash-output
+                                          (list :tail short-id)
+                                          context)
+            for text = (getf (first (commands:command-result-content poll)) :text)
+            until (search "command-bg" text)
+            finally (is (search "command-bg" text)
+                        "bash-output reads background output"))
+      (let ((listed (ext:provider-call commands
+                                       :invoke-command
+                                       :bash-jobs
+                                       '()
+                                       context)))
+        (let ((text (getf (first (commands:command-result-content listed)) :text)))
+          (is (search short-id text) "bash-jobs lists the finished job")
+          (is (search long-id text) "bash-jobs lists the running job")))
+      (let* ((killed (ext:provider-call commands
+                                        :invoke-command
+                                        :bash-kill
+                                        (list :tail long-id)
+                                        context))
+             (details (commands:command-result-details killed)))
+        (is (getf details :killed-p) "bash-kill stops the running job")))))
+
 (test (bash-command-reports-shell-failure :fixture tool-authority)
   (let* ((context (kli:make-kernel-host))
          (protocol (switch-to-extension-protocol context)))
     (install-extensions context
                         commands:*commands-extension-manifest*
                         tools-bash:*bash-tool-extension-manifest*
+                        tools-bash:*bash-jobs-extension-manifest*
                         tools-bash:*bash-command-extension-manifest*)
     (let* ((commands (ext:require-capability-provider protocol
                                                       :commands
@@ -2263,7 +2362,10 @@ than trust a read that happened in a session the user switched away from."
                                   :edit
                                   (list :accept_repair candidate-id
                                         :path (namestring path))
-                                  context)))
+                                  context))
+                  (canonical-path
+                    (tools-filesystem::canonical-file-namestring
+                     (namestring path))))
              (is (not (ext:tool-result-error-p preview-result)))
              (assert-private-diff-presentation preview-result (namestring path))
              (let ((wire (tool-result-responses-wire "edit" preview-result)))
@@ -2274,10 +2376,10 @@ than trust a read that happened in a session the user switched away from."
                (is (search "\"repaired-sha256\":" wire))
                (assert-no-bulk-file-result-wire wire))
              (is (not (ext:tool-result-error-p accepted)))
-             (assert-private-diff-presentation accepted (namestring path))
+             (assert-private-diff-presentation accepted canonical-path)
              (assert-compact-file-result-wire
               (tool-result-responses-wire "edit" accepted)
-              (namestring path))
+              canonical-path)
              (is (search "Accepted repair" (tool-result-text accepted)))
              (is (search "|" (tool-result-text accepted))
                  "repair accept returns pipe-delimited fresh anchors")
@@ -2290,6 +2392,60 @@ than trust a read that happened in a session the user switched away from."
              (is (search "No pending edit repair candidate"
                          (tool-result-text second-accept)))))
       (ignore-errors (delete-file path)))))
+
+(test (hashline-edit-accepts-preview-through-symlink-path :fixture tool-authority)
+  "Accepting a repair through an alias path reports the canonical file path."
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context))
+         (real-path (tool-test-typed-path "hashline-accept-symlink-real" "lisp"))
+         (link-path (tool-test-typed-path "hashline-accept-symlink-link" "lisp"))
+         (original (two-defun-content)))
+    (unwind-protect
+         (progn
+           (install-file-tools context)
+           (ignore-errors (delete-file link-path))
+           (with-open-file (s real-path :direction :output
+                                        :if-exists :supersede
+                                        :if-does-not-exist :create)
+             (write-string original s))
+           (sb-posix:symlink (namestring real-path) (namestring link-path))
+           (ext:invoke-tool protocol
+                            :read
+                            (list :path (namestring link-path))
+                            context)
+           (let* ((preview-result
+                    (ext:invoke-tool
+                     protocol
+                     :edit
+                     (list :input
+                           (format nil "@@ ~A~%= 3:~A..3:~A~%~~((defun b ()"
+                                   (namestring link-path)
+                                   (tools-filesystem:line-hash "(defun b ()")
+                                   (tools-filesystem:line-hash "(defun b ()")))
+                     context))
+                  (preview (first-repair-preview preview-result))
+                  (candidate-id (getf preview :candidate-id))
+                  (accepted (ext:invoke-tool
+                             protocol
+                             :edit
+                             (list :accept_repair candidate-id
+                                   :path (namestring link-path))
+                             context))
+                  (canonical-path
+                    (tools-filesystem::canonical-file-namestring
+                     (namestring link-path))))
+             (is (not (string= (namestring link-path) canonical-path))
+                 "the fixture must exercise a path alias")
+             (is (not (ext:tool-result-error-p preview-result)))
+             (assert-private-diff-presentation preview-result
+                                               (namestring link-path))
+             (is (not (ext:tool-result-error-p accepted)))
+             (assert-private-diff-presentation accepted canonical-path)
+             (assert-compact-file-result-wire
+              (tool-result-responses-wire "edit" accepted)
+              canonical-path)))
+      (ignore-errors (delete-file link-path))
+      (ignore-errors (delete-file real-path)))))
 
 (test (hashline-edit-accept-rejects-disk-drift :fixture tool-authority)
   "Accepting a preview re-checks the file hash and refuses to write after drift."
@@ -3357,6 +3513,70 @@ subdirectory, and a name carrying a space, deleted afterwards."
 (defmacro with-bash-completion-fixture ((root-var) &body body)
   `(call-with-bash-completion-fixture (lambda (,root-var) ,@body)))
 
+(defun call-with-bash-programmable-completion-fixture (thunk)
+  (with-bash-completion-fixture (root)
+    (let ((bash (merge-pathnames "bash" root))
+          (saved (uiop:getenv "KLI_BASH_COMPLETION_BASH")))
+      (with-open-file (stream bash :direction :output
+                                   :if-exists :supersede
+                                   :if-does-not-exist :create)
+        (write-line "#!/bin/sh" stream)
+        (write-line "case \"$6\" in" stream)
+        (write-line "  'ls --') printf '%s\\n' --all --almost-all ;;" stream)
+        (write-line "  'ls ') printf '%s\\n' --author ;;" stream)
+        (write-line "esac" stream))
+      (sb-posix:chmod (uiop:native-namestring bash) #o755)
+      (unwind-protect
+           (progn
+             (sb-posix:setenv "KLI_BASH_COMPLETION_BASH"
+                              (uiop:native-namestring bash)
+                              1)
+             (funcall thunk root))
+        (if saved
+            (sb-posix:setenv "KLI_BASH_COMPLETION_BASH" saved 1)
+            (sb-posix:unsetenv "KLI_BASH_COMPLETION_BASH"))))))
+
+(defmacro with-bash-programmable-completion-fixture ((root-var) &body body)
+  `(call-with-bash-programmable-completion-fixture
+    (lambda (,root-var) ,@body)))
+
+(defun call-with-real-bash-programmable-completion-fixture (thunk)
+  (with-bash-completion-fixture (root)
+    (let ((completion-file (merge-pathnames "bash_completion" root))
+          (bash (tools-bash::program-on-path "bash"))
+          (saved-bash (uiop:getenv "KLI_BASH_COMPLETION_BASH"))
+          (saved-file (uiop:getenv "KLI_BASH_COMPLETION_FILE")))
+      (unless bash
+        (error "bash is required for the programmable completion regression test."))
+      (with-open-file (stream completion-file :direction :output
+                                              :if-exists :supersede
+                                              :if-does-not-exist :create)
+        (write-line "_kli_test_ls_completion() {" stream)
+        (write-line "  compopt -o nospace" stream)
+        (write-line "  COMPREPLY=()" stream)
+        (write-line "  for word in --all --almost-all --author; do" stream)
+        (write-line "    case \"$word\" in \"$2\"*) COMPREPLY+=(\"$word\") ;; esac" stream)
+        (write-line "  done" stream)
+        (write-line "}" stream)
+        (write-line "complete -F _kli_test_ls_completion ls" stream))
+      (unwind-protect
+           (progn
+             (sb-posix:setenv "KLI_BASH_COMPLETION_BASH" bash 1)
+             (sb-posix:setenv "KLI_BASH_COMPLETION_FILE"
+                              (uiop:native-namestring completion-file)
+                              1)
+             (funcall thunk root))
+        (if saved-bash
+            (sb-posix:setenv "KLI_BASH_COMPLETION_BASH" saved-bash 1)
+            (sb-posix:unsetenv "KLI_BASH_COMPLETION_BASH"))
+        (if saved-file
+            (sb-posix:setenv "KLI_BASH_COMPLETION_FILE" saved-file 1)
+            (sb-posix:unsetenv "KLI_BASH_COMPLETION_FILE"))))))
+
+(defmacro with-real-bash-programmable-completion-fixture ((root-var) &body body)
+  `(call-with-real-bash-programmable-completion-fixture
+    (lambda (,root-var) ,@body)))
+
 (test bash-completion-tokenizer-finds-the-trailing-word
   "The scanner returns the last word's start, its dequoted text, the open quote,
 and whether it sits in command position."
@@ -3378,7 +3598,10 @@ and whether it sits in command position."
     (is (command-p "git") "the first word is a command word")
     (is (not (command-p "git sta")) "a later word is an argument")
     (is (not (command-p "echo hi > out"))
-        "a word after a redirection is an argument, not a command")))
+        "a word after a redirection is an argument, not a command"))
+  (is (equal '("ls" "--")
+             (tools-bash::bash-completion-words "echo x | ls --"))
+      "programmable completion receives the current simple command only"))
 
 (test bash-completion-tokenizer-blank-word-yields-no-completion
   "A cursor resting on whitespace or just past an operator has no word to
@@ -3390,6 +3613,42 @@ complete, so the completer answers with the hint alone."
   (is (equal '(:hint "<shell command>")
              (tools-bash::bash-command-completer nil "ls "))
       "the completer answers a blank word with the hint and no candidates"))
+
+(test bash-completion-suggests-human-facing-options
+  "Before the shell command begins, completion advertises /bash's command-level
+options. Once the shell command begins, it shows a hint and leaves path
+completion to the editor's explicit Tab path."
+  (let ((candidates (getf (tools-bash::bash-command-completer nil "")
+                          :candidates)))
+    (is (member "--timeout " candidates :test #'string=))
+    (is (member "--background " candidates :test #'string=)))
+  (let ((candidates (getf (tools-bash::bash-command-completer nil "--back")
+                          :candidates)))
+    (is (equal '("--background ") candidates)))
+  (is (equal '(:hint "<seconds> <shell command>")
+             (tools-bash::bash-command-completer nil "--timeout ")))
+  (is (equal '(:hint "<shell command>")
+             (tools-bash::bash-command-completer nil "-b ")))
+  (is (equal '(:hint "<shell command>")
+             (tools-bash::bash-command-completer
+              nil "--timeout 9 --background run-o")))
+  (with-bash-completion-fixture (root)
+    (let* ((bin (ensure-directories-exist (merge-pathnames "bin/" root)))
+           (runnable (touch-test-file (merge-pathnames "run-option" bin)))
+           (saved (uiop:getenv "PATH")))
+      (sb-posix:chmod (uiop:native-namestring runnable) #o755)
+      (unwind-protect
+           (let ((commands:*command-completion-mode* :manual))
+             (sb-posix:setenv "PATH" (uiop:native-namestring bin) 1)
+             (setf tools-bash::*bash-path-executable-cache* nil)
+             (let ((candidates
+                     (getf (tools-bash::bash-command-completer
+                            nil "--timeout 9 --background run-o")
+                           :candidates)))
+               (is (member "--timeout 9 --background run-option"
+                           candidates :test #'string=))))
+        (sb-posix:setenv "PATH" (or saved "") 1)
+        (setf tools-bash::*bash-path-executable-cache* nil)))))
 
 (test bash-completion-encoder-requotes-in-the-word-style
   "Completed words are re-encoded in the quote style the user opened: bare words
@@ -3442,20 +3701,152 @@ the typed basename is itself dotted."
       (is (member "\"my file.txt\"" quoted :test #'string=)
           "a double-quoted file closes the quote"))))
 
-(test bash-completion-replaces-the-whole-tail
-  "The completer splices each candidate over the entire tail, keeping the typed
-prefix verbatim, and offers cwd entries even at command position."
+(test bash-shell-completion-replaces-the-whole-tail
+  "The shell completer splices each candidate over the entire tail, keeping the
+typed prefix verbatim, and offers cwd entries even at command position."
   (with-bash-completion-fixture (root)
     (uiop:with-current-directory (root)
-      (let ((candidates (getf (tools-bash::bash-command-completer nil "ls config")
+      (let ((candidates (getf (tools-bash::bash-shell-command-completer
+                               "ls config")
                               :candidates)))
         (is (member "ls config-lib/" candidates :test #'string=)
             "the prefix `ls ` is preserved and the directory chained")
         (is (member "ls config.json" candidates :test #'string=)))
-      (let ((candidates (getf (tools-bash::bash-command-completer nil "config")
+      (let ((candidates (getf (tools-bash::bash-shell-command-completer
+                               "config")
                               :candidates)))
         (is (member "config-lib/" candidates :test #'string=)
             "a command-position word still falls back to cwd entries")))))
+
+(test bash-programmable-completion-completes-command-options
+  "Manual /bash completion asks Bash's programmable completion first, so command
+argument options such as `ls --` can complete before the path fallback runs."
+  (with-bash-programmable-completion-fixture (root)
+    (declare (ignore root))
+    (let ((candidates (getf (tools-bash::bash-shell-command-completer "ls --")
+                            :candidates)))
+      (is (member "ls --all" candidates :test #'string=))
+      (is (member "ls --almost-all" candidates :test #'string=)))
+    (let ((candidates (getf (tools-bash::bash-shell-command-completer "ls ")
+                            :candidates)))
+      (is (member "ls --author" candidates :test #'string=)))))
+
+(test bash-programmable-completion-sources-the-configured-file
+  "The real helper sources KLI_BASH_COMPLETION_FILE and survives completion
+functions that call compopt outside Bash's native completion callback."
+  (with-real-bash-programmable-completion-fixture (root)
+    (declare (ignore root))
+    (let ((candidates (getf (tools-bash::bash-shell-command-completer "ls --")
+                            :candidates)))
+      (is (member "ls --all" candidates :test #'string=))
+      (is (member "ls --almost-all" candidates :test #'string=)))))
+
+(test bash-programmable-completion-falls-back-to-help-options
+  "When no programmable spec is loaded, the helper still offers long options
+from COMMAND --help so `ls --` does not degrade to literal tab insertion."
+  (let ((bash (tools-bash::program-on-path "bash"))
+        (saved-bash (uiop:getenv "KLI_BASH_COMPLETION_BASH"))
+        (saved-file (uiop:getenv "KLI_BASH_COMPLETION_FILE")))
+    (unless bash
+      (error "bash is required for the long-option completion regression test."))
+    (unwind-protect
+         (progn
+           (sb-posix:setenv "KLI_BASH_COMPLETION_BASH" bash 1)
+           (sb-posix:setenv "KLI_BASH_COMPLETION_FILE"
+                            "/missing/kli/bash_completion"
+                            1)
+           (let ((candidates (getf (tools-bash::bash-shell-command-completer
+                                    "ls --")
+                                   :candidates)))
+             (is (member "ls --all" candidates :test #'string=))
+             (is (member "ls --almost-all" candidates :test #'string=))))
+      (if saved-bash
+          (sb-posix:setenv "KLI_BASH_COMPLETION_BASH" saved-bash 1)
+          (sb-posix:unsetenv "KLI_BASH_COMPLETION_BASH"))
+      (if saved-file
+          (sb-posix:setenv "KLI_BASH_COMPLETION_FILE" saved-file 1)
+          (sb-posix:unsetenv "KLI_BASH_COMPLETION_FILE")))))
+
+(test bash-generic-help-completion-offers-options-and-subcommands
+  "When programmable completion has no spec, manual /bash completion falls back
+to generic help output: short options, long options, top-level subcommands, and
+nested subcommands are all derived from COMMAND [SUBCOMMAND...] --help."
+  (with-bash-completion-fixture (root)
+    (let ((command (merge-pathnames "cmdtree" root))
+          (saved-path (uiop:getenv "PATH"))
+          (saved-file (uiop:getenv "KLI_BASH_COMPLETION_FILE")))
+      (with-open-file (stream command :direction :output
+                                      :if-exists :supersede
+                                      :if-does-not-exist :create)
+        (write-line "#!/bin/sh" stream)
+        (write-line "case \"$*\" in" stream)
+        (write-line "  '--help'|'-h')" stream)
+        (write-line "    cat <<'EOF'" stream)
+        (write-line "usage: cmdtree [option...] subcommand" stream)
+        (write-line "  -a, --all" stream)
+        (write-line "  -v, --verbose" stream)
+        (write-line "  cmdtree build - build a target" stream)
+        (write-line "  cmdtree store - store commands" stream)
+        (write-line "EOF" stream)
+        (write-line "    ;;" stream)
+        (write-line "  'store --help'|'store -h')" stream)
+        (write-line "    cat <<'EOF'" stream)
+        (write-line "usage: cmdtree store [option...] subcommand" stream)
+        (write-line "  --json" stream)
+        (write-line "  cmdtree store verify - verify paths" stream)
+        (write-line "  cmdtree store gc - collect garbage" stream)
+        (write-line "EOF" stream)
+        (write-line "    ;;" stream)
+        (write-line "esac" stream))
+      (sb-posix:chmod (uiop:native-namestring command) #o755)
+      (unwind-protect
+           (progn
+             (sb-posix:setenv "PATH"
+                              (format nil "~A:~A"
+                                      (uiop:native-namestring root)
+                                      (or saved-path ""))
+                              1)
+             (sb-posix:setenv "KLI_BASH_COMPLETION_FILE"
+                              "/missing/kli/bash_completion"
+                              1)
+             (setf tools-bash::*bash-path-executable-cache* nil)
+             (let ((candidates (getf (tools-bash::bash-shell-command-completer
+                                      "cmdtree -")
+                                     :candidates)))
+               (is (member "cmdtree -a" candidates :test #'string=))
+               (is (member "cmdtree --all" candidates :test #'string=)))
+             (let ((candidates (getf (tools-bash::bash-shell-command-completer
+                                      "cmdtree buil")
+                                     :candidates)))
+               (is (member "cmdtree build" candidates :test #'string=)))
+             (let ((candidates (getf (tools-bash::bash-shell-command-completer
+                                      "cmdtree store ver")
+                                     :candidates)))
+               (is (member "cmdtree store verify" candidates :test #'string=))))
+        (sb-posix:setenv "PATH" (or saved-path "") 1)
+        (if saved-file
+            (sb-posix:setenv "KLI_BASH_COMPLETION_FILE" saved-file 1)
+            (sb-posix:unsetenv "KLI_BASH_COMPLETION_FILE"))
+        (setf tools-bash::*bash-path-executable-cache* nil)))))
+
+(test bash-generic-help-completion-does-not-treat-prose-as-subcommands
+  "Generic help fallback only accepts subcommands from lines that repeat the
+current command chain, so ordinary help prose from non-subcommand tools does not
+turn into bogus candidates."
+  (let ((saved-file (uiop:getenv "KLI_BASH_COMPLETION_FILE")))
+    (unwind-protect
+         (progn
+           (sb-posix:setenv "KLI_BASH_COMPLETION_FILE"
+                            "/missing/kli/bash_completion"
+                            1)
+           (let ((candidates (getf (tools-bash::bash-shell-command-completer
+                                    "ls ")
+                                   :candidates)))
+             (is (not (member "ls home" candidates :test #'string=)))
+             (is (not (member "ls invocation" candidates :test #'string=)))))
+      (if saved-file
+          (sb-posix:setenv "KLI_BASH_COMPLETION_FILE" saved-file 1)
+          (sb-posix:unsetenv "KLI_BASH_COMPLETION_FILE")))))
 
 (test bash-completion-path-scan-keeps-only-executables
   "The $PATH scan returns executable files only, dropping plain files, and the

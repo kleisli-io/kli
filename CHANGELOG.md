@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The `openai-codex` provider can stream through the Responses WebSocket transport. The default `auto` transport uses WebSocket when the selected provider/model supports it, keeps SSE available as a fallback, and reuses cached context across same-session turns with `previous_response_id` deltas.
 - `kli -p` accepts repeated `--model-option KEY=VALUE` overrides, with `--option` as a shorter alias. Generated shell completions now include known option values such as `transport=sse`, `transport=websocket`, `transport=websocket-cached`, and reasoning-effort values.
 - `kli -p --timings` emits model request timing markers in JSON and stream-JSON output, including payload size, HTTP or WebSocket milestones, first provider event, first visible delta, tool/thinking events, and completion timing.
+- The `/bash` slash command accepts timeout/background flags and manual Tab completion now uses Bash programmable completion, help-derived options/subcommands, and path fallback for shell command arguments.
 
 ### Fixed
 

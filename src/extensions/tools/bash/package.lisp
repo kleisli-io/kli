@@ -30,6 +30,7 @@
                 #:make-command
                 #:make-command-result
                 #:make-command-text-content
+                #:*command-completion-mode*
                 #:with-operator-capability)
   (:export
    #:run-bash-tool

@@ -132,10 +132,11 @@ matching accepts."
                                    :completion
                                    :contract :completion/v1))))
 
-(defun completion-candidates (editor kind query)
+(defun completion-candidates (editor kind query &key (mode :passive))
   "Ranked candidates for KIND from the :completion capability, or NIL
 when no provider is installed. Argument queries carry (name . tail) and
-rank against the tail, so completers may return unfiltered candidates."
+rank against the tail, so completers may return unfiltered candidates. MODE is
+:passive for live help and :manual for explicit completion requests."
   (let ((provider (completion-provider editor)))
     (when provider
       (if (eq kind :argument)
@@ -146,7 +147,8 @@ rank against the tail, so completers may return unfiltered candidates."
                                                      :argument-help
                                                      (object-protocol editor)
                                                      name
-                                                     tail)
+                                                     tail
+                                                     :mode mode)
                                       :candidates)
                    for insert = (if (consp entry) (car entry) entry)
                    collect (make-completion-candidate
@@ -260,6 +262,24 @@ immediately, several open the popup, no token or no match declines."
               t
               (accept-completion editor)))))))
 
+(defun open-argument-completion (editor)
+  "Command-specific completion for slash-command arguments. Used for explicit
+Tab, while passive help stays available through refresh-editor-completion."
+  (let ((trigger (completion-trigger (editor-value editor)
+                                     (editor-cursor editor))))
+    (when trigger
+      (destructuring-bind (kind query start end) trigger
+        (when (eq kind :argument)
+          (let ((candidates (completion-candidates editor kind query
+                                                   :mode :manual)))
+            (when candidates
+              (setf (editor-completion editor)
+                    (make-completion-popup :kind kind
+                                           :candidates candidates
+                                           :start start
+                                           :end end))
+              t)))))))
+
 (defun handle-completion-input (editor data)
   "Popup keys ahead of plain editing, Tab opening path completion when
 no popup is up. True when DATA was consumed."
@@ -272,7 +292,12 @@ no popup is up. True when DATA was consumed."
           ((or (eq action :insert-tab) (submit-input-p data))
            (accept-completion editor)))
         (when (eq action :insert-tab)
-          (open-path-completion editor)))))
+          (let ((trigger (completion-trigger (editor-value editor)
+                                             (editor-cursor editor))))
+            (or (and trigger
+                     (eq (first trigger) :argument)
+                     (or (open-argument-completion editor) t))
+                (open-path-completion editor)))))))
 
 (defun argument-hint-lines (editor width)
   "Dim argument help lines for the slash command being typed, when the

@@ -643,14 +643,34 @@ selection already stood."
                                           (uiop:ensure-directory-pathname dir))))
         when path return (namestring path)))
 
+(defun executable-env-program (name variable)
+  (let ((value (uiop:getenv variable)))
+    (when (and value
+               (string= name (file-namestring value))
+               (probe-file value))
+      value)))
+
 (defvar *bash-program* :unprobed
   "Absolute path of bash(1), NIL when absent, :unprobed before the first spawn.
 Probed once -- it cannot change mid-image.")
 
+(defvar *bash-interactive-program* nil
+  "Absolute path of a Bash with programmable completion builtins, when baked by
+the image builder.")
+
 (defun bash-program ()
   (when (eq *bash-program* :unprobed)
-    (setf *bash-program* (program-on-path "bash")))
+    (setf *bash-program*
+          (or (program-on-path "bash")
+              (executable-env-program "bash" "BASH")
+              (executable-env-program "bash" "CONFIG_SHELL")
+              (executable-env-program "bash" "SHELL"))))
   *bash-program*)
+
+(defun bash-completion-program ()
+  (or (executable-env-program "bash" "KLI_BASH_COMPLETION_BASH")
+      *bash-interactive-program*
+      (bash-program)))
 
 (defun persistent-shell-side-log ()
   "A temp file holding the shell's own stderr for its lifetime, kept off the

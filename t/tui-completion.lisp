@@ -346,6 +346,14 @@ SAME-COMPLETION-COMMAND-P dropped cairn:resume from the menu entirely."
     (tui-core:handle-input editor "tab")
     (is (string= "    " (tui-editor:editor-value editor)))))
 
+(test completion-tab-in-argument-context-without-candidates-is-consumed
+  (let* ((protocol (make-tui-completion-fixture))
+         (editor (tui-editor:make-editor :protocol protocol)))
+    (feed-editor-keys editor '("/" "d" "e" "p" "l" "o" "y" " "
+                              "s" "t" "a" "g" "i" "n" "g" " "))
+    (tui-core:handle-input editor "tab")
+    (is (string= "/deploy staging " (tui-editor:editor-value editor)))))
+
 (test completion-escape-dismisses-the-popup
   (let* ((protocol (make-tui-completion-fixture))
          (editor (tui-editor:make-editor :protocol protocol)))

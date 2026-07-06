@@ -16,7 +16,7 @@ File and path completion keep working without a commands provider."
 (defun command-hint (command)
   (command-signature (command-arguments command)))
 
-(defun argument-help (protocol name tail)
+(defun argument-help (protocol name tail &key (mode :passive))
   "Argument help for the command named NAME with TAIL typed after it, as
 a plist (:candidates entries :hint string), or NIL. The command's
 completer owns the answer when set — it receives (command tail) and its
@@ -32,7 +32,9 @@ hint while the tail is still blank."
     (when command
       (let ((completer (command-completer command)))
         (cond
-          (completer (funcall completer command tail))
+          (completer
+           (let ((*command-completion-mode* mode))
+             (funcall completer command tail)))
           ((blank-string-p tail)
            (let ((signature (command-signature
                              (command-arguments command))))
