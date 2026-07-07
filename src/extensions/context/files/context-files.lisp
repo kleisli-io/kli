@@ -123,3 +123,15 @@ when no session service is registered."
     (when transform
       (dolist (label (getf transform :labels))
         (remove-system-prompt-layer (getf transform :service) label)))))
+
+(defun refresh-context-files (protocol contribution context)
+  "Refresh context-files prompt layers after boot snapshot reuse.
+
+Runtime SYSTEM.md, APPEND_SYSTEM.md, and AGENTS.md are install-time reads owned
+by this contribution. Refresh removes only the previously installed prompt layers
+recorded in this contribution's state, then rebuilds them from the current
+runtime config/project files without changing extension topology."
+  (uninstall-context-files protocol contribution context)
+  (setf (contribution-state contribution)
+        (install-context-files protocol contribution context))
+  contribution)

@@ -38,3 +38,14 @@ installer and return the contribution-state the retractor drains."
   "Drain the contribution-state install returned, reversing every registration."
   (declare (ignore protocol))
   (retract-provider-catalogue (contribution-state contribution) context))
+
+(defun refresh-openai-provider (protocol contribution context)
+  "Refresh OpenAI's runtime-owned provider catalogue after boot snapshot reuse.
+
+This drains and reinstalls only the provider catalogue state owned by this
+contribution, which includes provider/model registrations, adapter references,
+the env credential reference, and provider-owned persisted credential restore."
+  (retract-provider-catalogue (contribution-state contribution) context)
+  (setf (contribution-state contribution)
+        (install-openai-provider protocol contribution context))
+  contribution)

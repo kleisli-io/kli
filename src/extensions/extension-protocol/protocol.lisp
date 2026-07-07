@@ -1031,7 +1031,7 @@ place. Lookup errors signal outside the dispatch scope."
   contribution)
 
 (defgeneric refresh-runtime-contribution (protocol contribution context)
-  (:documentation "Reconcile an installed contribution with runtime config/cwd/env after boot snapshot reuse. The default is no-op. Methods must preserve installed topology and mutate only runtime-derived state."))
+  (:documentation "Reconcile an installed contribution with runtime config/cwd/env after boot snapshot reuse. The default is no-op. Methods must preserve installed topology and mutate only runtime-derived state explicitly owned by the contribution."))
 
 (defmethod refresh-runtime-contribution ((protocol extension-protocol)
                                          (contribution contribution)
@@ -1047,8 +1047,14 @@ place. Lookup errors signal outside the dispatch scope."
       (funcall refresh protocol contribution context))))
 
 (defun refresh-runtime-contributions (protocol context)
-  "Run the runtime-rebind lifecycle over installed contributions."
-  (dolist (contribution (protocol-installed-contributions protocol))
+  "Run the boot-snapshot runtime-rebind lifecycle over installed contributions.
+
+Installed contributions are stored newest-first because installation pushes onto
+the protocol list. Snapshot reuse refreshes the reverse of that list: the same
+producer-before-consumer order as a full profile install. A refresh hook owns
+only its contribution's runtime-derived effects and must not change the loaded
+extension/contribution topology."
+  (dolist (contribution (reverse (protocol-installed-contributions protocol)))
     (refresh-runtime-contribution protocol contribution context)))
 
 (defmethod check-contribution-precondition ((protocol extension-protocol)

@@ -126,6 +126,18 @@ events. Non-string members are dropped."
       (setf (sink-path sink) (getf state :path)
             (sink-filter sink) (getf state :filter)))))
 
+(defun refresh-observability (protocol contribution context)
+  "Refresh observability sink settings after boot snapshot reuse.
+
+Runtime observability.path and observability.events are install-time settings
+owned by this contribution. Refresh restores only this contribution's previous
+sink path/filter state, then reapplies the current runtime settings to the
+existing sink without changing extension topology."
+  (revert-observability protocol contribution context)
+  (setf (contribution-state contribution)
+        (apply-observability protocol contribution context))
+  contribution)
+
 ;;; Command
 
 (defun command-result (text)
@@ -187,7 +199,8 @@ events. Non-string members are dropped."
    (live-object observability-sink (make-observability-sink))
    (effect observability-settings
      #'apply-observability
-     #'revert-observability)
+     #'revert-observability
+     :refresh #'refresh-observability)
    (effect observability-commands
      #'register-observability
      #'unregister-observability)

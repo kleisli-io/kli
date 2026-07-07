@@ -357,20 +357,28 @@ install, since the snapshot only carries the default profile."
        (null (settings-profile-token settings))))
 
 (defun reuse-boot-snapshot (settings)
-  "Rehydrate the baked snapshot for this boot: rebind the config service to the
-runtime config dirs, reload the user's settings, re-apply the wiring overlay,
-and refresh runtime-derived contribution state. Returns the context, or NIL when
-no usable snapshot matches so the caller does a full install."
+  "Rehydrate the baked snapshot for this boot.
+
+Runtime config directories and profile settings are rebound as data first; only
+after that do installed contributions refresh in full install order. Refresh
+hooks own explicit runtime-sensitive install-time effects (for example provider
+credentials/catalogues and settings consumers) while preserving the installed
+topology. Returns the context, or NIL when no usable snapshot matches so the
+caller does a full install."
   (when (boot-snapshot-usable-p settings)
     (let* ((context *boot-snapshot-context*)
            (protocol (active-protocol context))
            (overlay (resolved-profile-settings
                      (resolve-boot-profile *default-profile* settings))))
-      (rebind-config-dirs (find-config-service context))
-      (record-settings-overlay protocol overlay)
-      (swap-settings-overlay context overlay)
-      (with-system-authority
-        (refresh-runtime-contributions protocol context))
+      (clear-extension-diagnostics protocol)
+      (call-with-diagnostics-capture
+       protocol :boot
+       (lambda ()
+         (rebind-config-dirs (find-config-service context))
+         (record-settings-overlay protocol overlay)
+         (set-settings-overlay (find-config-service context) overlay)
+         (with-system-authority
+           (refresh-runtime-contributions protocol context))))
       (setf *current-context* context *current-app* nil)
       context)))
 
@@ -393,6 +401,7 @@ no usable snapshot matches so the caller does a full install."
                     (reuse-boot-snapshot settings))
                   nil)
         (error (condition)
+          (setf *boot-snapshot-context* nil)
           (values nil condition)))
     (or snapshot-context
         (profile-install-context settings :snapshot-failure snapshot-failure))))

@@ -21,6 +21,7 @@
                 #:normalize-extension-id
                 #:protocol-installed-contributions
                 #:protocol-storage
+                #:refresh-runtime-contribution
                 #:retract-contribution)
   (:import-from #:kli/interaction/commands
                 #:reply)

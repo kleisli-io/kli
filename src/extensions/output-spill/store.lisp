@@ -583,16 +583,24 @@ read-result / search-result to retrieve]"
                                :validate t :if-does-not-exist :ignore))
   (setf (protocol-storage protocol +output-spill-registry-key+) nil))
 
+(defun excluded-spill-directory-p (path excluded)
+  (let ((native (native-no-slash path)))
+    (some (lambda (excluded-path)
+            (string= native (native-no-slash excluded-path)))
+          excluded)))
+
 (defun sweep-stale-spills (&key (cutoff (- (get-universal-time)
                                            *output-spill-sweep-ttl-seconds*))
-                                (base (output-spill-base-directory)))
-  "Delete run-subdirs of BASE whose mtime is older than CUTOFF (universal-time).
-Returns the count swept."
+                                (base (output-spill-base-directory))
+                                (exclude '()))
+  "Delete run-subdirs of BASE whose mtime is older than CUTOFF (universal-time),
+except directories listed in EXCLUDE. Returns the count swept."
   (let ((swept 0))
     (when (eq :ok (directory-hardening-status base))
       (dolist (sub (ignore-errors (uiop:subdirectories base)))
         (let ((stat (lstat-no-follow sub)))
           (when (and stat
+                     (not (excluded-spill-directory-p sub exclude))
                      (< (unix->universal (sb-posix:stat-mtime stat)) cutoff))
             (ignore-errors
              (uiop:delete-directory-tree sub :validate t
@@ -605,6 +613,18 @@ Returns the count swept."
 write."
   (declare (ignore protocol contribution context))
   (ignore-errors (sweep-stale-spills))
+  nil)
+
+(defun refresh-output-spill-reap (protocol contribution context)
+  "Refresh output-spill startup cleanup after boot snapshot reuse.
+
+A reused boot snapshot keeps the current protocol and may already have live spill
+handles. Refresh therefore runs only the crash-backstop stale-run sweep, excluding
+this protocol's current run directory, and does not clear the registry or reap
+live handles."
+  (declare (ignore contribution context))
+  (ignore-errors
+    (sweep-stale-spills :exclude (list (output-spill-run-directory protocol))))
   nil)
 
 (defun retract-output-spill-reap (protocol contribution context)

@@ -292,6 +292,25 @@ extensions.<key>; an absent subtree is clean -- every declared key is optional."
           (warn "kli settings: ~A" diagnostic))))
     contribution))
 
+(defmethod refresh-runtime-contribution ((protocol extension-protocol)
+                                         (contribution settings-declaration-contribution)
+                                         context)
+  "Refresh settings declaration diagnostics after boot snapshot reuse.
+
+The declaration registry/topology is already installed in the snapshot. Runtime
+config files have been rebound before refresh, so re-run only the fail-soft
+diagnostic check against the current merged settings. Reads through
+declared-settings-value continue to use the existing declaration and config
+service."
+  (declare (ignore protocol))
+  (let ((service (and context (find-config-service context)))
+        (declaration (contribution-settings-declaration contribution)))
+    (when service
+      (dolist (diagnostic (settings-declaration-diagnostics
+                           declaration (config-service-settings service)))
+        (warn "kli settings: ~A" diagnostic))))
+  contribution)
+
 (defmethod retract-contribution ((protocol extension-protocol)
                                  (contribution settings-declaration-contribution)
                                  context)

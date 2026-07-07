@@ -280,6 +280,18 @@ previous overlay."
               (apply-settings protocol contribution context)))
       previous)))
 
+(defun refresh-settings (protocol contribution context)
+  "Refresh settings-wiring after boot snapshot reuse.
+
+The boot path has already rebound runtime config files and installed the profile
+overlay as data. This hook is the ordered settings consumer: it reverts the old
+settings effects and reapplies them over the fresh merged settings, after earlier
+provider/resource refresh hooks have rebuilt their runtime-derived state."
+  (revert-settings protocol contribution context)
+  (setf (contribution-state contribution)
+        (apply-settings protocol contribution context))
+  contribution)
+
 (defun apply-settings (protocol contribution context)
   (declare (ignore contribution))
   (let ((config (config-provider-of context)))

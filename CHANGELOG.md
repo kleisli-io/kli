@@ -4,6 +4,13 @@ All notable changes to kli are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-07-07
+
+### Fixed
+
+- Relocatable bundles now consume cl-deps native runtime contracts for OpenSSL, shipping provider modules, setting `OPENSSL_MODULES`, and discovering the host CA certificate bundle before launch. This fixes HTTPS release/update paths such as `kli update` on hosts without a Nix store.
+- Boot snapshot reuse now refreshes runtime-sensitive install-time state in full install order after rebinding the user's config roots and settings. This fixes startup sessions that reported `Unknown model ... in settings` or failed to select a runtime `providers.json` default model ([#1](https://github.com/kleisli-io/kli/issues/1)), and completes the runtime-refresh fix for bundled skill commands such as `/skill:creating-extensions` being unavailable until a manual refresh ([#2](https://github.com/kleisli-io/kli/issues/2)).
+
 ## [0.1.5] - 2026-07-06
 
 ### Added

@@ -6,4 +6,5 @@
    (capability model/registry :contract model/registry/v1)
    (capability model/runtime :contract model/runtime/v1))
   (:provides
-   (effect codex-provider #'install-codex-provider #'retract-codex-provider)))
+   (effect codex-provider #'install-codex-provider #'retract-codex-provider
+     :refresh #'refresh-codex-provider)))

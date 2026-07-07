@@ -35,10 +35,16 @@
                                   references
                                   :key #'object-id
                                   :test #'equal)))
-    (when (and context
-               (not (find-live-object (context-registry context)
-                                      (object-id reference))))
-      (register-live-object (context-registry context) reference))
+    ;; Re-registration with the same object id is a replacement, not a no-op:
+    ;; provider refresh may restore a changed persisted static/OAuth credential
+    ;; while a stale reference from a prior snapshot reuse is still live.
+    (when context
+      (let ((registry (context-registry context))
+            (id (object-id reference)))
+        (unless (eq (find-live-object registry id) reference)
+          (when (find-live-object registry id)
+            (remove-live-object registry id))
+          (register-live-object registry reference))))
     reference))
 
 (defmethod unregister-auth-provider ((store credential-store)

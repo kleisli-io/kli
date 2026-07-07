@@ -51,6 +51,7 @@
                 #:load-settings
                 #:rebind-config-dirs
                 #:record-settings-overlay
+                #:set-settings-overlay
                 #:settings-value)
   (:import-from #:kli/config/wiring
                 #:swap-settings-overlay)

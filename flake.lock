@@ -13,11 +13,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1783192645,
-        "narHash": "sha256-rZVQ8y9GBrOLgL1qTp/ReUxD935EA9uwagcjTGf9b+0=",
+        "lastModified": 1783428830,
+        "narHash": "sha256-Ekc9Xb8qXPJxsK138WhOfa22SQRq8dXm2QZ9b8HLGnw=",
         "owner": "kleisli-io",
         "repo": "cl-deps",
-        "rev": "ff5e2c930d287942d6658827ac7241539b4c151a",
+        "rev": "388fe8c6972d627d3101267b30608044908adadf",
         "type": "github"
       },
       "original": {
@@ -81,11 +81,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1783168203,
-        "narHash": "sha256-axT4mss+0bhyv+XPbH6VQIeBRWC/US5gWVN8hQPJTPQ=",
+        "lastModified": 1783427659,
+        "narHash": "sha256-B0piXM/DS4p5PbMQKB3lTO02tqlsc6RSQkGDthjPexU=",
         "owner": "kleisli-io",
         "repo": "metaBuilder",
-        "rev": "2e614ccfeee0d1d213edf387f1a27446e7ea97b3",
+        "rev": "c0be9599e63f63bdf493c48517bd8bc9eabf7379",
         "type": "github"
       },
       "original": {

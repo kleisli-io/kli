@@ -6,4 +6,5 @@
   (:provides
    (effect context-files
      #'install-context-files
-     #'uninstall-context-files)))
+     #'uninstall-context-files
+     :refresh #'refresh-context-files)))

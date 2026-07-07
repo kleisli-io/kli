@@ -142,4 +142,5 @@ matches anywhere in the result — including past the inline window."
      :metadata '(:capabilities (:result/read)))
    (effect output-spill-reap
      #'install-output-spill-reap
-     #'retract-output-spill-reap)))
+     #'retract-output-spill-reap
+     :refresh #'refresh-output-spill-reap)))

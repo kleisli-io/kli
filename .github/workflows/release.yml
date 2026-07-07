@@ -108,7 +108,18 @@ jobs:
           set -uo pipefail
           DIST="${{ matrix.artifact }}"
           root="$PWD/$DIST"
+          test -d "$root/lib/ossl-modules" \
+            || { echo "FAIL: OpenSSL provider module directory is missing." >&2; exit 1; }
+          find "$root/lib/ossl-modules" -name 'legacy.*' -print -quit | grep -q . \
+            || { echo "FAIL: OpenSSL legacy provider module is missing." >&2; exit 1; }
+          grep -q 'OPENSSL_MODULES' "$root/bin/kli" \
+            || { echo "FAIL: launcher does not set OPENSSL_MODULES." >&2; exit 1; }
+          grep -q '/etc/ssl/cert.pem' "$root/bin/kli" \
+            || { echo "FAIL: launcher does not probe the macOS system CA bundle." >&2; exit 1; }
+          grep -q '/opt/homebrew/etc/openssl@3/cert.pem' "$root/bin/kli" \
+            || { echo "FAIL: launcher does not probe the Homebrew OpenSSL CA bundle." >&2; exit 1; }
           trace=$(DYLD_LIBRARY_PATH="$root/lib" KLI_DATA_DIR="$root/share/kli" \
+                  OPENSSL_MODULES="$root/lib/ossl-modules" \
                   DYLD_PRINT_LIBRARIES=1 "$root/libexec/kli" -- version 2>&1) || true
           printf '%s\n' "$trace"
           if printf '%s\n' "$trace" | grep '/nix/store/' | grep -q '\.dylib'; then
@@ -118,7 +129,10 @@ jobs:
           printf '%s\n' "$trace" | grep -qF "kli ${GITHUB_REF_NAME#v}" \
             || { echo "FAIL: kli version did not run under direct exec." >&2; exit 1; }
           # The self-locating /bin/sh launcher path also boots end to end.
-          "$root/bin/kli" version
+          launcher_output=$("$root/bin/kli" version)
+          printf '%s\n' "$launcher_output"
+          printf '%s\n' "$launcher_output" | grep -qF "kli ${GITHUB_REF_NAME#v}" \
+            || { echo "FAIL: kli version did not run through launcher." >&2; exit 1; }
 
       - name: Pack tarball
         run: tar -czf "${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"

@@ -6,4 +6,5 @@
   (:provides
    (effect settings-wiring
      #'apply-settings
-     #'revert-settings)))
+     #'revert-settings
+     :refresh #'refresh-settings)))

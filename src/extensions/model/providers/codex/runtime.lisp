@@ -55,3 +55,14 @@ credential-reference."
   "Drain the contribution-state install returned, reversing every registration."
   (declare (ignore protocol))
   (retract-provider-catalogue (contribution-state contribution) context))
+
+(defun refresh-codex-provider (protocol contribution context)
+  "Refresh Codex's runtime-owned provider catalogue after boot snapshot reuse.
+
+This drains and reinstalls only the provider catalogue state owned by this
+contribution, including provider/model registrations, adapter references, and
+provider-owned persisted OAuth credential restore."
+  (retract-provider-catalogue (contribution-state contribution) context)
+  (setf (contribution-state contribution)
+        (install-codex-provider protocol contribution context))
+  contribution)
