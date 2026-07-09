@@ -38,6 +38,13 @@ accepted.")
 already owns the id. The image owns presence, so a boot or restore install of a
 baked id records a shadow here instead of double-installing.")
 
+(defvar *extension-lifecycle-lock*
+  (sb-thread:make-mutex :name "kli-extension-lifecycle"))
+
+(defmacro with-extension-lifecycle-lock (&body body)
+  `(sb-thread:with-mutex (*extension-lifecycle-lock*)
+     ,@body))
+
 (defun extension-diagnostics (protocol)
   "Captured (source . text) pairs from the most recent load pass, oldest first.
 SOURCE is the unit's file or directory, the extension id, or :boot for stray
@@ -51,6 +58,10 @@ output outside any unit."
   (push (cons source text)
         (protocol-storage protocol +extension-diagnostics-key+)))
 
+(defun replace-extension-diagnostics (protocol diagnostics)
+  (setf (protocol-storage protocol +extension-diagnostics-key+)
+        (reverse diagnostics)))
+
 (defun extension-diagnostic-label (source)
   "Human-readable name for a diagnostic source: the file or directory name of
 a unit, or the printed id."
@@ -61,7 +72,7 @@ a unit, or the printed id."
             (car (last (pathname-directory source)))))
       (string-downcase (princ-to-string source))))
 
-(defun call-with-diagnostics-capture (protocol source thunk)
+(defun call-with-diagnostics-capture-to (record source thunk)
   "Run THUNK with both standard streams diverted into a capture. Any output is
 recorded as a diagnostic for SOURCE instead of reaching the terminal, where
 the TUI takeover would flash then wipe it (and a mid-session /reload would
@@ -75,10 +86,43 @@ so warning handlers observe them unchanged."
       (let ((text (string-trim '(#\Space #\Tab #\Newline #\Return)
                                (get-output-stream-string capture))))
         (when (plusp (length text))
-          (record-extension-diagnostic protocol source text))))))
+          (funcall record source text))))))
+
+(defun call-with-diagnostics-capture (protocol source thunk)
+  (call-with-diagnostics-capture-to
+   (lambda (source text)
+     (record-extension-diagnostic protocol source text))
+   source thunk))
 
 (defstruct user-extension-entry
   id source manifest metadata)
+
+(defun copy-extension-table (table)
+  (let ((copy (make-hash-table :test (hash-table-test table))))
+    (maphash (lambda (key value)
+               (setf (gethash key copy) value))
+             table)
+    copy))
+
+(defun replace-extension-table (target source)
+  (clrhash target)
+  (maphash (lambda (key value)
+             (setf (gethash key target) value))
+           source)
+  target)
+
+(defun extension-table-keys (table)
+  (let ((keys '()))
+    (maphash (lambda (key value)
+               (declare (ignore value))
+               (push key keys))
+             table)
+    (sort keys #'string< :key #'princ-to-string)))
+
+(defstruct user-extension-state-snapshot
+  available
+  installed-ids
+  diagnostics)
 
 (defun lisp-files-in (dir)
   (sort (directory (merge-pathnames "*.lisp" dir)) #'string< :key #'namestring))
@@ -164,6 +208,13 @@ unambiguous system, so they fall through to the file-ordering convention."
 (defun installed-user-handles (protocol)
   (ensure-protocol-storage protocol +installed-user-handles-key+
                            (lambda () (make-hash-table :test #'equal))))
+
+(defun snapshot-user-extension-state (protocol)
+  (make-user-extension-state-snapshot
+   :available (copy-extension-table (available-extensions protocol))
+   :installed-ids (extension-table-keys (installed-user-handles protocol))
+   :diagnostics (copy-list
+                 (protocol-storage protocol +extension-diagnostics-key+))))
 
 (defun unit-source (unit)
   "The file or directory naming UNIT, for bookkeeping and messages."
@@ -292,12 +343,12 @@ manifest value; (values nil nil) when none applies and the convention governs."
                 (funcall (manifest-loader-load loader) dir manifest files)
                 (load-dir-by-convention dir files)))))))))
 
-(defun index-unit (protocol unit)
-  "Load UNIT as a manifest (no install) and register it as available. Returns
-the entry, or NIL on failure — reported and isolated. Compiler output and the
-failure warning are captured as a diagnostic for the unit rather than printed."
-  (call-with-diagnostics-capture
-   protocol (unit-source unit)
+(defun index-unit-into (unit available record-diagnostic)
+  "Load UNIT as a manifest (no install) and register it in AVAILABLE. Returns
+the entry, or NIL on failure. Compiler output and the failure warning are
+captured through RECORD-DIAGNOSTIC."
+  (call-with-diagnostics-capture-to
+   record-diagnostic (unit-source unit)
    (lambda ()
      (handler-case
          (let* ((manifest (call-with-manifest-capture
@@ -307,11 +358,32 @@ failure warning are captured as a diagnostic for the unit rather than printed."
                 (entry (make-user-extension-entry
                         :id id :source (unit-source unit) :manifest manifest
                         :metadata (extension-metadata probe))))
-           (setf (gethash id (available-extensions protocol)) entry)
+           (setf (gethash id available) entry)
            entry)
        (error (condition)
          (warn "kli: extension ~A failed to load: ~A" (unit-source unit) condition)
          nil)))))
+
+(defun index-unit (protocol unit)
+  "Load UNIT as a manifest (no install) and register it as available. Returns
+the entry, or NIL on failure — reported and isolated. Compiler output and the
+failure warning are captured as a diagnostic for the unit rather than printed."
+  (index-unit-into
+   unit
+   (available-extensions protocol)
+   (lambda (source text)
+     (record-extension-diagnostic protocol source text))))
+
+(defun stage-user-extension-units (units)
+  (let ((available (make-hash-table :test #'equal))
+        (diagnostics '())
+        (failed nil))
+    (flet ((record (source text)
+             (push (cons source text) diagnostics)))
+      (dolist (unit units)
+        (unless (index-unit-into unit available #'record)
+          (setf failed t))))
+    (values available (nreverse diagnostics) failed)))
 
 (defun metadata-autoload (metadata)
   "The :autoload value in METADATA, or :default when unspecified."
@@ -352,6 +424,22 @@ sparse deltas take the first word without replacing the config layer."
       (remhash id (installed-user-handles protocol))
       (kli/prompts:refresh-prompt-template-commands context)
       t)))
+
+(defun restore-user-extension-state (protocol context snapshot)
+  (dolist (id (extension-table-keys (installed-user-handles protocol)))
+    (ignore-errors
+      (retract-user-extension protocol id context)))
+  (replace-extension-table
+   (available-extensions protocol)
+   (user-extension-state-snapshot-available snapshot))
+  (setf (protocol-storage protocol +extension-diagnostics-key+)
+        (copy-list (user-extension-state-snapshot-diagnostics snapshot)))
+  (clrhash (installed-user-handles protocol))
+  (dolist (id (user-extension-state-snapshot-installed-ids snapshot))
+    (let ((entry (gethash id (available-extensions protocol))))
+      (when entry
+        (install-user-extension protocol entry context))))
+  protocol)
 
 (defun remote-install-pins (protocol)
   "PROTOCOL's install-set: a string id -> pin hash-table. The :equal test both
@@ -661,21 +749,23 @@ concern, latent while the blessed set leaves :native-artifacts empty."
 
 (defun enable-user-extension (context id)
   "Install the available extension named ID. Returns (values ok state)."
-  (let* ((protocol (active-protocol context))
-         (id (normalize-extension-id id))
-         (entry (gethash id (available-extensions protocol))))
-    (cond
-      ((null entry) (values nil :unknown))
-      ((gethash id (installed-user-handles protocol)) (values nil :already-enabled))
-      (t (install-user-extension protocol entry context) (values t :enabled)))))
+  (with-extension-lifecycle-lock
+    (let* ((protocol (active-protocol context))
+           (id (normalize-extension-id id))
+           (entry (gethash id (available-extensions protocol))))
+      (cond
+        ((null entry) (values nil :unknown))
+        ((gethash id (installed-user-handles protocol)) (values nil :already-enabled))
+        (t (install-user-extension protocol entry context) (values t :enabled))))))
 
 (defun disable-user-extension (context id)
   "Retract the installed extension named ID. Returns (values ok state)."
-  (let ((protocol (active-protocol context))
-        (id (normalize-extension-id id)))
-    (if (retract-user-extension protocol id context)
-        (values t :disabled)
-        (values nil :not-enabled))))
+  (with-extension-lifecycle-lock
+    (let ((protocol (active-protocol context))
+          (id (normalize-extension-id id)))
+      (if (retract-user-extension protocol id context)
+          (values t :disabled)
+          (values nil :not-enabled)))))
 
 (defun drop-remote-install-pin (protocol id)
   "Remove every install-set pin whose normalized id matches ID. The store keys
@@ -697,15 +787,16 @@ retract handle and its durable pin. A nix-declared baseline id is refused --
 the image owns its presence, so removal means editing the nix config and
 rebuilding. Returns (values ok state) where state is :uninstalled,
 :nix-declared, or :not-installed."
-  (let ((protocol (active-protocol context))
-        (id (normalize-extension-id id)))
-    (if (nix-declared-baseline-id-p id)
-        (values nil :nix-declared)
-        (let ((had-handle (retract-user-extension protocol id context))
-              (had-pin (drop-remote-install-pin protocol id)))
-          (if (or had-handle had-pin)
-              (values t :uninstalled)
-              (values nil :not-installed))))))
+  (with-extension-lifecycle-lock
+    (let ((protocol (active-protocol context))
+          (id (normalize-extension-id id)))
+      (if (nix-declared-baseline-id-p id)
+          (values nil :nix-declared)
+          (let ((had-handle (retract-user-extension protocol id context))
+                (had-pin (drop-remote-install-pin protocol id)))
+            (if (or had-handle had-pin)
+                (values t :uninstalled)
+                (values nil :not-installed)))))))
 
 (defun user-extension-status (context)
   "Alist of (id . enabled-p) for every available user extension."
@@ -725,20 +816,37 @@ regime in load-files-for-unit, so no package is bound here."
     (install-enabled-extensions protocol config context)
     (available-extensions protocol)))
 
+(defun commit-user-extension-reload (context config target-available diagnostics)
+  (let* ((protocol (active-protocol context))
+         (snapshot (snapshot-user-extension-state protocol)))
+    (handler-case
+        (progn
+          (replace-extension-table (available-extensions protocol)
+                                   target-available)
+          (replace-extension-diagnostics protocol diagnostics)
+          (dolist (id (user-extension-state-snapshot-installed-ids snapshot))
+            (retract-user-extension protocol id context))
+          (install-enabled-extensions protocol config context)
+          (available-extensions protocol))
+      (error (condition)
+        (restore-user-extension-state protocol context snapshot)
+        (error condition)))))
+
 (defun reload-user-extensions (context &key (config (read-user-config))
                                             (units (default-extension-units config)))
-  "Retract every installed user extension, then re-index and re-install from
-the current units — picking up edits with no rebuild. Diagnostics from the
-previous pass (including boot capture, already surfaced) are dropped so the
-registry reflects this one."
-  (let* ((protocol (active-protocol context))
-         (ids (loop for id being the hash-keys of (installed-user-handles protocol)
-                    collect id)))
-    (dolist (id ids)
-      (retract-user-extension protocol id context))
-    (clrhash (available-extensions protocol))
-    (clear-extension-diagnostics protocol)
-    (load-user-extensions context :config config :units units)))
+  "Re-index and re-install user extensions from the current units. A failed
+prepare records diagnostics but leaves the live extension set in place."
+  (with-extension-lifecycle-lock
+    (let ((protocol (active-protocol context)))
+      (multiple-value-bind (target-available diagnostics failed)
+          (stage-user-extension-units units)
+        (cond
+          (failed
+           (replace-extension-diagnostics protocol diagnostics)
+           (available-extensions protocol))
+          (t
+           (commit-user-extension-reload context config
+                                         target-available diagnostics)))))))
 
 (defun format-extension-status (status &optional diagnostics)
   (if status
@@ -784,6 +892,7 @@ registry reflects this one."
   (:provides
    (command "reload"
      :description "Reload user extensions from disk."
+     :metadata '(:run-as :extension-load)
      :handler (lambda (command arguments context &key call-id on-update)
                 (declare (ignore command arguments call-id on-update))
                 (reload-user-extensions context)

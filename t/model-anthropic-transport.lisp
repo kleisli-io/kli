@@ -405,7 +405,9 @@ non-blank downgrades to plain text, and unsigned blank is dropped."
                                      (:thinking "" :signature nil
                                       :redacted nil))
                    :tool-calls ((:id "toolu_9" :name "read"
-                                 :arguments-json "{}"))))))
+                                 :arguments-json "{}")))
+                  (:role :tool-result :content "ok"
+                   :tool-call-id "toolu_9" :tool-name "read"))))
          (blocks (gethash "content" (aref msgs 0))))
     (is (= 5 (length blocks)))
     (is (equal '("thinking" "redacted_thinking" "text" "text" "tool_use")

@@ -21,10 +21,26 @@
                 #:tool-description)
   (:import-from #:let-over-lambda
                 #:pandoriclet)
+  (:import-from #:kli/context/lens
+                #:seal-context-projection
+                #:provider-replay-items
+                #:context-view-item-id
+                #:context-view-item-group-id
+                #:context-view-item-payload-kind
+                #:context-view-item-payload-value
+                #:context-view-provenance-for-item)
+  (:import-from #:kli/model/runtime
+                #:materialize-provider-replay-items)
   (:import-from #:kli/model/registry
-                #:selection-context-window)
+                #:selection-context-window
+                #:model-selection-provider-id
+                #:model-selection-model-id
+                #:model-provider-api)
   (:import-from #:kli/model/transports
-                #:terminal-openai-usage-limit-error-p)
+                #:terminal-openai-usage-limit-error-p
+                #:convert-responses-input
+                #:convert-completions-messages
+                #:convert-anthropic-messages)
   (:export
    #:agent-session
    #:agent-session-binding
@@ -64,6 +80,20 @@
    #:usage-cache-write-tokens
    #:usage-total-tokens
    #:usage-over-threshold-p
+   #:provider-accounting-result
+   #:make-provider-accounting-result
+   #:provider-accounting-result-provider-id
+   #:provider-accounting-result-model-id
+   #:provider-accounting-result-api
+   #:provider-accounting-result-units
+   #:provider-accounting-result-exact-p
+   #:provider-accounting-result-upper-bound-p
+   #:provider-accounting-result-total
+   #:provider-accounting-result-attributions
+   #:provider-accounting-result-group-costs
+   #:provider-accounting-result-entry-costs
+   #:provider-accounting-result-wire-input
+   #:account-provider-replay
 
    #:submit-agent-session-prompt
    #:steer-agent-session

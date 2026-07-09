@@ -100,7 +100,7 @@
                             context)))
         (is (equal '("root" "assistant")
                    (mapcar #'sess:message-content
-                           (ctx:context-model-messages sealed-before))))
+                           (ctx:transcript-display-items sealed-before))))
         (ctx:commit-context-patches agent-context context)
         (is (= 1 (ctx:context-epoch agent-context)))
         (is (not (eq initial-leaf (sess:session-leaf-id session))))
@@ -110,7 +110,7 @@
                             agent-context))))
         (is (equal '("root" "assistant")
                    (mapcar #'sess:message-content
-                           (ctx:context-model-messages sealed-before))))
+                           (ctx:transcript-display-items sealed-before))))
         (ctx:rebuild-context-projection agent-context)
         (is (equal '("root" "assistant" "patched")
                    (mapcar #'sess:message-content
@@ -173,12 +173,12 @@ with an on-disk set."
            (extra (sess:make-user-message "EXTRA")))
       (is (equal '("root" "assistant")
                  (mapcar #'sess:message-content
-                         (ctx:context-model-messages
+                         (ctx:transcript-display-items
                           (ctx:seal-context-projection agent-context context))))
           "no key seals the base projection unchanged")
       (is (equal '("root" "assistant" "EXTRA")
                  (mapcar #'sess:message-content
-                         (ctx:context-model-messages
+                         (ctx:transcript-display-items
                           (ctx:seal-context-projection agent-context context
                                                        :extra-messages
                                                        (list extra)))))
@@ -187,3 +187,210 @@ with an on-disk set."
                  (mapcar #'sess:message-content
                          (ctx:context-projected-messages agent-context)))
           "the durable projection is untouched"))))
+
+(test (context-lens-seals-typed-view-items-with-purpose-materializers :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (context-lens-test-context)
+    (declare (ignore protocol))
+    (let* ((store (session-log-store context))
+           (session (sess:create-session store context :id :context-view-session))
+           (assistant (sess:make-assistant-message
+                       "assistant"
+                       :id :assistant-tool-call-message
+                       :metadata
+                       (list :tool-calls
+                             (list (list :id :call-1
+                                         :name "read"
+                                         :arguments-json "{}")))))
+           (tool-result (sess:make-tool-result-message "tool output"
+                                                       :id :tool-result-message
+                                                       :tool-call-id :call-1
+                                                       :tool-name "read")))
+      (sess:append-session-entry
+       store
+       session
+       (sess:make-message-entry (sess:make-user-message "root"
+                                                        :id :root-message)
+                                :id :root-entry)
+       context)
+      (sess:append-session-entry
+       store
+       session
+       (sess:make-message-entry assistant :id :assistant-entry)
+       context)
+      (sess:append-session-entry
+       store
+       session
+       (sess:make-message-entry tool-result :id :tool-result-entry)
+       context)
+      (let* ((agent-context (ctx:make-agent-context session store context))
+             (sealed (ctx:seal-context-projection agent-context context))
+             (view (ctx:sealed-context-view sealed))
+             (transcript (ctx:transcript-context-view sealed))
+             (summarizer (ctx:summarizer-context-view sealed))
+             (provider-replay (ctx:provider-replay-context-view sealed))
+             (items (ctx:context-view-items view)))
+        (is (typep view 'ctx:sealed-context-view))
+        (is (eq :editable (ctx:context-view-kind view)))
+        (is (eq :transcript (ctx:context-view-kind transcript)))
+        (is (eq :summarizer (ctx:context-view-kind summarizer)))
+        (is (eq :provider-replay (ctx:context-view-kind provider-replay)))
+        (is (equal '(:message :message :tool-result)
+                   (mapcar #'ctx:context-view-item-payload-kind items)))
+        (is (equal '(:message :message :tool-result)
+                   (mapcar #'ctx:context-view-item-payload-kind
+                           (ctx:context-view-items transcript))))
+        (is (equal '(:message :message :tool-result)
+                   (mapcar #'ctx:context-view-item-payload-kind
+                           (ctx:context-view-items summarizer))))
+        (is (equal '(:message :message :tool-result)
+                   (mapcar #'ctx:context-view-item-payload-kind
+                           (ctx:context-view-items provider-replay))))
+        (is (equal '(:message :root-message)
+                   (ctx:context-view-item-id (first items))))
+        (is (equal '(:tool-result :tool-result-message)
+                   (ctx:context-view-item-id (third items))))
+        (is (equal '(:tool-call :call-1)
+                   (ctx:context-view-item-group-id (third items))))
+        (is (equal '(:entry-id :root-entry
+                     :message-id :root-message
+                     :source :message)
+                   (ctx:context-view-provenance-for-item view (first items))))
+        (is (equal '("root" "assistant" "tool output")
+                   (mapcar #'sess:message-content
+                           (ctx:transcript-display-items sealed))))
+        (is (equal '(:message :message :tool-result)
+                   (mapcar #'ctx:context-view-item-payload-kind
+                           (ctx:summarizer-input-items sealed))))
+        (is (equal '(:message :message :tool-result)
+                   (mapcar #'ctx:context-view-item-payload-kind
+                           (ctx:provider-replay-items sealed))))
+        (is (equal '("root" "assistant" "tool output")
+                   (mapcar #'sess:message-content
+                           (ctx:provider-replay-messages sealed))))))))
+
+(defun context-lens-tool-call-session (context &key tool-result-p)
+  (let* ((store (session-log-store context))
+         (session (sess:create-session store context :id (gensym "TOOL-CALL-SESSION-"))))
+    (sess:append-session-entry
+     store
+     session
+     (sess:make-message-entry
+      (sess:make-user-message "run read" :id (gensym "TOOL-USER-")))
+     context)
+    (sess:append-session-entry
+     store
+     session
+     (sess:make-message-entry
+      (sess:make-assistant-message
+       ""
+       :id (gensym "TOOL-ASSISTANT-")
+       :metadata
+       (list :tool-calls
+             (list (list :id :call-read
+                         :name "read"
+                         :arguments-json "{\"path\":\"a\"}")))))
+     context)
+    (when tool-result-p
+      (sess:append-session-entry
+       store
+       session
+       (sess:make-message-entry
+        (sess:make-tool-result-message "file body"
+                                       :id (gensym "TOOL-RESULT-")
+                                       :tool-call-id :call-read
+                                       :tool-name "read"))
+       context))
+    (values store session)))
+
+(test (provider-replay-preserves-normal-completed-tool-pairs :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (context-lens-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (store session)
+        (context-lens-tool-call-session context :tool-result-p t)
+      (let* ((agent-context (ctx:make-agent-context session store context))
+             (sealed (ctx:seal-context-projection agent-context context))
+             (messages (ctx:provider-replay-messages sealed)))
+        (is (equal '(:user :assistant :tool-result)
+                   (mapcar #'sess:message-role messages)))
+        (is (equal :call-read
+                   (getf (first (getf (sess:message-metadata
+                                        (second messages))
+                                       :tool-calls))
+                         :id)))
+        (is (eq :call-read (sess:tool-call-id (third messages))))))))
+
+(test (provider-replay-fails-closed-on-missing-tool-result :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (context-lens-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (store session)
+        (context-lens-tool-call-session context)
+      (let* ((agent-context (ctx:make-agent-context session store context))
+             (sealed (ctx:seal-context-projection agent-context context)))
+        (handler-case
+            (progn
+              (ctx:provider-replay-messages sealed)
+              (fail "missing tool result should fail closed"))
+          (ctx:context-view-validation-error (condition)
+            (let ((diagnostic (ctx:context-view-validation-diagnostic condition)))
+              (is (eq :fail-closed (getf diagnostic :repair-policy)))
+              (is (equal '(:call-read)
+                         (mapcar (lambda (call) (getf call :id))
+                                 (getf diagnostic :missing-tool-results))))
+              (is (null (getf diagnostic :orphan-tool-results))))))
+        (is (typep (sess:session-leaf-entry store session) 'sess:message-entry))
+        (is-false (typep (sess:session-leaf-entry store session)
+                         'sess:transcript-repair-entry))))))
+
+(test (provider-replay-synthesizes-durable-aborted-repair :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (context-lens-test-context)
+    (declare (ignore protocol))
+    (let ((seen-repair-event nil))
+      (with-extension-load-authority
+        (ext:load-extension-source
+         context
+         `(ext:defextension transcript-repair-event-capture
+            (:provides
+             (event-handler :capture-transcript-repair
+               :event-type :context/transcript-repair
+               :handler ,(lambda (event ctx)
+                           (declare (ignore ctx))
+                           (setf seen-repair-event event)))))))
+    (multiple-value-bind (store session)
+        (context-lens-tool-call-session context)
+      (let* ((agent-context (ctx:make-agent-context session store context))
+             (sealed (ctx:seal-context-projection
+                      agent-context
+                      context
+                      :repair-policy :synthesize-aborted))
+             (leaf (sess:session-leaf-entry store session))
+             (items (ctx:provider-replay-items sealed))
+             (messages (ctx:provider-replay-messages sealed)))
+        (is (typep leaf 'sess:transcript-repair-entry))
+        (is (eq :synthesized-aborted (sess:entry-repair-kind leaf)))
+        (is (equal '(:message :message :repair)
+                   (mapcar #'ctx:context-view-item-payload-kind items)))
+        (is (equal '((:tool-call :call-read) (:tool-call :call-read))
+                   (mapcar #'ctx:context-view-item-group-id
+                           (rest items))))
+        (is (eq :tool-result (sess:message-role (third messages))))
+        (is (eq :call-read (sess:tool-call-id (third messages))))
+        (is (getf (sess:message-metadata (third messages))
+                  :transcript-repair))
+        (is (typep seen-repair-event 'event:event))
+        (is (eq :call-read
+                (getf (event:event-payload seen-repair-event)
+                      :tool-call-id)))
+        (is (eq :repair
+                (getf (ctx:context-view-provenance-for-item
+                       (ctx:sealed-context-view sealed)
+                       (third items))
+                      :source)))
+        (let* ((record (sess:serialize-record leaf))
+               (round (sess:deserialize-value record)))
+          (is (typep round 'sess:transcript-repair-entry))
+          (is (eq :call-read
+                  (sess:tool-call-id (sess:entry-message round))))))))))

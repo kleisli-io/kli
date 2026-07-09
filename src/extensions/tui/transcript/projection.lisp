@@ -9,6 +9,9 @@
 (defun thinking-key (turn-id)
   (list :thinking turn-id))
 
+(defun thinking-raw-seen-key (turn-id)
+  (list :thinking-raw-seen turn-id))
+
 (defun tool-key (execution-id)
   (list :tool execution-id))
 
@@ -37,6 +40,10 @@
                             :adjustable t
                             :fill-pointer 0)))
     (append-streaming-text buffer text)))
+
+(defun replace-streaming-text (buffer text)
+  (setf (fill-pointer buffer) 0)
+  (append-streaming-text buffer text))
 
 (defmethod project-event-to-transcript (event-type event mode-id buffer)
   (declare (ignore event-type event mode-id buffer))
@@ -81,15 +88,37 @@
   (let* ((payload (kli/event:event-payload event))
          (turn-id (getf payload :turn-id))
          (text (or (getf payload :text) ""))
+         (replacement-p (getf payload :replacement-p))
+         (source (getf payload :source))
          (level (getf payload :level)))
     (when turn-id
       (let* ((key (thinking-key turn-id))
-             (existing (gethash key buffer)))
+             (raw-key (thinking-raw-seen-key turn-id))
+             (existing (gethash key buffer))
+             (raw-p (eq source :raw))
+             (summary-p (eq source :summary))
+             (raw-seen-p (gethash raw-key buffer)))
         (cond
           ((typep existing 'transcript-event)
-           (append-streaming-text (event-text existing) text)
-           existing)
+           (cond
+             ((and summary-p raw-seen-p)
+              nil)
+             (raw-p
+              (unless raw-seen-p
+                (setf (gethash raw-key buffer) t))
+              (if (or replacement-p (not raw-seen-p))
+                  (replace-streaming-text (event-text existing) text)
+                  (append-streaming-text (event-text existing) text))
+              existing)
+             (replacement-p
+              (replace-streaming-text (event-text existing) text)
+              existing)
+             (t
+              (append-streaming-text (event-text existing) text)
+              existing)))
           ((plusp (length text))
+           (when raw-p
+             (setf (gethash raw-key buffer) t))
            (let ((te (make-transcript-event :thinking nil
                                             (make-streaming-text text)
                                             :status level)))
@@ -111,7 +140,9 @@
         (let ((te (gethash (delta-key turn-id) buffer)))
           (when (typep te 'transcript-event)
             (setf (event-status te) :truncated))))
-      (dolist (key (list (delta-key turn-id) (thinking-key turn-id)))
+      (dolist (key (list (delta-key turn-id)
+                         (thinking-key turn-id)
+                         (thinking-raw-seen-key turn-id)))
         (let ((te (gethash key buffer)))
           (when (typep te 'transcript-event)
             (setf (event-text te)

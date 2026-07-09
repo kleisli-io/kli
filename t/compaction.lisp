@@ -131,6 +131,245 @@ an empty set over the whole history."
                        (sized-message-entry :tool 400 :gd-r1))))
     (is-false (sess:prepare-session-compaction entries 5))))
 
+(test prepare-compaction-counts-tool-call-arguments
+  "Assistant tool-call arguments are provider-visible context. A large write
+argument must therefore make the turn eligible for compaction even when the
+assistant message text is empty."
+  (let* ((large-content (make-string 240000 :initial-element #\x))
+         (arguments-json (format nil "{\"path\":\"huge.txt\",\"content\":\"~A\"}"
+                                 large-content))
+         (entries
+           (list
+            (sess:make-message-entry
+             (sess:make-user-message "write the generated artifact")
+             :id :large-arg-user)
+            (sess:make-message-entry
+             (sess:make-assistant-message
+              ""
+              :metadata (list :tool-calls
+                              (list (list :id "call_large_write"
+                                          :name "write"
+                                          :arguments-json arguments-json))))
+             :id :large-arg-assistant)
+            (sess:make-message-entry
+             (sess:make-tool-result-message
+              "Wrote 240000 characters to huge.txt."
+              :tool-call-id "call_large_write"
+              :tool-name "write")
+             :id :large-arg-result)))
+         (prep (sess:prepare-session-compaction entries 20000)))
+    (is (not (null prep))
+        "provider-visible tool-call arguments must count toward compaction")
+    (when prep
+      (is (eq :large-arg-assistant
+              (sess:compaction-preparation-first-kept-id prep)))
+      (is (= 1
+             (length
+              (sess:compaction-preparation-turn-prefix-messages prep)))))))
+
+(defun compaction-bound-agent (service context &optional (mode-id :default-mode))
+  (let* ((binding (gethash mode-id
+                           (agent-session:session-mode-bindings service)))
+         (agent-id (and binding (agent-session:mode-binding-agent-id binding))))
+    (and agent-id (kli:find-live-object (kli:context-registry context)
+                                        agent-id))))
+
+(defun provider-accounting-for-test (service context)
+  (let ((agent (compaction-bound-agent service context)))
+    (agent-session::rebuild-context agent context)
+    (agent-session:account-provider-replay
+     (agents:agent-context agent)
+     (agents:agent-model-selection agent)
+     context)))
+
+(test (provider-accounting-reports-upper-bound-and-item-attribution
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (agent-session-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (service session) (bind-agent-session-mode context)
+      (let ((store (session-log-store context)))
+        (flet ((append! (entry)
+                 (sess:append-session-entry store session entry context)))
+          (append! (sess:make-message-entry
+                    (sess:make-user-message "write a file" :id :pa-user-msg)
+                    :id :pa-user-entry))
+          (append! (sess:make-message-entry
+                    (sess:make-assistant-message
+                     ""
+                     :id :pa-assistant-msg
+                     :metadata
+                     (list :tool-calls
+                           (list (list :id "call-pa"
+                                       :name "write"
+                                       :arguments-json "{\"path\":\"a\"}"))))
+                    :id :pa-assistant-entry))
+          (append! (sess:make-message-entry
+                    (sess:make-tool-result-message
+                     "ok"
+                     :id :pa-result-msg
+                     :tool-call-id "call-pa"
+                     :tool-name "write")
+                    :id :pa-result-entry)))
+        (let* ((accounting (provider-accounting-for-test service context))
+               (attrs (agent-session:provider-accounting-result-attributions
+                       accounting)))
+          (is (eq :tokens
+                  (agent-session:provider-accounting-result-units accounting)))
+          (is-false
+           (agent-session:provider-accounting-result-exact-p accounting))
+          (is-true
+           (agent-session:provider-accounting-result-upper-bound-p accounting))
+          (is (< 0 (agent-session:provider-accounting-result-total
+                    accounting)))
+          (is (some (lambda (attr)
+                      (member '(:message :pa-assistant-msg)
+                              (getf attr :item-ids)
+                              :test #'equal))
+                    attrs))
+          (is (some (lambda (attr)
+                      (member :pa-assistant-entry
+                              (getf attr :entry-ids)
+                              :test #'equal))
+                    attrs)))))))
+
+(test (provider-accounted-cut-planning-counts-wire-tool-arguments
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (agent-session-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (service session) (bind-agent-session-mode context)
+      (let* ((store (session-log-store context))
+             (large-content (make-string 240000 :initial-element #\x))
+             (arguments-json
+               (format nil "{\"path\":\"huge.txt\",\"content\":\"~A\"}"
+                       large-content)))
+        (flet ((append! (entry)
+                 (sess:append-session-entry store session entry context)))
+          (append! (sess:make-message-entry
+                    (sess:make-user-message "write the artifact")
+                    :id :pac-user))
+          (append! (sess:make-message-entry
+                    (sess:make-assistant-message
+                     ""
+                     :metadata
+                     (list :tool-calls
+                           (list (list :id "call-provider-large"
+                                       :name "write"
+                                       :arguments-json arguments-json))))
+                    :id :pac-assistant))
+          (append! (sess:make-message-entry
+                    (sess:make-tool-result-message
+                     "wrote huge.txt"
+                     :tool-call-id "call-provider-large"
+                     :tool-name "write")
+                    :id :pac-result)))
+        (let* ((accounting (provider-accounting-for-test service context))
+               (entry-token-fn
+                 (agent-session::provider-accounting-entry-token-fn
+                  accounting))
+               (entries (sess:session-branch store session
+                                             (sess:session-leaf-id session)))
+               (prep (sess:prepare-session-compaction
+                      entries 20000
+                      :entry-token-fn entry-token-fn)))
+          (is (< 20000
+                 (agent-session:provider-accounting-result-total accounting)))
+          (is (not (null prep)))
+          (is (eq :pac-assistant
+                  (sess:compaction-preparation-first-kept-id prep))))))))
+
+(test (provider-accounting-materializes-repairs-as-provider-results
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (agent-session-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (service session) (bind-agent-session-mode context)
+      (let ((store (session-log-store context)))
+        (flet ((append! (entry)
+                 (sess:append-session-entry store session entry context)))
+          (append! (sess:make-message-entry
+                    (sess:make-user-message "call the tool")
+                    :id :repair-user))
+          (append! (sess:make-message-entry
+                    (sess:make-assistant-message
+                     ""
+                     :metadata
+                     (list :tool-calls
+                           (list (list :id "call-missing"
+                                       :name "read"
+                                       :arguments-json "{\"path\":\"a\"}"))))
+                    :id :repair-assistant)))
+        (let* ((accounting (provider-accounting-for-test service context))
+               (attrs (agent-session:provider-accounting-result-attributions
+                       accounting)))
+          (is (some (lambda (attr)
+                      (some (lambda (item-id)
+                              (and (consp item-id)
+                                   (eq (first item-id) :repair)))
+                            (getf attr :item-ids)))
+                    attrs))
+          (is (< 0 (agent-session:provider-accounting-result-total
+                    accounting))))))))
+
+(defun responses-wire-item-types (items)
+  (loop for item across items collect (gethash "type" item)))
+
+(test compacted-provider-context-drops-completed-tool-turns
+  "Compaction must not leave completed tool turns in provider replay. Counting
+or truncating tool-call arguments is not enough: once a file mutation succeeded,
+the compacted provider context should carry the summary, not the original
+function_call/function_call_output pair."
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context))
+         (content (make-string 240000 :initial-element #\x))
+         (arguments-json (format nil "{\"path\":\"huge.txt\",\"content\":\"~A\"}"
+                                 content)))
+    (install-extensions context sess:*session-log-extension-manifest*)
+    (multiple-value-bind (provider store) (compaction-test-log context protocol)
+      (let ((session (ext:provider-call provider :create-session store context
+                                        :id :compacted-tool-turn-session)))
+        (flet ((append! (entry)
+                 (ext:provider-call provider :append-session-entry
+                                    store session entry context)))
+          (append! (sess:make-message-entry
+                    (sess:make-user-message "write the generated artifact")
+                    :id :ct-user))
+          (append! (sess:make-message-entry
+                    (sess:make-assistant-message
+                     ""
+                     :metadata (list :tool-calls
+                                     (list (list :id "call_large_write"
+                                                 :name "write"
+                                                 :arguments-json arguments-json))))
+                    :id :ct-assistant))
+          (append! (sess:make-message-entry
+                    (sess:make-tool-result-message
+                     "Wrote huge.txt."
+                     :tool-call-id "call_large_write"
+                     :tool-name "write"
+                     :metadata (list :details
+                                     (list :path "huge.txt"
+                                           :added 1
+                                           :removed 0
+                                           :changed-ranges nil
+                                           :new-sha256 "abc")))
+                    :id :ct-result))
+          (append! (sess:make-compaction-entry
+                    "The artifact was written to huge.txt."
+                    :ct-assistant
+                    :id :ct-compaction)))
+        (let* ((messages (sess:session-context-messages
+                          (ext:provider-call provider :build-session-context
+                                             store session)))
+               (items (transports:convert-responses-input
+                       (rt::convert-messages messages)))
+               (types (responses-wire-item-types items))
+               (wire (com.inuoe.jzon:stringify items)))
+          (is (equal '("message") types)
+              "compacted provider context must contain only summary/message items")
+          (is (not (search "function_call" wire))
+              "completed function calls must not survive compaction replay")
+          (is (not (search content wire))
+              "compaction replay must not contain the original write body"))))))
+
 (defun runtime-request-count (runtime)
   (hash-table-count (rt:runtime-requests runtime)))
 
@@ -168,6 +407,42 @@ an empty set over the whole history."
         (is (eq :user (sess:message-role (first messages))))
         (is (string= "SUMMARY OF OLD"
                      (sess:message-content (first messages))))))))
+
+(test (compaction-executor-retries-when-summary-exceeds-reserve
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (agent-session-test-context)
+    (declare (ignore protocol))
+    (bind-agent-session-mode context :metadata (list :fake-deltas '("ok")))
+    (let* ((service (agent-session-service context))
+           (store (session-log-store context))
+           (session (sess:find-session store :agent-session-test-session))
+           (calls 0))
+      (flet ((append! (entry)
+               (sess:append-session-entry store session entry context)))
+        (append! (sized-message-entry :user 400 :rs-u1))
+        (append! (sized-message-entry :assistant 400 :rs-a1))
+        (append! (sized-message-entry :user 400 :rs-u2))
+        (append! (sized-message-entry :assistant 400 :rs-a2))
+        (append! (sized-message-entry :user 40 :rs-u3))
+        (append! (sized-message-entry :assistant 40 :rs-a3)))
+      (agent-session:recode-compaction-policy
+       service
+       :keep-recent-tokens 150
+       :summary-reserve-tokens 5
+       :summarizer (lambda (&key messages turn-prefix-messages
+                              &allow-other-keys)
+                     (declare (ignore messages turn-prefix-messages))
+                     (incf calls)
+                     (values (make-string 400 :initial-element #\s) nil)))
+      (agent-session:execute-session-compaction
+       service
+       (event:make-event :session-compaction-needed
+                         :payload (list :mode :default-mode))
+       context)
+      (let ((leaf (sess:session-leaf-entry store session)))
+        (is (= 2 calls))
+        (is (typep leaf 'sess:compaction-entry))
+        (is (eq :rs-a2 (sess:entry-first-kept-entry-id leaf)))))))
 
 (test (compaction-executor-default-summarizer-appends-isolated-summary :fixture interactive-authority)
   "The default summarizer runs an isolated completion, so compaction appends one

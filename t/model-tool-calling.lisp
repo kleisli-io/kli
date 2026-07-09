@@ -236,16 +236,33 @@ converted plist, leaving the text content untouched for each transport to encode
     (is (null (getf without :details))
         "a detail-less result carries no details")))
 
+(defun tool-result-wire-fixture (m)
+  `((:role :assistant :content ""
+     :tool-calls ((:id ,(getf m :tool-call-id)
+                   :name ,(or (getf m :tool-name) "tool")
+                   :arguments-json "{}")))
+    ,m))
+
 (defun anthropic-tool-result-wire (m)
-  (let* ((msgs (transports:convert-anthropic-messages (list m)))
-         (blocks (gethash "content" (aref msgs 0))))
+  (let* ((msgs (transports:convert-anthropic-messages
+                (tool-result-wire-fixture m)))
+         (blocks (gethash "content" (aref msgs 1))))
     (gethash "content" (first blocks))))
 
 (defun responses-tool-result-wire (m)
-  (gethash "output" (aref (transports:convert-responses-input (list m)) 0)))
+  (gethash "output" (aref (transports:convert-responses-input
+                           (tool-result-wire-fixture m))
+                          1)))
 
 (defun completions-tool-result-wire (m)
-  (gethash "content" (aref (transports:convert-completions-messages (list m)) 0)))
+  (gethash "content" (aref (transports:convert-completions-messages
+                            (tool-result-wire-fixture m))
+                           1)))
+
+(defun responses-function-call-arguments-wire (messages)
+  (loop for item across (transports:convert-responses-input messages)
+        when (string= "function_call" (gethash "type" item))
+          return (gethash "arguments" item)))
 
 (test transports-encode-tool-result-details-onto-wire-content
   "Each transport appends the structured details as a labeled JSON block on the
@@ -277,6 +294,109 @@ file bodies."
                    :details (:files ((:path "/tmp/x" :old "a" :new "b"))))))
     (signals error
       (responses-tool-result-wire message))))
+
+(test responses-replays-normal-completed-write-arguments
+  "Normal replay preserves completed tool-call arguments. Compaction, not the
+Responses converter, removes completed tool artifacts from compacted history."
+  (let* ((content (make-string 240000 :initial-element #\x))
+         (arguments-json (format nil "{\"path\":\"huge.txt\",\"content\":\"~A\"}"
+                                 content))
+         (messages
+           `((:role :user :content "write the artifact")
+             (:role :assistant :content ""
+              :tool-calls ((:id "call_write" :name "write"
+                            :arguments-json ,arguments-json)))
+             (:role :tool-result
+              :tool-call-id "call_write"
+              :tool-name "write"
+              :content "Wrote huge.txt."
+              :error-p nil
+              :details (:path "huge.txt"
+                        :added 1
+                        :removed 0
+                        :changed-ranges nil
+                        :new-sha256 "abc"))))
+         (wire-arguments (responses-function-call-arguments-wire messages)))
+    (is (stringp wire-arguments))
+    (is (string= arguments-json wire-arguments))
+    (is (search content wire-arguments)
+        "normal replay keeps completed tool-call arguments until compaction cuts them")))
+
+(test provider-transports-materialize-summary-role
+  "Semantic summaries remain :summary until provider conversion. Existing
+transports currently encode them as provider-visible user context."
+  (let* ((messages '((:role :summary :content "Prior context was compacted.")))
+         (responses (transports:convert-responses-input messages))
+         (completions (transports:convert-completions-messages messages))
+         (anthropic (transports:convert-anthropic-messages messages)))
+    (is (string= "user" (gethash "role" (aref responses 0))))
+    (is (string= "Prior context was compacted."
+                 (gethash "text" (first (gethash "content" (aref responses 0))))))
+    (is (string= "user" (gethash "role" (aref completions 0))))
+    (is (string= "Prior context was compacted."
+                 (gethash "content" (aref completions 0))))
+    (is (string= "user" (gethash "role" (aref anthropic 0))))
+    (is (string= "Prior context was compacted."
+                 (gethash "text" (first (gethash "content" (aref anthropic 0))))))))
+
+(test provider-transports-materialize-repair-tool-results
+  "A durable repair enters provider wire as the missing tool result, with the
+error marker preserved where the provider supports one."
+  (let* ((messages '((:role :assistant :content ""
+                      :tool-calls ((:id "call_repair" :name "read"
+                                    :arguments-json "{}")))
+                     (:role :tool-result
+                      :content "Tool call was aborted."
+                      :tool-call-id "call_repair"
+                      :tool-name "read"
+                      :error-p t
+                      :metadata (:transcript-repair t))))
+         (responses (transports:convert-responses-input messages))
+         (completions (transports:convert-completions-messages messages))
+         (anthropic (transports:convert-anthropic-messages messages))
+         (anthropic-result (first (gethash "content" (aref anthropic 1)))))
+    (is (string= "function_call_output" (gethash "type" (aref responses 1))))
+    (is (string= "call_repair" (gethash "call_id" (aref responses 1))))
+    (is (string= "tool" (gethash "role" (aref completions 1))))
+    (is (string= "call_repair" (gethash "tool_call_id" (aref completions 1))))
+    (is (string= "tool_result" (gethash "type" anthropic-result)))
+    (is (eq t (gethash "is_error" anthropic-result)))))
+
+(test provider-transports-reject-unsupported-content
+  (dolist (converter (list #'transports:convert-responses-input
+                           #'transports:convert-completions-messages
+                           #'transports:convert-anthropic-messages))
+    (signals error
+      (funcall converter '((:role :user :content (:image "not-supported")))))))
+
+(test provider-transports-validate-tool-order-and-ids
+  (dolist (converter (list #'transports:convert-responses-input
+                           #'transports:convert-completions-messages
+                           #'transports:convert-anthropic-messages))
+    (signals error
+      (funcall converter '((:role :tool-result :content "orphan"
+                            :tool-call-id "call_orphan"))))
+    (signals error
+      (funcall converter '((:role :assistant :content ""
+                            :tool-calls ((:id "call_pending" :name "read"
+                                          :arguments-json "{}"))))))
+    (signals error
+      (funcall converter '((:role :assistant :content ""
+                            :tool-calls ((:id "" :name "read"
+                                          :arguments-json "{}")))
+                           (:role :tool-result :content "x"
+                            :tool-call-id ""))))
+    (signals error
+      (funcall converter '((:role :assistant :content ""
+                            :tool-calls ((:id "dup" :name "read"
+                                          :arguments-json "{}")))
+                           (:role :tool-result :content "x"
+                            :tool-call-id "dup")
+                           (:role :assistant :content ""
+                            :tool-calls ((:id "dup" :name "read"
+                                          :arguments-json "{}")))
+                           (:role :tool-result :content "x"
+                            :tool-call-id "dup"))))))
 
 (test responses-converts-assistant-tool-use
   "Assistant tool_use round-trips on Responses."

@@ -24,6 +24,7 @@
    #:branch-summary-entry
    #:custom-entry
    #:custom-message-entry
+   #:transcript-repair-entry
    #:agent-message
    #:user-message
    #:assistant-message
@@ -67,6 +68,7 @@
    #:make-branch-summary-entry
    #:make-custom-entry
    #:make-custom-message-entry
+   #:make-transcript-repair-entry
    #:entry-parent-id
    #:entry-timestamp
    #:entry-source
@@ -84,6 +86,9 @@
    #:entry-custom-type
    #:entry-data
    #:entry-display-p
+   #:entry-repair-kind
+   #:entry-repair-reason
+   #:entry-repair-policy
 
    #:append-session-entry
    #:session-leaf-entry
@@ -97,6 +102,8 @@
    #:repoint-session-leaf
 
    #:estimate-message-tokens
+   #:estimate-content-tokens
+   #:entry-token-estimate
    #:find-cut-point
    #:prepare-session-compaction
    #:compaction-preparation

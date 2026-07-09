@@ -77,14 +77,28 @@ let
       (sb-posix:exit 1))
   '') manifestSymbols;
 
+  preDump =
+    optionalString (manifestSymbols != [ ]) (manifestAssertion + "\n")
+    + kliLibrary.passthru.bootSnapshotSeam
+    + kliLibrary.passthru.blessedLibsSeam;
+
   program = buildLisp.program {
     name = "kli";
     deps = [ configuredLibrary ];
     cLibraries = blessedNativeLibs;
     main = "kli/app:dispatch-main";
-    preDump = optionalString (manifestSymbols != [ ]) (manifestAssertion + "\n")
-      + kliLibrary.passthru.bootSnapshotSeam
-      + kliLibrary.passthru.blessedLibsSeam;
+    inherit preDump;
+  };
+
+  debugAttrs = lib.optionalAttrs (kliLibrary.passthru ? debugSwank) {
+    debug = buildLisp.program {
+      name = "kli-debug";
+      deps = [ configuredLibrary ];
+      cLibraries = blessedNativeLibs;
+      main = "kli/app:dispatch-main";
+      swank = kliLibrary.passthru.debugSwank;
+      inherit preDump;
+    };
   };
 
   # Symbol-name component, uppercased: SBCL stores it verbatim in the dumped
@@ -135,7 +149,7 @@ let
     passthru = old.passthru // {
       inherit configuredLibrary mkManifestGate;
       manifestGate = mkManifestGate program;
-    };
+    } // debugAttrs;
   });
 
   # Completion the image emits itself, from the plain (non-bwrapped) image;

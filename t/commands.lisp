@@ -70,6 +70,39 @@
                    (getf (first (commands:command-result-content result))
                          :text))))))
 
+(test (command-invoke-mediates-extension-load-run-context :fixture interactive-authority)
+  (let* ((context (kli:make-kernel-host))
+         (protocol (switch-to-extension-protocol context)))
+    (install-extensions context commands:*commands-extension-manifest*)
+    (let* ((provider (ext:require-capability-provider protocol
+                                                      :commands
+                                                      :contract :commands/v1))
+           (command (commands:make-command
+                     :name :load-context-probe
+                     :metadata '(:run-as :extension-load)
+                     :runner (lambda (command arguments context
+                                      &key call-id on-update)
+                               (declare (ignore command arguments context
+                                                call-id on-update))
+                               (if (ext:check-capability ext:*call-subject*
+                                                         :image/eval)
+                                   "extension-load"
+                                   "interactive")))))
+      (ext:provider-call provider
+                         :register-command
+                         context
+                         :load-context-probe
+                         command)
+      (let ((result (ext:provider-call provider
+                                       :invoke-command
+                                       :load-context-probe
+                                       '()
+                                       context)))
+        (is (not (commands:command-result-error-p result)))
+        (is (string= "extension-load"
+                     (getf (first (commands:command-result-content result))
+                           :text)))))))
+
 (test command-unregister-restores-previous-provider
   (let* ((context (kli:make-kernel-host))
          (protocol (switch-to-extension-protocol context)))

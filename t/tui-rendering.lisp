@@ -897,3 +897,20 @@ background activity. An error response keeps the ▎ bar via status."
           (is (= 1 (length lines)))
           (is (equal expected (first lines))
               "thinking status ~A maps to ~A in italic dim" status token))))))
+
+(test styled-thinking-strips-html-comment-separators
+  (let* ((tui-style:*color-mode* :truecolor)
+         (theme (builtin-theme "dark.json"))
+         (lines (tui-transcript::render-thinking
+                 (format nil "First~%~%<!-- -->~%~%Second")
+                 "xhigh" theme 32))
+         (rendered (format nil "~{~A~%~}"
+                           lines)))
+    (is (string= (format nil "First~%Second")
+                 (tui-transcript::normalize-thinking-text
+                  (format nil "First~%~%<!-- -->~%~%Second"))))
+    (is (= 2 (length lines)))
+    (is (not (search "<!--" rendered)))
+    (is (search "First" rendered))
+    (is (search "Second" rendered))
+    (is (not (search (format nil "│ ~%") rendered)))))

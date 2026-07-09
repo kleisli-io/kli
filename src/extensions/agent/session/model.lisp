@@ -67,6 +67,23 @@ Invariant violations (:no-agent, :no-mode-binding and the like) stay :internal."
                  :total-tokens total-tokens
                  :over-threshold-p over-threshold-p))
 
+(defstruct (provider-accounting-result
+            (:constructor make-provider-accounting-result
+                (&key provider-id model-id api (units :tokens)
+                  (exact-p nil) (upper-bound-p t) (total 0)
+                  attributions group-costs entry-costs wire-input)))
+  provider-id
+  model-id
+  api
+  units
+  exact-p
+  upper-bound-p
+  total
+  attributions
+  group-costs
+  entry-costs
+  wire-input)
+
 (defclass agent-session-binding ()
   ((session-id
     :initarg :session-id

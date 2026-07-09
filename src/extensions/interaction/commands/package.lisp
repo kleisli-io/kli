@@ -6,6 +6,7 @@
                 #:object-id)
   (:import-from #:kli/ext
                 #:*call-subject*
+                #:*install-subject*
                 #:capabilities-subject
                 #:contribution
                 #:contribution-extension

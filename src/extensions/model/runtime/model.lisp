@@ -76,6 +76,12 @@ command workers finish requests concurrently.")))
    (sealed-context
     :initarg :sealed-context
     :accessor model-request-sealed-context)
+   (sealed-editable-view
+    :initarg :sealed-editable-view
+    :reader model-request-sealed-editable-view)
+   (provider-replay-view
+    :initarg :provider-replay-view
+    :reader model-request-provider-replay-view)
    (state
     :initarg :state
     :initform :pending
@@ -84,6 +90,18 @@ command workers finish requests concurrently.")))
     :initarg :model-messages
     :initform '()
     :accessor model-request-model-messages)
+   (provider-replay-items
+    :initarg :provider-replay-items
+    :initform '()
+    :reader model-request-provider-replay-items)
+   (provider-wire-input
+    :initarg :provider-wire-input
+    :initform nil
+    :accessor model-request-provider-wire-input)
+   (accounting-result
+    :initarg :accounting-result
+    :initform nil
+    :accessor model-request-accounting-result)
    (instructions
     :initarg :instructions
     :initform nil
@@ -137,6 +155,18 @@ command workers finish requests concurrently.")))
    (completed-at
     :initform nil
     :accessor model-request-completed-at)))
+
+(defstruct (request-accounting-result
+            (:constructor make-request-accounting-result
+                (&key api (units :tokens) (exact-p nil) (upper-bound-p t)
+                  (total 0) attributions wire-chars)))
+  api
+  units
+  exact-p
+  upper-bound-p
+  total
+  attributions
+  wire-chars)
 
 (defclass model-response (live-object)
   ((request-id
@@ -219,6 +249,14 @@ completion.")))
     :initarg :text
     :initform ""
     :reader thinking-delta-text)
+   (replacement-p
+    :initarg :replacement-p
+    :initform nil
+    :reader thinking-delta-replacement-p)
+   (source
+    :initarg :source
+    :initform nil
+    :reader thinking-delta-source)
    (signature
     :initarg :signature
     :initform nil
@@ -272,13 +310,15 @@ completion.")))
                  :text text))
 
 (defun make-thinking-delta (text &key id timestamp content-index
-                                   signature redacted)
+                                   replacement-p source signature redacted)
   (make-instance 'thinking-delta
                  :id (or id (next-model-delta-id))
                  :kind :thinking-delta
                  :content-index content-index
                  :timestamp (or timestamp (get-universal-time))
                  :text text
+                 :replacement-p replacement-p
+                 :source source
                  :signature signature
                  :redacted redacted))
 

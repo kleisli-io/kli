@@ -13,6 +13,10 @@
      :abort-context-patches
      :seal-context-projection
      :seal-range-projection
+     :transcript-display-items
+     :summarizer-input-items
+     :provider-replay-items
+     :provider-replay-messages
      :context-epoch
      :make-append-message-patch
      :make-remove-message-patch
@@ -33,6 +37,10 @@
          :abort-context-patches #'abort-context-patches
          :seal-context-projection #'seal-context-projection
          :seal-range-projection #'seal-range-projection
+         :transcript-display-items #'transcript-display-items
+         :summarizer-input-items #'summarizer-input-items
+         :provider-replay-items #'provider-replay-items
+         :provider-replay-messages #'provider-replay-messages
          :context-epoch #'context-epoch
          :make-append-message-patch #'make-append-message-patch
          :make-remove-message-patch #'make-remove-message-patch
@@ -66,6 +74,7 @@
                   :timestamp (context-patch-timestamp set)
                   :base-epoch (context-patch-set-base-epoch set)
                   :result-epoch (context-patch-set-result-epoch set)))
+   (event-type :context/transcript-repair)
    (method serialize-value () (kli/ext:subject) (value)
      (serialize-record value))
    (method serialize-record () (kli/ext:subject) (subject)

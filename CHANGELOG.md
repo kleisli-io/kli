@@ -4,6 +4,25 @@ All notable changes to kli are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.0] - 2026-07-09
+
+### Added
+
+- KLI now uses explicit context views for durable session logs, editable context, summarizer input, provider replay, request audit, and provider-visible accounting. This is the headline 0.2.0 change: model requests are built from deliberate provider-shaped replay instead of the generic transcript projection.
+- Development shells now expose a `kli-debug` image when debug Swank support is available, and `kli-workspace debug` / `kli-workspace debug-ephemeral` launch named or throwaway workspaces with that image.
+
+### Fixed
+
+- `/reload` now prepares user extensions before touching the running set, runs through the same extension-load authority as boot, and leaves existing extensions active when a broken edit fails to load. `/profile`, `/enable`, `/disable`, and `/uninstall` now share the same lifecycle lock, and failed live profile switches roll back to the previous profile, settings overlay, and extension set. This fixes extensions disappearing after `/reload` ([#3](https://github.com/kleisli-io/kli/issues/3)).
+- Codex Responses WebSocket aborts now shut down the underlying stream instead of closing the WebSocket/TLS object from another thread. Cached WebSocket sessions are retired on abort/discard so the reader thread owns final close, avoiding SBCL corruption warnings during TUI aborts under poor network timing.
+- Provider context replay and compaction now use explicit context views, provider-shaped replay, and provider-visible accounting so sessions can recover after large tool outputs or oversized tool-call arguments without repeatedly overflowing the model context. This fixes context-window failures after large reads or writes ([#4](https://github.com/kleisli-io/kli/issues/4)).
+
+### Changed
+
+- The `bash` tool no longer rejects a fixed list of interactive-looking command names such as `nvim`, `less`, `ssh`, `tmux`, or `screen`. A `process/exec` grant now admits every command string consistently; terminal-oriented programs still run without a PTY and may hang, fail, or produce poor captured output. When steering the model, ask it for non-interactive command-line equivalents, explicit timeouts for uncertain commands, or a background launch plus later output polling for long-running work.
+
 ## [0.1.6] - 2026-07-07
 
 ### Fixed

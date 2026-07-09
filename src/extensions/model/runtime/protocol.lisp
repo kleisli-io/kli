@@ -131,7 +131,71 @@ otherwise-anonymous call."))
 (defmethod find-model-stream-adapter ((runtime model-runtime) api)
   (gethash api (runtime-stream-adapters runtime)))
 
-(defun make-request-instance (selection provider sealed-context model-messages
+(defun wire-input-text (wire-input)
+  (cond
+    ((null wire-input) "")
+    ((stringp wire-input) wire-input)
+    (t (prin1-to-string wire-input))))
+
+(defun wire-input-token-upper-bound (wire-input)
+  (ceiling (length (wire-input-text wire-input)) 4))
+
+(defun wire-input-item-attributions (api wire-input total items)
+  (declare (ignore wire-input))
+  (let ((item-ids (mapcar #'context-view-item-id items)))
+    (when item-ids
+      (list (list :api api
+                  :item-ids item-ids
+                  :total total
+                  :units :tokens
+                  :exact-p nil
+                  :upper-bound-p t)))))
+
+(defun account-request-wire-input (api wire-input items)
+  (let ((total (wire-input-token-upper-bound wire-input)))
+    (make-request-accounting-result
+     :api api
+     :units :tokens
+     :exact-p nil
+     :upper-bound-p t
+     :total total
+     :attributions (wire-input-item-attributions api wire-input total items)
+     :wire-chars (length (wire-input-text wire-input)))))
+
+(defun initial-request-wire-input (api model-messages)
+  (list :api api
+        :kind :materialized-provider-replay
+        :messages (copy-tree model-messages)))
+
+(defun build-request-audit (provider sealed-context)
+  (let* ((api (model-provider-api provider))
+         (sealed-view (editable-context-view sealed-context))
+         (replay-view (provider-replay-context-view sealed-context))
+         (items (provider-replay-items replay-view))
+         (model-messages (materialize-provider-replay-items items))
+         (wire-input (initial-request-wire-input api model-messages))
+         (accounting (account-request-wire-input api wire-input items)))
+    (values sealed-view replay-view items model-messages wire-input accounting)))
+
+(defun record-model-request-wire-input (request api wire-input)
+  (let ((snapshot (copy-tree wire-input)))
+    (setf (model-request-provider-wire-input request) snapshot
+          (model-request-accounting-result request)
+          (account-request-wire-input
+           api snapshot (model-request-provider-replay-items request))))
+  request)
+
+(defun model-request-audit (request)
+  (list :sealed-editable-view (model-request-sealed-editable-view request)
+        :provider-replay-view (model-request-provider-replay-view request)
+        :provider-wire-input (copy-tree
+                              (model-request-provider-wire-input request))
+        :accounting-result (model-request-accounting-result request)))
+
+(defun make-request-instance (selection provider sealed-context
+                              sealed-editable-view provider-replay-view
+                              provider-replay-items model-messages
+                              provider-wire-input accounting-result
                               provider-id model-id
                               &key id metadata tool-schemas instructions session-id)
   (make-instance 'model-request
@@ -141,7 +205,12 @@ otherwise-anonymous call."))
                  :provider-id provider-id
                  :model-id model-id
                  :sealed-context sealed-context
+                 :sealed-editable-view sealed-editable-view
+                 :provider-replay-view provider-replay-view
+                 :provider-replay-items provider-replay-items
                  :model-messages model-messages
+                 :provider-wire-input provider-wire-input
+                 :accounting-result accounting-result
                  :instructions instructions
                  :session-id session-id
                  :tool-schemas tool-schemas
@@ -191,20 +260,27 @@ can surface the real cause instead of a missing-parameter error."
                                   provider-id)))
     (unless provider
       (error "No model provider registered for selection: ~S" provider-id))
-    (let* ((messages (context-model-messages sealed-context))
-           (converted (convert-messages messages))
-           (request (make-request-instance selection
-                                           provider
-                                           sealed-context
-                                           converted
-                                           provider-id
-                                           model-id
-                                           :id id
-                                           :metadata metadata
-                                           :instructions instructions
-                                           :session-id session-id
-                                           :tool-schemas (enumerate-request-tools context))))
-      (register-runtime-request runtime request context))))
+    (multiple-value-bind (sealed-view replay-view items converted
+                          wire-input accounting)
+        (build-request-audit provider sealed-context)
+      (let ((request (make-request-instance
+                      selection
+                      provider
+                      sealed-context
+                      sealed-view
+                      replay-view
+                      items
+                      converted
+                      wire-input
+                      accounting
+                      provider-id
+                      model-id
+                      :id id
+                      :metadata metadata
+                      :instructions instructions
+                      :session-id session-id
+                      :tool-schemas (enumerate-request-tools context))))
+        (register-runtime-request runtime request context)))))
 
 (defmethod complete-text ((runtime model-runtime)
                           selection
@@ -221,26 +297,34 @@ can surface the real cause instead of a missing-parameter error."
                                   provider-id)))
     (unless provider
       (error "No model provider registered for selection: ~S" provider-id))
-    (let* ((messages (context-model-messages sealed-context))
-           (converted (convert-messages messages))
-           (request (make-request-instance selection
-                                           provider
-                                           sealed-context
-                                           converted
-                                           provider-id
-                                           model-id
-                                           :instructions instructions)))
-      (when on-request
-        (funcall on-request request))
-      (let ((response (stream-model-response provider request context)))
-        (values (model-response-content response)
-                (getf (model-response-metadata response) :usage))))))
+    (multiple-value-bind (sealed-view replay-view items converted
+                          wire-input accounting)
+        (build-request-audit provider sealed-context)
+      (let ((request (make-request-instance selection
+                                            provider
+                                            sealed-context
+                                            sealed-view
+                                            replay-view
+                                            items
+                                            converted
+                                            wire-input
+                                            accounting
+                                            provider-id
+                                            model-id
+                                            :instructions instructions)))
+        (when on-request
+          (funcall on-request request))
+        (let ((response (stream-model-response provider request context)))
+          (values (model-response-content response)
+                  (getf (model-response-metadata response) :usage)))))))
 
 (defun convert-agent-message (message)
   (let ((role (message-role message)))
     (case role
       (:user
-       (list :role :user
+       (list :role (if (getf (message-metadata message) :context-summary)
+                       :summary
+                       :user)
              :content (message-content message)
              :metadata (copy-list (message-metadata message))))
       (:assistant
@@ -264,6 +348,28 @@ can surface the real cause instead of a missing-parameter error."
              :ephemeral (getf (message-metadata message) :ephemeral)
              :metadata (copy-list (message-metadata message))))
       (otherwise nil))))
+
+(defun materialize-provider-replay-item (item)
+  (let ((kind (context-view-item-payload-kind item))
+        (message (context-view-item-payload-value item)))
+    (case kind
+      (:summary
+       (list :role :summary
+             :content (message-content message)
+             :metadata (copy-list (message-metadata message))))
+      ((:message :tool-result :repair)
+       (convert-agent-message message))
+      (:display
+       (error "Provider replay cannot materialize display-only item: ~S"
+              (context-view-item-payload-value item)))
+      (otherwise
+       (error "Unsupported provider replay item kind: ~S" kind)))))
+
+(defun materialize-provider-replay-items (items)
+  (loop for item in items
+        for converted = (materialize-provider-replay-item item)
+        when converted
+          collect converted))
 
 (defun convert-messages (messages)
   (loop for message in messages
@@ -409,10 +515,35 @@ group carries identity, later deltas carry argument fragments."
                         :arguments-json (%tool-call-arguments-json deltas)))))
 
 (defun %thinking-block-text (deltas)
-  (with-output-to-string (out)
-    (dolist (d deltas)
-      (let ((text (thinking-delta-text d)))
-        (when (stringp text) (write-string text out))))))
+  (let ((raw-text "")
+        (raw-seen-p nil)
+        (summary-text "")
+        (summary-seen-p nil)
+        (fallback-text "")
+        (fallback-seen-p nil))
+    (flet ((update (text fragment replacement-p)
+             (if replacement-p
+                 fragment
+                 (concatenate 'string text fragment))))
+      (dolist (d deltas)
+        (let ((fragment (or (thinking-delta-text d) "")))
+          (case (thinking-delta-source d)
+            (:raw
+             (setf raw-seen-p t
+                   raw-text (update raw-text fragment
+                                    (thinking-delta-replacement-p d))))
+            (:summary
+             (setf summary-seen-p t
+                   summary-text (update summary-text fragment
+                                        (thinking-delta-replacement-p d))))
+            (otherwise
+             (setf fallback-seen-p t
+                   fallback-text (update fallback-text fragment
+                                         (thinking-delta-replacement-p d))))))))
+    (cond (raw-seen-p raw-text)
+          (fallback-seen-p fallback-text)
+          (summary-seen-p summary-text)
+          (t ""))))
 
 (defun %thinking-block-signature (deltas)
   "Concatenate signature fragments across DELTAS, NIL when none arrived."
@@ -604,6 +735,24 @@ the stream closer, which shuts down the socket."
         :sealed-epoch (model-request-sealed-epoch request)
         :source-context-id (model-request-source-context-id request)
         :leaf-id (model-request-leaf-id request)
+        :audit (list :sealed-editable-view-kind
+                     (context-view-kind
+                      (model-request-sealed-editable-view request))
+                     :provider-replay-view-kind
+                     (context-view-kind
+                      (model-request-provider-replay-view request))
+                     :provider-replay-items
+                     (length (model-request-provider-replay-items request))
+                     :provider-wire-input
+                     (not (null (model-request-provider-wire-input request)))
+                     :accounting-total
+                     (and (model-request-accounting-result request)
+                          (request-accounting-result-total
+                           (model-request-accounting-result request)))
+                     :accounting-units
+                     (and (model-request-accounting-result request)
+                          (request-accounting-result-units
+                           (model-request-accounting-result request))))
         :credential-reference-id (model-request-credential-reference-id request)
         :credential-source-kind (model-request-credential-source-kind request)
         :message-count (length (model-request-model-messages request))

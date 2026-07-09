@@ -37,6 +37,8 @@
                 #:assistant-delta-text
                 #:thinking-delta
                 #:thinking-delta-text
+                #:thinking-delta-replacement-p
+                #:thinking-delta-source
                 #:usage-delta
                 #:usage-delta-usage
                 #:model-request-provider

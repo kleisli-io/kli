@@ -29,10 +29,13 @@ installer and return the contribution-state the retractor drains."
                  collect (list :id (getf m :id)
                                :name (getf m :id)
                                :context-window (getf m :ctx)
-                               :option-schemas (list (make-model-option-schema "reasoning-effort"
-                                                                               :values '(:off :minimal :low :medium :high :xhigh)
-                                                                               :default :off))
-                               :transport-profile (%model-transport-profile m)))))
+	                               :option-schemas (list (make-model-option-schema "reasoning-effort"
+	                                                                               :values '(:off :minimal :low :medium :high :xhigh)
+	                                                                               :default :off)
+	                                                     (make-model-option-schema "reasoning-summary"
+	                                                                               :values '(:auto :concise :detailed :none)
+	                                                                               :default :auto))
+	                               :transport-profile (%model-transport-profile m)))))
 
 (defun retract-openai-provider (protocol contribution context)
   "Drain the contribution-state install returned, reversing every registration."

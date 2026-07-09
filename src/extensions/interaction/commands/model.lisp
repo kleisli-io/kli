@@ -252,6 +252,21 @@ ambient subject is untouched outside the dynamic extent."
 capabilities policy. See `call-with-operator-capability`."
   `(call-with-operator-capability ,context ,capability (lambda () ,@body)))
 
+(defun command-run-subject (command)
+  (let ((run-as (getf (command-metadata command) :run-as)))
+    (ecase run-as
+      ((nil) *call-subject*)
+      (:extension-load *install-subject*))))
+
+(defun call-command-runner (command arguments context call-id on-update)
+  (let ((*call-subject* (command-run-subject command)))
+    (funcall (command-runner command)
+             command
+             arguments
+             context
+             :call-id call-id
+             :on-update on-update)))
+
 (defun command-key (name)
   (normalize-command-name name))
 
@@ -465,12 +480,8 @@ shadowed name names its winner; an ambiguous one asks the reader to qualify."
       (let ((result
               (handler-case
                   (normalize-command-result
-                   (funcall (command-runner command)
-                            command
-                            arguments
-                            context
-                            :call-id call-id
-                            :on-update on-update))
+                   (call-command-runner command arguments context
+                                        call-id on-update))
                 (error (condition)
                   (command-error-result condition)))))
         ;; :tail, :content, and :model-visible are plain data so handlers in

@@ -35,6 +35,7 @@
                 #:model-request-selection
                 #:model-request-stream
                 #:note-model-stream-timing
+                #:record-model-request-wire-input
                 #:model-request-stream-closer)
   (:import-from #:kli/model/registry
                 #:model-provider-credential-provider-id

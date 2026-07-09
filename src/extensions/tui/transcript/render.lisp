@@ -460,9 +460,35 @@ changed hunks are counted in a Ctrl+O indicator."
           ((string= s "xhigh") "thinkingXhigh")
           (t "thinkingOff"))))
 
+(defun strip-html-comments (text)
+  (let ((input (or text "")))
+    (with-output-to-string (out)
+      (loop with start = 0
+            with length = (length input)
+            while (< start length)
+            for open = (search "<!--" input :start2 start)
+            do (cond
+                 ((null open)
+                  (write-string input out :start start)
+                  (return))
+                 (t
+                  (write-string input out :start start :end open)
+                  (let ((close (search "-->" input :start2 (+ open 4))))
+                    (if close
+                        (setf start (+ close 3))
+                        (progn
+                          (write-string input out :start open)
+                          (return))))))))))
+
+(defun normalize-thinking-text (text)
+  (format nil "~{~A~^~%~}"
+          (remove-if #'blank-string-p
+                     (split-lines (strip-html-comments text)))))
+
 (defun render-thinking (text status theme width)
   "Left │ gutter in the reasoning-effort ramp colour, italic dim text body."
-  (let ((ramp (theme-token theme (thinking-token status))))
+  (let ((ramp (theme-token theme (thinking-token status)))
+        (text (normalize-thinking-text text)))
     (loop for w in (wrap-text text (max 1 (- width 2)))
           for pad = (max 0 (- width (+ 2 (visible-width w))))
           collect (concatenate 'string

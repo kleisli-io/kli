@@ -25,11 +25,8 @@ warnings are muffled here because boot already surfaced them."
       (dolist (name (append (known-profile-names) data-names))
         (format out "~%~:[ ~;*~] ~(~A~)" (eq name active-name) name)))))
 
-(defun apply-profile-extension-delta (protocol context target)
-  "Re-base the user-extension pool onto TARGET's effective set: install
-available extensions TARGET wants that are absent, retract installed ones it
-does not. The delta is computed against the installed handles, so manual
-/enable and /disable drift re-bases too. Returns (values installed retracted)."
+(defun profile-extension-delta (protocol target)
+  "User-extension ids to install and retract for TARGET."
   (let ((config (read-user-config))
         (installed '())
         (retracted '()))
@@ -38,12 +35,26 @@ does not. The delta is computed against the installed handles, so manual
           for wanted = (extension-enabled-p entry config target)
           for present = (and (gethash id (installed-user-handles protocol)) t)
           do (cond ((and wanted (not present))
-                    (install-user-extension protocol entry context)
                     (push id installed))
                    ((and present (not wanted))
-                    (retract-user-extension protocol id context)
                     (push id retracted))))
-    (values (sort installed #'string<) (sort retracted #'string<))))
+    (values (sort installed #'string< :key #'princ-to-string)
+            (sort retracted #'string< :key #'princ-to-string))))
+
+(defun apply-profile-extension-delta (protocol context target)
+  "Re-base the user-extension pool onto TARGET's effective set: install
+available extensions TARGET wants that are absent, retract installed ones it
+does not. The delta is computed against the installed handles, so manual
+/enable and /disable drift re-bases too. Returns (values installed retracted)."
+  (multiple-value-bind (installed retracted)
+      (profile-extension-delta protocol target)
+    (dolist (id installed)
+      (install-user-extension protocol
+                              (gethash id (available-extensions protocol))
+                              context))
+    (dolist (id retracted)
+      (retract-user-extension protocol id context))
+    (values installed retracted)))
 
 (defun switch-profile (context name)
   "Live-switch the session to profile NAME. Returns (values status detail):
@@ -51,31 +62,47 @@ does not. The delta is computed against the installed handles, so manual
 with the target resolved profile (the builtin base only applies at boot), or
 :switched with a plist (:name :installed :retracted) describing the applied
 delta. Resolution warnings are muffled so the outcome reads from the status."
-  (let* ((protocol (active-protocol context))
-         (current (protocol-active-profile protocol))
-         (target (handler-bind ((warning #'muffle-warning))
-                   (resolve-profile-spec name (current-profile-specs context)))))
-    (cond
-      ((null target)
-       (values :unknown (normalize-extension-id name)))
-      ((and current (eq (resolved-profile-name target)
-                        (resolved-profile-name current)))
-       (values :same (resolved-profile-name target)))
-      ((and current (not (eq (resolved-profile-base target)
-                             (resolved-profile-base current))))
-       (values :base-change target))
-      (t
-       (multiple-value-bind (installed retracted)
-           (apply-profile-extension-delta protocol context target)
-         (let ((settings (resolved-profile-settings target)))
-           (swap-settings-overlay context
-                                  (and (hash-table-p settings)
-                                       (plusp (hash-table-count settings))
-                                       settings)))
-         (record-active-profile protocol target)
-         (values :switched (list :name (resolved-profile-name target)
-                                 :installed installed
-                                 :retracted retracted)))))))
+  (with-extension-lifecycle-lock
+    (let* ((protocol (active-protocol context))
+           (current (protocol-active-profile protocol))
+           (target (handler-bind ((warning #'muffle-warning))
+                     (resolve-profile-spec name (current-profile-specs context)))))
+      (cond
+        ((null target)
+         (values :unknown (normalize-extension-id name)))
+        ((and current (eq (resolved-profile-name target)
+                          (resolved-profile-name current)))
+         (values :same (resolved-profile-name target)))
+        ((and current (not (eq (resolved-profile-base target)
+                               (resolved-profile-base current))))
+         (values :base-change target))
+        (t
+         (let ((snapshot (snapshot-user-extension-state protocol))
+               (previous-profile current)
+               (previous-overlay nil)
+               (overlay-touched nil))
+           (handler-case
+               (multiple-value-bind (installed retracted)
+                   (apply-profile-extension-delta protocol context target)
+                 (let ((settings (resolved-profile-settings target)))
+                   (setf previous-overlay
+                         (swap-settings-overlay
+                          context
+                          (and (hash-table-p settings)
+                               (plusp (hash-table-count settings))
+                               settings))
+                         overlay-touched t))
+                 (record-active-profile protocol target)
+                 (values :switched (list :name (resolved-profile-name target)
+                                         :installed installed
+                                         :retracted retracted)))
+             (error (condition)
+               (when overlay-touched
+                 (ignore-errors
+                   (swap-settings-overlay context previous-overlay)))
+               (record-active-profile protocol previous-profile)
+               (restore-user-extension-state protocol context snapshot)
+               (error condition)))))))))
 
 (defun profile-reply-text (context name)
   "Reply for the /profile command: a NIL NAME lists profiles, otherwise the
@@ -123,6 +150,7 @@ else the raw :tail."
    (command "profile"
      :description "List profiles, or live-switch to a named profile."
      :arguments '(:tail :profile)
+     :metadata '(:run-as :extension-load)
      :completer (lambda (command tail context)
                   (declare (ignore command tail))
                   (profile-completion context))

@@ -153,10 +153,11 @@ Blank or invalid JSON yields an empty object."
         (error () (make-hash-table :test #'equal)))))
 
 (defun %anthropic-tool-use-item (tc)
-  (%obj "type" "tool_use"
-        "id" (getf tc :id)
-        "name" (getf tc :name)
-        "input" (%parse-tool-input (getf tc :arguments-json))))
+  (let ((tc (%normalize-tool-call-for-wire tc)))
+    (%obj "type" "tool_use"
+          "id" (getf tc :id)
+          "name" (getf tc :name)
+          "input" (%parse-tool-input (getf tc :arguments-json)))))
 
 (defun %anthropic-thinking-item (tb)
   "Wire block for a replayed thinking-block plist, NIL when it cannot travel.
@@ -175,7 +176,7 @@ plain text. Redacted blocks carry their opaque data in the signature slot."
 
 (defun %anthropic-tool-result-item (m)
   (let ((item (%obj "type" "tool_result"
-                    "tool_use_id" (getf m :tool-call-id)
+                    "tool_use_id" (%tool-result-call-id-for-wire m)
                     "content" (%tool-result-content m))))
     (when (getf m :error-p)
       (setf (gethash "is_error" item) t))
@@ -201,7 +202,8 @@ no guaranteed following assistant turn); otherwise a <harness-context> user wrap
 with the fence delimiters escaped. Reference content always lowers to a fenced,
 datamarked user turn. The cache breakpoint pins to the last non-ephemeral user
 turn so ephemeral harness content never shifts the cached prefix."
-  (let ((entries '())
+  (let ((messages (%assert-provider-message-sequence messages))
+        (entries '())
         (pending-results '())
         (has-reference (%has-reference-p messages)))
     (labels ((emit (wire &key ephemeral)
@@ -214,14 +216,14 @@ turn so ephemeral harness content never shifts the cached prefix."
                  (setf pending-results '()))))
       (dolist (m messages)
         (case (getf m :role)
-          (:user
+          ((:user :summary)
            (flush-results)
-           (let ((content (princ-to-string (getf m :content))))
+           (let ((content (%provider-text-content (getf m :content))))
              (unless (%blankp content)
                (emit (%obj "role" "user" "content" content)))))
           (:assistant
            (flush-results)
-           (let* ((content (princ-to-string (getf m :content)))
+           (let* ((content (%provider-text-content (getf m :content)))
                   (blocks (append
                            (loop for tb in (getf m :thinking-blocks)
                                  for item = (%anthropic-thinking-item tb)
@@ -237,7 +239,7 @@ turn so ephemeral harness content never shifts the cached prefix."
           (:harness-context
            (flush-results)
            (let ((trust (getf m :trust))
-                 (content (princ-to-string (getf m :content)))
+                 (content (%provider-text-content (getf m :content)))
                  (eph (and (getf m :ephemeral) t)))
              (if (eq trust :operator)
                  (let ((op (%operator-content content +reference-anchor+ has-reference)))

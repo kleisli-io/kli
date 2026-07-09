@@ -42,6 +42,7 @@ DSL is (:object (:NAME :TYPE [:optional t]) ...). NIL yields an empty object sch
   (length (flexi-streams:string-to-octets body :external-format :utf-8)))
 
 (defun %note-request-payload (request api body &rest detail)
+  (record-model-request-wire-input request api body)
   (note-model-stream-timing
    (model-request-stream request)
    :request-payload
@@ -64,6 +65,73 @@ DSL is (:object (:NAME :TYPE [:optional t]) ...). NIL yields an empty object sch
 
 (defun %blankp (s)
   (or (not (stringp s)) (blank-string-p s)))
+
+(defun %provider-text-content (content)
+  (cond
+    ((null content) "")
+    ((stringp content) content)
+    (t (error "Provider transports only support text content here: ~S"
+              content))))
+
+(defun %wire-id-string (value field)
+  (let ((text (cond
+                ((stringp value) value)
+                ((symbolp value) (symbol-name value))
+                (t (error "Provider transport ~A must be a string or symbol: ~S"
+                          field value)))))
+    (when (%blankp text)
+      (error "Provider transport ~A must not be blank." field))
+    text))
+
+(defun %normalize-tool-call-for-wire (tool-call)
+  (copy-list
+   (list* :id (%wire-id-string (getf tool-call :id) :tool-call-id)
+          :name (%wire-id-string (getf tool-call :name) :tool-name)
+          (loop for (key value) on tool-call by #'cddr
+                unless (member key '(:id :name) :test #'eq)
+                  append (list key value)))))
+
+(defun %tool-result-call-id-for-wire (message)
+  (%wire-id-string (getf message :tool-call-id) :tool-result-call-id))
+
+(defun %assert-provider-message-sequence (messages)
+  (let ((pending '())
+        (seen '()))
+    (flet ((pending-error (role)
+             (error "Provider transport saw ~S before tool results for call~P: ~{~A~^, ~}"
+                    role (length pending) (reverse pending))))
+      (dolist (message messages messages)
+        (let ((role (getf message :role)))
+          (case role
+            ((:user :summary :harness-context)
+             (when pending
+               (pending-error role))
+             (%provider-text-content (getf message :content)))
+            (:assistant
+             (when pending
+               (pending-error role))
+             (%provider-text-content (getf message :content))
+             (dolist (tool-call (getf message :tool-calls))
+               (let ((id (%wire-id-string (getf tool-call :id) :tool-call-id)))
+                 (when (member id seen :test #'string=)
+                   (error "Provider transport saw duplicate tool-call id: ~A"
+                          id))
+                 (push id seen)
+                 (push id pending))
+               (%wire-id-string (getf tool-call :name) :tool-name)))
+            (:tool-result
+             (let ((id (%tool-result-call-id-for-wire message)))
+               (unless (member id pending :test #'string=)
+                 (error "Provider transport saw tool result without a pending call: ~A"
+                        id))
+               (setf pending (remove id pending :test #'string= :count 1)))
+             (%provider-text-content (getf message :content)))
+            (otherwise
+             (error "Provider transport cannot materialize role: ~S" role))))))
+    (when pending
+      (error "Provider transport is missing tool results for call~P: ~{~A~^, ~}"
+             (length pending) (reverse pending))))
+  messages)
 
 (defparameter +file-mutation-tool-names+ '("write" "edit" "edit-sexp"))
 (defparameter +forbidden-file-mutation-detail-keys+
@@ -130,7 +198,7 @@ DSL is (:object (:NAME :TYPE [:optional t]) ...). NIL yields an empty object sch
   "Wire content for a converted tool-result message: its text with any structured
 details appended as a labeled JSON block the model can read, identical across
 transports. A detail-less result keeps its plain text."
-  (let ((content (princ-to-string (getf m :content)))
+  (let ((content (%provider-text-content (getf m :content)))
         (details (getf m :details)))
     (%assert-model-safe-file-mutation-details m)
     (if details
@@ -250,7 +318,8 @@ Shared by every transport, so capability facts read from one place."
     (string value)))
 
 (defun %openai-family-option-p (option-id)
-  (member option-id '("reasoning-effort" "text-verbosity" "service-tier"
+  (member option-id '("reasoning-effort" "reasoning-summary"
+                      "text-verbosity" "service-tier"
                       "prompt-cache-retention")
           :test #'string=))
 

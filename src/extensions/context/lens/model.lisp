@@ -4,6 +4,9 @@
 (defvar *context-patch-counter* (make-id-counter))
 (defvar *sealed-context-counter* (make-id-counter))
 
+(defparameter +context-view-payload-kinds+
+  '(:message :tool-result :repair :summary :display))
+
 (defun next-agent-context-id ()
   (next-keyword-id "AGENT-CONTEXT" '*agent-context-counter*))
 
@@ -62,7 +65,89 @@
    (epoch
     :initarg :epoch
     :initform 0
-    :accessor projection-epoch)))
+    :accessor projection-epoch)
+   (message-provenance
+    :initarg :message-provenance
+    :initform (make-hash-table :test #'equal)
+    :accessor projection-message-provenance)))
+
+(defclass context-view-payload ()
+  ((kind
+    :initarg :kind
+    :reader context-view-payload-kind)
+   (value
+    :initarg :value
+    :initform nil
+    :reader context-view-payload-value)
+   (metadata
+    :initarg :metadata
+    :initform '()
+    :reader context-view-payload-metadata)))
+
+(defclass context-view-item ()
+  ((id
+    :initarg :id
+    :reader context-view-item-id)
+   (payload
+    :initarg :payload
+    :reader context-view-item-payload)
+   (ordinal
+    :initarg :ordinal
+    :reader context-view-item-ordinal)
+   (group-id
+    :initarg :group-id
+    :initform nil
+    :reader context-view-item-group-id)))
+
+(defclass context-view ()
+  ((kind
+    :initarg :kind
+    :reader context-view-kind)
+   (source-id
+    :initarg :source-id
+    :initform nil
+    :reader context-view-source-id)
+   (source-epoch
+    :initarg :source-epoch
+    :initform nil
+    :reader context-view-source-epoch)
+   (items
+    :initarg :items
+    :initform '()
+    :reader context-view-items)
+   (provenance
+    :initarg :provenance
+    :initform (make-hash-table :test #'equal)
+    :reader context-view-provenance)
+   (policy
+    :initarg :policy
+    :initform nil
+    :reader context-view-policy)))
+
+(defclass sealed-context-view (context-view)
+  ((sealed-id
+    :initarg :sealed-id
+    :reader sealed-context-view-sealed-id)
+   (base-view-kind
+    :initarg :base-view-kind
+    :reader sealed-context-view-base-view-kind)
+   (leaf-id
+    :initarg :leaf-id
+    :initform nil
+    :reader sealed-context-view-leaf-id)
+   (sealed-at
+    :initarg :sealed-at
+    :initform nil
+    :reader sealed-context-view-sealed-at)))
+
+(define-condition context-view-validation-error (error)
+  ((diagnostic
+    :initarg :diagnostic
+    :reader context-view-validation-diagnostic))
+  (:report
+   (lambda (condition stream)
+     (format stream "Context view is not provider-replay valid: ~S"
+             (context-view-validation-diagnostic condition)))))
 
 (defclass context-patch (live-object)
   ((kind
@@ -112,6 +197,9 @@
     :initarg :messages
     :initform '()
     :reader sealed-context-messages)
+   (view
+    :initarg :view
+    :reader sealed-context-view)
    (epoch
     :initarg :epoch
     :reader sealed-context-epoch)

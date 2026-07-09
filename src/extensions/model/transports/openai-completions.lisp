@@ -114,10 +114,11 @@ total_tokens is reported directly and falls back to prompt+completion."
                          "strict" nil)))
 
 (defun %completions-tool-call-item (tc)
-  (%obj "id" (getf tc :id)
-        "type" "function"
-        "function" (%obj "name" (getf tc :name)
-                         "arguments" (%tool-call-arguments-string tc))))
+  (let ((tc (%normalize-tool-call-for-wire tc)))
+    (%obj "id" (getf tc :id)
+          "type" "function"
+          "function" (%obj "name" (getf tc :name)
+                           "arguments" (%tool-call-arguments-string tc)))))
 
 (defun convert-completions-messages (messages &key instructions developer-role-p)
   "kli message plists to Chat Completions `messages` vector. Chat Completions
@@ -125,27 +126,30 @@ carries the system prompt as the first message (role \"system\") and has no
 top-level instructions field. Harness operator content takes the developer role
 when DEVELOPER-ROLE-P, else a <harness-context> user wrap; reference content
 lowers to an untrusted_text fence."
-  (let ((out '())
+  (let ((messages (%assert-provider-message-sequence messages))
+        (out '())
         (has-reference (%has-reference-p messages)))
     (when (and instructions (plusp (length instructions)))
       (push (%obj "role" "system" "content" instructions) out))
     (dolist (m messages)
       (case (getf m :role)
-        (:user (push (%obj "role" "user"
-                           "content" (princ-to-string (getf m :content))) out))
+        ((:user :summary)
+         (push (%obj "role" "user"
+                     "content" (%provider-text-content (getf m :content))) out))
         (:assistant
          (let ((msg (%obj "role" "assistant"
-                          "content" (princ-to-string (getf m :content))))
+                          "content" (%provider-text-content
+                                     (getf m :content))))
                (tool-calls (getf m :tool-calls)))
            (when tool-calls
              (setf (gethash "tool_calls" msg)
                    (coerce (mapcar #'%completions-tool-call-item tool-calls) 'vector)))
            (push msg out)))
         (:tool-result (push (%obj "role" "tool"
-                                  "tool_call_id" (getf m :tool-call-id)
+                                  "tool_call_id" (%tool-result-call-id-for-wire m)
                                   "content" (%tool-result-content m)) out))
         (:harness-context
-         (let ((content (princ-to-string (getf m :content)))
+         (let ((content (%provider-text-content (getf m :content)))
                (trust (getf m :trust)))
            (if (eq trust :operator)
                (let ((op (%operator-content content +untrusted-anchor+ has-reference)))

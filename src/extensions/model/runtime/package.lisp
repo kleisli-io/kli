@@ -21,7 +21,14 @@
                 #:resolved-credential-reference-id
                 #:resolved-credential-source-kind)
   (:import-from #:kli/context/lens
-                #:context-model-messages
+                #:editable-context-view
+                #:provider-replay-context-view
+                #:provider-replay-items
+                #:context-view-kind
+                #:context-view-items
+                #:context-view-item-id
+                #:context-view-item-payload-kind
+                #:context-view-item-payload-value
                 #:sealed-context-epoch
                 #:sealed-context-source-context-id
                 #:sealed-context-leaf-id)
@@ -69,8 +76,13 @@
    #:model-request-selection
    #:model-request-provider
    #:model-request-sealed-context
+   #:model-request-sealed-editable-view
+   #:model-request-provider-replay-view
    #:model-request-state
    #:model-request-model-messages
+   #:model-request-provider-replay-items
+   #:model-request-provider-wire-input
+   #:model-request-accounting-result
    #:model-request-instructions
    #:model-request-session-id
    #:model-request-tool-schemas
@@ -104,6 +116,8 @@
    #:model-delta-timestamp
    #:assistant-delta-text
    #:thinking-delta-text
+   #:thinking-delta-replacement-p
+   #:thinking-delta-source
    #:thinking-delta-signature
    #:thinking-delta-redacted
    #:tool-call-delta-call-id
@@ -111,9 +125,20 @@
    #:tool-call-delta-arguments
    #:usage-delta-usage
    #:block-delta-content-kind
+   #:request-accounting-result
+   #:request-accounting-result-api
+   #:request-accounting-result-units
+   #:request-accounting-result-exact-p
+   #:request-accounting-result-upper-bound-p
+   #:request-accounting-result-total
+   #:request-accounting-result-attributions
+   #:request-accounting-result-wire-chars
 
    #:make-model-request
    #:complete-text
+   #:materialize-provider-replay-items
+   #:record-model-request-wire-input
+   #:model-request-audit
    #:parse-tool-call-arguments
    #:stream-model-response
    #:stream-thinking-blocks

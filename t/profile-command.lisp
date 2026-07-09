@@ -106,6 +106,64 @@ pass would, y indexed but autoload-off."
     (is (ext:extension-loaded-p protocol :test-prof-x)
         "the extension set is untouched")))
 
+(test (profile-command-failed-switch-preserves-extension-state-and-active-profile
+       :fixture interactive-authority)
+  (let* ((settings-text
+           "{\"profiles\":{\"quiet\":{\"extends\":\"interactive-terminal\",
+                                      \"disable\":[\"prof-x\"],
+                                      \"enable\":[\"prof-y\"]}}}")
+         (root (temp-config-root))
+         (global-dir (make-config-test-dir root "global")))
+    (write-config-test-file (merge-pathnames "settings.json" global-dir)
+                            settings-text)
+    (let* ((config:*global-config-dir* global-dir)
+           (config:*project-start-directory* (make-config-test-dir root "proj"))
+           (context (app:main :profile :interactive-terminal
+                              :settings (com.inuoe.jzon:parse settings-text)))
+           (protocol (kli:active-protocol context)))
+      (install-extension context app::*profile-commands-extension-manifest*)
+      (let ((x (app::make-user-extension-entry
+                :id :prof-x
+                :metadata '()
+                :manifest (lambda ()
+                            (ext:make-extension :id :prof-x))))
+            (y (app::make-user-extension-entry
+                :id :prof-y
+                :metadata '(:autoload nil)
+                :manifest
+                (lambda ()
+                  (ext:make-extension
+                   :id :prof-y
+                   :contributions
+                   (list
+                    (ext:make-effect-contribution
+                     :name :fails-install
+                     :installer
+                     (lambda (protocol contribution context)
+                       (declare (ignore protocol contribution context))
+                       (error "profile install failed"))
+                     :retractor
+                     (lambda (protocol contribution context)
+                       (declare (ignore protocol contribution context))))))))))
+        (setf (gethash :prof-x (app::available-extensions protocol)) x)
+        (setf (gethash :prof-y (app::available-extensions protocol)) y)
+        (with-extension-load-authority
+          (app::install-user-extension protocol x context))
+        (let ((active (profiles:protocol-active-profile protocol)))
+          (is (ext:extension-loaded-p protocol :prof-x)
+              "precondition: prof-x is installed")
+          (is (not (ext:extension-loaded-p protocol :prof-y))
+              "precondition: prof-y is absent")
+          (let ((result (invoke-test-command context :profile
+                                             '(:words ("quiet")))))
+            (is (commands:command-result-error-p result)))
+          (is (ext:extension-loaded-p protocol :prof-x)
+              "the previous installed extension survives")
+          (is (not (ext:extension-loaded-p protocol :prof-y))
+              "the failing target extension stays absent")
+          (is (eq active (profiles:protocol-active-profile protocol))
+              "the active profile record is unchanged"))))))
+
 (test (profile-command-completes-profile-names :fixture interactive-authority)
   (multiple-value-bind (context protocol) (boot-profile-command-context)
     (declare (ignore protocol))

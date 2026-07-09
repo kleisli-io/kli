@@ -24,6 +24,12 @@
                                    :values values
                                    :default default))
 
+(defun test-reasoning-summary-schema (&key (values '(:auto :concise :detailed :none))
+                                           (default :auto))
+  (models:make-model-option-schema "reasoning-summary"
+                                   :values values
+                                   :default default))
+
 (defun test-text-verbosity-schema (&key (values '(:low :medium :high))
                                       (default :medium))
   (models:make-model-option-schema "text-verbosity"

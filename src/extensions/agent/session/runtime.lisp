@@ -47,6 +47,167 @@
                                :model/runtime
                                :contract :model/runtime/v1))
 
+(defun provider-accounting-wire-input (api messages)
+  (case api
+    (:openai-responses
+     (convert-responses-input messages))
+    (:openai-completions
+     (convert-completions-messages messages))
+    (:anthropic-messages
+     (convert-anthropic-messages messages))
+    (:fake
+     (convert-responses-input messages))
+    (otherwise
+     (convert-responses-input messages))))
+
+(defun provider-wire-token-upper-bound (wire)
+  (kli/session/log:estimate-content-tokens
+   (com.inuoe.jzon:stringify wire)))
+
+(defun context-view-item-tool-call-ids (item)
+  (let ((message (context-view-item-payload-value item)))
+    (case (context-view-item-payload-kind item)
+      (:message
+       (when (and message
+                  (eq (kli/session/log:message-role message) :assistant))
+         (loop for call in (getf (kli/session/log:message-metadata message)
+                                 :tool-calls)
+               for id = (getf call :id)
+               when id collect id)))
+      ((:tool-result :repair)
+       (let ((id (and message (kli/session/log:tool-call-id message))))
+         (when id (list id))))
+      (otherwise nil))))
+
+(defun provider-accounting-entry-ids (view item)
+  (let ((provenance (context-view-provenance-for-item view item)))
+    (remove nil
+            (list (getf provenance :entry-id)
+                  (getf provenance :source-summary-entry-id))
+            :test #'equal)))
+
+(defun pending-tool-result-item-p (item call-ids)
+  (and (member (context-view-item-payload-kind item)
+               '(:tool-result :repair)
+               :test #'eq)
+       (intersection (context-view-item-tool-call-ids item)
+                     call-ids
+                     :test #'equal)))
+
+(defun collect-provider-accounting-groups (items)
+  (let ((remaining (copy-list items))
+        (groups '()))
+    (loop while remaining
+          for item = (pop remaining)
+          for call-ids = (context-view-item-tool-call-ids item)
+          do (cond
+               ((and (eq (context-view-item-payload-kind item) :message)
+                     call-ids)
+                (let ((members (list item))
+                      (kept '()))
+                  (dolist (candidate remaining)
+                    (if (pending-tool-result-item-p candidate call-ids)
+                        (push candidate members)
+                        (push candidate kept)))
+                  (setf remaining (nreverse kept))
+                  (push (nreverse members) groups)))
+               (t
+                (push (list item) groups))))
+    (nreverse groups)))
+
+(defun provider-accounting-group-id (group)
+  (or (context-view-item-group-id (first group))
+      (context-view-item-id (first group))))
+
+(defun account-provider-wire-group (api group)
+  (provider-wire-token-upper-bound
+   (provider-accounting-wire-input
+    api
+    (materialize-provider-replay-items group))))
+
+(defun record-provider-accounting-entry-costs (entry-costs entry-ids cost)
+  (when entry-ids
+    (incf (gethash (first entry-ids) entry-costs 0) cost)
+    (dolist (entry-id (rest entry-ids))
+      (setf (gethash entry-id entry-costs 0)
+            (gethash entry-id entry-costs 0)))))
+
+(defun account-provider-replay (agent-context selection context)
+  (let* ((registry-provider (model-registry-provider-of context))
+         (registry (model-registry-of context))
+         (provider-id (model-selection-provider-id selection))
+         (provider (provider-call registry-provider :find-model-provider
+                                  registry provider-id))
+         (api (and provider (model-provider-api provider)))
+         (model-id (model-selection-model-id selection))
+         (sealed (seal-context-projection agent-context context
+                                          :repair-policy :synthesize-aborted))
+         (items (provider-replay-items sealed))
+         (wire-input (provider-accounting-wire-input
+                      api
+                      (materialize-provider-replay-items items)))
+         (group-costs (make-hash-table :test #'equal))
+         (entry-costs (make-hash-table :test #'equal))
+         (attributions '())
+         (total 0))
+    (dolist (group (collect-provider-accounting-groups items))
+      (let* ((group-id (provider-accounting-group-id group))
+             (cost (account-provider-wire-group api group))
+             (item-ids (mapcar #'context-view-item-id group))
+             (entry-ids
+               (remove-duplicates
+                (loop for item in group
+                      append (provider-accounting-entry-ids sealed item))
+                :test #'equal
+                :from-end t)))
+        (setf (gethash group-id group-costs) cost)
+        (record-provider-accounting-entry-costs entry-costs entry-ids cost)
+        (incf total cost)
+        (push (list :group-id group-id
+                    :item-ids item-ids
+                    :entry-ids entry-ids
+                    :total cost
+                    :units :tokens
+                    :exact-p nil
+                    :upper-bound-p t)
+              attributions)))
+    (make-provider-accounting-result
+     :provider-id provider-id
+     :model-id model-id
+     :api api
+     :units :tokens
+     :exact-p nil
+     :upper-bound-p t
+     :total total
+     :attributions (nreverse attributions)
+     :group-costs group-costs
+     :entry-costs entry-costs
+     :wire-input wire-input)))
+
+(defun safe-account-provider-replay (agent-context selection context)
+  (handler-case
+      (let ((kli/ext:*call-subject* (make-unrestricted-subject)))
+        (account-provider-replay agent-context selection context))
+    (error () nil)))
+
+(defun provider-accounting-entry-token-fn (accounting)
+  (let ((entry-costs (and accounting
+                          (provider-accounting-result-entry-costs accounting))))
+    (lambda (entry)
+      (or (and entry-costs
+               (gethash (object-id entry) entry-costs))
+          (kli/session/log:entry-token-estimate entry)))))
+
+(defun derived-compaction-summary-reserve-tokens (context-window)
+  (if (and context-window (> context-window 10000))
+      (min 8192 (max 1024 (floor (* context-window 0.01))))
+      0))
+
+(defun summary-token-upper-bound (summary)
+  (provider-wire-token-upper-bound
+   (convert-responses-input
+    (list (list :role :summary :content (or summary ""))))))
+
 (defun bind-mode-sources (agent-session mode-id agent-id context-id)
   "Record source-to-mode entries. The reverse index covers both agent-ids (set by emit-agent-event) and agent-context-ids (set by the patch-committed augmentation in context-lens). Both id classes live in disjoint keyword namespaces so a single equal-keyed hashtable can host them without collision."
   (let ((table (session-source->mode agent-session)))
@@ -441,9 +602,19 @@ untouched; live-usage is cleared at agent-end."
     (let* ((usage (and cb (context-binding-usage cb)))
            (agent (and binding (resolve-agent-from-binding binding context)))
            (selection (and agent (kli/agent/loop:agent-model-selection agent)))
-           (window (selection-context-window (model-registry-of context) selection))
-           (ratio (and usage window (plusp window)
-                       (/ (usage-total-tokens usage) (float window)))))
+           (accounting (and agent selection
+                            (safe-account-provider-replay
+                             (kli/agent/loop:agent-context agent)
+                             selection
+                             context)))
+           (total (or (and accounting
+                           (provider-accounting-result-total accounting))
+                      (and usage (usage-total-tokens usage))))
+           (window (and selection
+                        (selection-context-window (model-registry-of context)
+                                                  selection)))
+           (ratio (and total window (plusp window)
+                       (/ total (float window)))))
       (when (and ratio
                  (kli/ext:safely-invoke (session-compaction-policy agent-session)
                                         :session-policy '(:compaction :should-compact)
@@ -927,16 +1098,19 @@ seam is unavailable."
     (&key (enabled t)
           (threshold-ratio 0.85)
           keep-recent-tokens
+          summary-reserve-tokens
           (summarizer #'default-summarize))
   (pandoriclet ((enabled            enabled)
                 (threshold-ratio    threshold-ratio)
                 (keep-recent-tokens keep-recent-tokens)
+                (summary-reserve-tokens summary-reserve-tokens)
                 (summarizer         summarizer))
     (lambda (operation &rest arguments)
       (case operation
         (:inspect (list :enabled            enabled
                         :threshold-ratio    threshold-ratio
                         :keep-recent-tokens keep-recent-tokens
+                        :summary-reserve-tokens summary-reserve-tokens
                         :summarizer         summarizer))
         (:should-compact
          (let ((ratio (first arguments)))
@@ -948,6 +1122,8 @@ seam is unavailable."
     (agent-session &key (enabled nil enabled-supplied-p)
                         threshold-ratio
                         (keep-recent-tokens nil keep-recent-tokens-supplied-p)
+                        (summary-reserve-tokens nil
+                         summary-reserve-tokens-supplied-p)
                         summarizer)
   (let ((state (funcall (session-compaction-policy agent-session) :inspect)))
     (setf (session-compaction-policy agent-session)
@@ -959,6 +1135,10 @@ seam is unavailable."
            :keep-recent-tokens (if keep-recent-tokens-supplied-p
                                    keep-recent-tokens
                                    (getf state :keep-recent-tokens))
+           :summary-reserve-tokens
+           (if summary-reserve-tokens-supplied-p
+               summary-reserve-tokens
+               (getf state :summary-reserve-tokens))
            :summarizer         (or summarizer (getf state :summarizer)))))
   agent-session)
 

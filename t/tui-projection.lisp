@@ -73,8 +73,71 @@
       (let ((te2 (project :agent/thinking-delta '(:turn-id :t1 :text "dering.") buffer)))
         (is (eq te1 te2) "later thinking deltas mutate the same live event")
         (is (string= "Pondering." (tui-transcript:event-text te2))))
-      (is (null (project :agent/message-end '(:turn-id :t1) buffer)))
-      (is (zerop (hash-table-count buffer))))))
+	      (is (null (project :agent/message-end '(:turn-id :t1) buffer)))
+	      (is (zerop (hash-table-count buffer))))))
+
+(test projection-replaces-live-thinking-text
+  (let ((buffer (tui-transcript:make-projection-buffer)))
+    (let ((te1 (tui-transcript::project-agent-thinking-delta
+                :agent/thinking-delta
+                (event:make-event :agent/thinking-delta
+                                  :payload '(:turn-id :t1
+                                             :text "Header"
+                                             :level :high))
+                :default-mode buffer)))
+      (let ((te2 (tui-transcript::project-agent-thinking-delta
+                  :agent/thinking-delta
+                  (event:make-event :agent/thinking-delta
+                                    :payload '(:turn-id :t1
+                                               :text "Full final thinking"
+                                               :replacement-p t))
+                  :default-mode buffer)))
+        (is (eq te1 te2))
+        (is (string= "Full final thinking"
+                     (tui-transcript:event-text te2))))
+      (let ((te3 (tui-transcript::project-agent-thinking-delta
+                  :agent/thinking-delta
+                  (event:make-event :agent/thinking-delta
+                                    :payload '(:turn-id :t1 :text "."))
+                  :default-mode buffer)))
+        (is (string= "Full final thinking."
+                     (tui-transcript:event-text te3)))))))
+
+(test projection-prefers-raw-thinking-over-summary
+  (let ((buffer (tui-transcript:make-projection-buffer)))
+    (let ((te1 (project :agent/thinking-delta
+                        '(:turn-id :t1
+                          :text "Inspecting merge state"
+                          :source :summary
+                          :level :high)
+                        buffer)))
+      (is (string= "Inspecting merge state"
+                   (tui-transcript:event-text te1)))
+      (let ((te2 (project :agent/thinking-delta
+                          '(:turn-id :t1
+                            :text "Need git status and conflict markers."
+                            :source :raw)
+                          buffer)))
+        (is (eq te1 te2))
+        (is (string= "Need git status and conflict markers."
+                     (tui-transcript:event-text te2))))
+      (is (null (project :agent/thinking-delta
+                         '(:turn-id :t1
+                           :text "Inspecting merge state"
+                           :source :summary
+                           :replacement-p t)
+                         buffer)))
+      (is (string= "Need git status and conflict markers."
+                   (tui-transcript:event-text te1)))
+      (let ((te3 (project :agent/thinking-delta
+                          '(:turn-id :t1
+                            :text "Need git status and conflict markers. Full."
+                            :source :raw
+                            :replacement-p t)
+                          buffer)))
+        (is (eq te1 te3))
+        (is (string= "Need git status and conflict markers. Full."
+                     (tui-transcript:event-text te3)))))))
 
 (test projection-thinking-and-assistant-coexist-per-turn
   "A turn streams a :thinking event and a separate :assistant event, keyed apart so

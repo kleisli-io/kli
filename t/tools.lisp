@@ -458,19 +458,46 @@ note captured into :compiler-notes rather than aborting the redefinition."
       (is (= 7 (getf (commands:command-result-details result)
                      :exit-code))))))
 
-(test (bash-tool-rejects-interactive-command :fixture tool-authority)
+(test (bash-tool-runs-command-named-like-interactive-program :fixture tool-authority)
   (let* ((context (kli:make-kernel-host))
-         (protocol (switch-to-extension-protocol context)))
+         (protocol (switch-to-extension-protocol context))
+         (root (ensure-directories-exist
+                (merge-pathnames
+                 (format nil "kli-fake-nvim-~D-~D/"
+                         #+sbcl (sb-posix:getpid)
+                         #-sbcl 0
+                         (get-internal-real-time))
+                 (uiop:temporary-directory))))
+         (nvim (merge-pathnames "nvim" root))
+         (saved-path (uiop:getenv "PATH")))
     (install-extensions context tools-bash:*bash-tool-extension-manifest*)
-    (let ((result (ext:invoke-tool protocol
-                                   :bash
-                                   '(:command "nvim")
-                                   context)))
-      (is (ext:tool-result-error-p result))
-      (is (string= "nvim"
-                   (getf (ext:tool-result-details result)
-                         :interactive-command)))
-      (is (search "interactive" (tool-result-text result))))))
+    (unwind-protect
+         (progn
+           (with-open-file (stream nvim :direction :output
+                                        :if-exists :supersede
+                                        :if-does-not-exist :create)
+             (write-line "#!/bin/sh" stream)
+             (write-line "printf fake-nvim-ran" stream))
+           (sb-posix:chmod (uiop:native-namestring nvim) #o755)
+           (sb-posix:setenv
+            "PATH"
+            (if (and saved-path (plusp (length saved-path)))
+                (format nil "~A:~A" (uiop:native-namestring root) saved-path)
+                (uiop:native-namestring root))
+            1)
+           (let ((result (ext:invoke-tool protocol
+                                          :bash
+                                          '(:command "nvim")
+                                          context)))
+             (is (not (ext:tool-result-error-p result)))
+             (is (string= "fake-nvim-ran" (tool-result-text result)))
+             (is (null (getf (ext:tool-result-details result)
+                             :interactive-command)))))
+      (if saved-path
+          (sb-posix:setenv "PATH" saved-path 1)
+          (sb-posix:unsetenv "PATH"))
+      (uiop:delete-directory-tree root :validate (constantly t)
+                                       :if-does-not-exist :ignore))))
 
 (test (bash-tool-times-out-long-running-command :fixture tool-authority)
   (let* ((context (kli:make-kernel-host))

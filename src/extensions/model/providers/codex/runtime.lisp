@@ -42,10 +42,13 @@ credential-reference."
                  collect (list :id (getf m :id)
                                :name (getf m :id)
                                :context-window (getf m :ctx)
-                               :option-schemas (list (make-model-option-schema "reasoning-effort"
-                                                                               :values '(:off :minimal :low :medium :high :xhigh)
-                                                                               :default :off)
-                                                     (make-model-option-schema "transport"
+	                               :option-schemas (list (make-model-option-schema "reasoning-effort"
+	                                                                               :values '(:off :minimal :low :medium :high :xhigh)
+	                                                                               :default :off)
+	                                                     (make-model-option-schema "reasoning-summary"
+	                                                                               :values '(:auto :concise :detailed :none)
+	                                                                               :default :auto)
+	                                                     (make-model-option-schema "transport"
                                                                                :values '(:auto :sse :websocket :websocket-cached)
                                                                                :default :auto))
                                :transport-profile (list :max-output (getf m :max-out)

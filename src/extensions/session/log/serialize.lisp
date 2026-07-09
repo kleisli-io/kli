@@ -259,6 +259,23 @@ format. Identity at the current version, and the seam for future migrations."))
                  (list :message (deserialize-value
                                  (record-field record :message))))))
 
+(defmethod serialize-record ((entry transcript-repair-entry))
+  (apply #'make-record :transcript-repair-entry
+         (append (entry-base-plist entry)
+                 (list :repair-kind (entry-repair-kind entry)
+                       :reason (serialize-value (entry-repair-reason entry))
+                       :policy (serialize-value (entry-repair-policy entry))
+                       :message (serialize-value (entry-message entry))))))
+
+(define-record-deserializer :transcript-repair-entry (record)
+  (apply #'make-instance 'transcript-repair-entry
+         (append (deserialize-entry-initargs record)
+                 (list :repair-kind (record-field record :repair-kind)
+                       :reason (deserialize-value (record-field record :reason))
+                       :policy (deserialize-value (record-field record :policy))
+                       :message (deserialize-value
+                                 (record-field record :message))))))
+
 (defmethod serialize-record ((entry model-change-entry))
   (apply #'make-record :model-change-entry
          (append (entry-base-plist entry)

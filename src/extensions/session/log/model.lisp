@@ -145,6 +145,19 @@ this is required, not an optimization.")))
     :initform nil
     :accessor entry-data)))
 
+(defclass transcript-repair-entry (message-entry)
+  ((repair-kind
+    :initarg :repair-kind
+    :accessor entry-repair-kind)
+   (reason
+    :initarg :reason
+    :initform nil
+    :accessor entry-repair-reason)
+   (policy
+    :initarg :policy
+    :initform nil
+    :accessor entry-repair-policy)))
+
 (defclass agent-message (live-object)
   ((role
     :initarg :role
@@ -380,6 +393,34 @@ when reinstating a stored session from its header."
    :message (make-custom-agent-message custom-type content
                                        :timestamp timestamp
                                        :metadata metadata)))
+
+(defun make-transcript-repair-entry (&key id parent-id timestamp source metadata
+                                          tool-call-id tool-name reason
+                                          (repair-kind :synthesized-aborted)
+                                          policy)
+  (let* ((content (format nil "Tool call ~A aborted before a result was recorded."
+                          tool-call-id))
+         (repair-metadata (list* :transcript-repair t
+                                 :repair-kind repair-kind
+                                 :repair-policy policy
+                                 :reason reason
+                                 metadata)))
+    (make-session-entry-instance
+     'transcript-repair-entry
+     :id id
+     :parent-id parent-id
+     :timestamp timestamp
+     :source source
+     :metadata metadata
+     :repair-kind repair-kind
+     :reason reason
+     :policy policy
+     :message (make-tool-result-message content
+                                        :timestamp timestamp
+                                        :metadata repair-metadata
+                                        :tool-call-id tool-call-id
+                                        :tool-name tool-name
+                                        :error-p t))))
 
 (defun session-p (object)
   (typep object 'session))

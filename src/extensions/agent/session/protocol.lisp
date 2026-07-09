@@ -475,11 +475,21 @@ of racing the rebuild. The queue drains once the agent returns to :idle."
            (keep-recent      (or (getf policy-state :keep-recent-tokens)
                                  (derived-compaction-keep-recent-tokens
                                   context-window)))
+           (summary-reserve  (or (getf policy-state :summary-reserve-tokens)
+                                 (derived-compaction-summary-reserve-tokens
+                                  context-window)))
+           (accounting       (safe-account-provider-replay agent-context
+                                                           selection
+                                                           context))
+           (entry-token-fn   (provider-accounting-entry-token-fn accounting))
            (entries          (provider-call log-provider :session-branch
                                             store session
                                             (kli/session/log:session-leaf-id
                                              session)))
-           (prep (kli/session/log:prepare-session-compaction entries keep-recent)))
+           (prep (kli/session/log:prepare-session-compaction
+                  entries keep-recent
+                  :entry-token-fn entry-token-fn
+                  :summary-reserve-tokens summary-reserve)))
       (unless prep
         (emit-compaction-event context :session-compaction-finished mode-id
                                trigger :status :nothing-to-compact)
@@ -497,61 +507,102 @@ of racing the rebuild. The queue drains once the agent returns to :idle."
                   (provider-call runtime-provider :abort-model-request
                                  summarizer-request context))))
         (unwind-protect
-             (let ((failure nil))
+             (labels ((prepare-with-reserve (reserve)
+                        (kli/session/log:prepare-session-compaction
+                         entries keep-recent
+                         :entry-token-fn entry-token-fn
+                         :summary-reserve-tokens reserve))
+                      (summarize (current-prep)
+                        (let ((failure nil))
+                          (multiple-value-bind (summary details)
+                              (kli/ext:with-extension-fault-barrier
+                                  (:seam :session-policy
+                                   :id '(:compaction :summarize)
+                                   :on-fault (values nil nil))
+                                (handler-bind
+                                    ((error (lambda (condition)
+                                              (setf failure condition))))
+                                  (funcall policy :summarize
+                                           :agent-context agent-context
+                                           :messages
+                                           (kli/session/log:compaction-preparation-messages-to-summarize
+                                            current-prep)
+                                           :turn-prefix-messages
+                                           (kli/session/log:compaction-preparation-turn-prefix-messages
+                                            current-prep)
+                                           :previous-summary
+                                           (kli/session/log:compaction-preparation-previous-summary
+                                            current-prep)
+                                           :custom-instructions custom-instructions
+                                           :lens-provider lens-provider
+                                           :runtime-provider runtime-provider
+                                           :runtime runtime
+                                           :selection selection
+                                           :context context
+                                           :on-request
+                                           (lambda (request)
+                                             (setf summarizer-request
+                                                   request)))))
+                            (values summary details failure))))
+                      (commit-summary (current-prep summary details)
+                        (let ((entry (provider-call
+                                      entries-provider :make-compaction-entry
+                                      summary
+                                      (kli/session/log:compaction-preparation-first-kept-id
+                                       current-prep)
+                                      :tokens-before
+                                      (kli/session/log:compaction-preparation-tokens-before
+                                       current-prep)
+                                      :data details
+                                      :source (object-id agent-context))))
+                          (provider-call log-provider :append-session-entry
+                                         store session entry context)
+                          (rebuild-context agent context)
+                          (emit-compaction-event
+                           context :session-compaction-finished mode-id trigger
+                           :status :compacted)
+                          (values entry :compacted)))
+                      (attempt (current-prep reserve retried-p)
+                        (multiple-value-bind (summary details failure)
+                            (summarize current-prep)
+                          (cond
+                            (aborted-p
+                             (emit-compaction-event
+                              context :session-compaction-finished mode-id
+                              trigger :status :aborted)
+                             (values nil :aborted))
+                            ((and (stringp summary)
+                                  (plusp (length summary)))
+                             (let* ((summary-cost
+                                      (summary-token-upper-bound summary))
+                                    (retry-prep
+                                      (and (not retried-p)
+                                           (plusp reserve)
+                                           (> summary-cost reserve)
+                                           (prepare-with-reserve
+                                            summary-cost))))
+                               (if (and retry-prep
+                                        (not
+                                         (equal
+                                          (kli/session/log:compaction-preparation-first-kept-id
+                                           retry-prep)
+                                          (kli/session/log:compaction-preparation-first-kept-id
+                                           current-prep))))
+                                   (attempt retry-prep summary-cost t)
+                                   (commit-summary current-prep
+                                                   summary
+                                                   details))))
+                            (t
+                             (let ((report (if failure
+                                               (princ-to-string failure)
+                                               "summarizer produced no summary")))
+                               (emit-compaction-event
+                                context :session-compaction-finished mode-id
+                                trigger :status :failed :error report)
+                               (values nil :failed failure)))))))
                (emit-compaction-event context :session-compaction-started
                                       mode-id trigger)
-               (multiple-value-bind (summary details)
-                   (kli/ext:with-extension-fault-barrier
-                       (:seam :session-policy :id '(:compaction :summarize)
-                        :on-fault (values nil nil))
-                     (handler-bind ((error (lambda (condition)
-                                             (setf failure condition))))
-                       (funcall policy :summarize
-                                :agent-context agent-context
-                                :messages (kli/session/log:compaction-preparation-messages-to-summarize
-                                           prep)
-                                :turn-prefix-messages
-                                (kli/session/log:compaction-preparation-turn-prefix-messages prep)
-                                :previous-summary
-                                (kli/session/log:compaction-preparation-previous-summary prep)
-                                :custom-instructions custom-instructions
-                                :lens-provider lens-provider
-                                :runtime-provider runtime-provider
-                                :runtime runtime
-                                :selection selection
-                                :context context
-                                :on-request (lambda (request)
-                                              (setf summarizer-request
-                                                    request)))))
-                 (cond
-                   (aborted-p
-                    (emit-compaction-event context :session-compaction-finished
-                                           mode-id trigger :status :aborted)
-                    (values nil :aborted))
-                   ((and (stringp summary)
-                         (plusp (length summary)))
-                    (let ((entry (provider-call
-                                  entries-provider :make-compaction-entry
-                                  summary
-                                  (kli/session/log:compaction-preparation-first-kept-id prep)
-                                  :tokens-before
-                                  (kli/session/log:compaction-preparation-tokens-before prep)
-                                  :data details
-                                  :source (object-id agent-context))))
-                      (provider-call log-provider :append-session-entry
-                                     store session entry context)
-                      (rebuild-context agent context)
-                      (emit-compaction-event context :session-compaction-finished
-                                             mode-id trigger :status :compacted)
-                      (values entry :compacted)))
-                   (t
-                    (let ((report (if failure
-                                      (princ-to-string failure)
-                                      "summarizer produced no summary")))
-                      (emit-compaction-event context :session-compaction-finished
-                                             mode-id trigger
-                                             :status :failed :error report)
-                      (values nil :failed failure))))))
+               (attempt prep summary-reserve nil))
           (setf (mode-binding-compaction-interrupt binding) nil)
           (when (and was-idle
                      (eq (kli/agent/loop:agent-state-value

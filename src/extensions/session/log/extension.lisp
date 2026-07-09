@@ -49,7 +49,8 @@
      :make-model-change-entry
      :make-option-change-entry
      :make-custom-entry
-     :make-custom-message-entry)))
+     :make-custom-message-entry
+     :make-transcript-repair-entry)))
 
 (defun make-session-entries-provider ()
   (make-provider
@@ -70,6 +71,7 @@
          :make-option-change-entry #'make-option-change-entry
          :make-custom-entry #'make-custom-entry
          :make-custom-message-entry #'make-custom-message-entry
+         :make-transcript-repair-entry #'make-transcript-repair-entry
          :make-compaction-entry #'make-compaction-entry
          :make-branch-summary-entry #'make-branch-summary-entry
          :make-custom-agent-message #'make-custom-agent-message

@@ -45,6 +45,15 @@
             "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}"))
   "Codex WebSocket messages as one JSON object per line.")
 
+(defparameter *responses-canned-websocket-tool-call-stream*
+  (format nil "~{~A~%~}"
+          '("{\"type\":\"response.created\",\"response\":{\"id\":\"resp-tool-1\"}}"
+            "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"shell\",\"arguments\":\"\"}}"
+            "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"cmd\\\":\\\"date\\\"}\"}"
+            "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\"}}"
+            "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-tool-1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}"))
+  "Codex WebSocket messages for a response that stops on a tool call.")
+
 (defun collect-responses-deltas (sse-string)
   (let ((deltas '()))
     (with-input-from-string (in sse-string)
@@ -218,8 +227,54 @@ of small lines that never sends the blank line must hit a cumulative cap."
     (is (string= "Thinking..." (rt:thinking-delta-text (second seq))))
     (is (string= "Hello" (rt:assistant-delta-text (fifth seq))))
     (is (string= " world" (rt:assistant-delta-text (sixth seq))))
-    (is (equal '(:input-tokens 10 :output-tokens 5 :total-tokens 15 :cache-read-tokens 4)
-               (rt:usage-delta-usage (eighth seq))))))
+	    (is (equal '(:input-tokens 10 :output-tokens 5 :total-tokens 15 :cache-read-tokens 4)
+	               (rt:usage-delta-usage (eighth seq))))))
+
+(test responses-event-mapper-final-reasoning-prefers-raw-content
+  (let* ((stream
+           (format nil "~{~A~%~}"
+                   '("event: response.output_item.added"
+                     "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\"}}"
+                     ""
+                     "event: response.reasoning_summary_text.delta"
+                     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"**Header**\"}"
+                     ""
+                     "event: response.reasoning_summary_part.done"
+                     "data: {\"type\":\"response.reasoning_summary_part.done\",\"output_index\":0}"
+                     ""
+                     "event: response.reasoning_text.delta"
+                     "data: {\"type\":\"response.reasoning_text.delta\",\"output_index\":0,\"delta\":\"Raw streamed reasoning\"}"
+                     ""
+                     "event: response.output_item.done"
+                     "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Full final summary\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Raw final reasoning\"}]}}"
+                     "")))
+         (seq (collect-responses-deltas stream)))
+    (is (equal '(:block-start-delta :thinking-delta :thinking-delta
+                 :thinking-delta :thinking-delta :block-end-delta)
+               (mapcar #'rt:model-delta-kind seq)))
+    (is (string= "**Header**" (rt:thinking-delta-text (second seq))))
+    (is (eq :summary (rt:thinking-delta-source (second seq))))
+    (is (string= (format nil "~%~%") (rt:thinking-delta-text (third seq))))
+    (is (eq :summary (rt:thinking-delta-source (third seq))))
+    (is (string= "Raw streamed reasoning" (rt:thinking-delta-text (fourth seq))))
+    (is (eq :raw (rt:thinking-delta-source (fourth seq))))
+    (is (string= "Raw final reasoning" (rt:thinking-delta-text (fifth seq))))
+    (is (eq :raw (rt:thinking-delta-source (fifth seq))))
+    (is (eq t (rt:thinking-delta-replacement-p (fifth seq))))
+    (is (search "\"summary\"" (rt:thinking-delta-signature (fifth seq))))))
+
+(test responses-event-mapper-final-reasoning-falls-back-to-summary
+  (let* ((stream
+           (format nil "~{~A~%~}"
+                   '("event: response.output_item.done"
+                     "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Final summary\"}]}}"
+                     "")))
+         (seq (collect-responses-deltas stream)))
+    (is (equal '(:thinking-delta :block-end-delta)
+               (mapcar #'rt:model-delta-kind seq)))
+    (is (string= "Final summary" (rt:thinking-delta-text (first seq))))
+    (is (eq :summary (rt:thinking-delta-source (first seq))))
+    (is (eq t (rt:thinking-delta-replacement-p (first seq))))))
 
 (test responses-usage-plist-extracts-cache-and-total
   "cached_tokens (cache READ, a subset of input) plus provider total_tokens map across. When total_tokens is absent it is computed as input plus output, and when cache is absent the key is omitted."
@@ -314,8 +369,22 @@ content_filter reason does not, but keeps its usage."
     (is (eq t (gethash "stream" parsed)))
     (is (equalp #("reasoning.encrypted_content") (gethash "include" parsed)))
     (is (= 1 (length (gethash "input" parsed))))
-    (is (string= "high" (gethash "effort" (gethash "reasoning" parsed))))
-    (is (string= "auto" (gethash "summary" (gethash "reasoning" parsed)))))
+	    (is (string= "high" (gethash "effort" (gethash "reasoning" parsed))))
+	    (is (string= "auto" (gethash "summary" (gethash "reasoning" parsed)))))
+  (let ((parsed (com.inuoe.jzon:parse
+                 (transports:build-responses-body
+                  "gpt-5.3-codex"
+                  '((:role :user :content "hi"))
+                  :reasoning-effort :high
+                  :reasoning-summary :detailed))))
+    (is (string= "detailed" (gethash "summary" (gethash "reasoning" parsed)))))
+  (let ((parsed (com.inuoe.jzon:parse
+                 (transports:build-responses-body
+                  "gpt-5.3-codex"
+                  '((:role :user :content "hi"))
+                  :reasoning-effort :high
+                  :reasoning-summary :none))))
+    (is (string= "none" (gethash "summary" (gethash "reasoning" parsed)))))
   (let ((parsed-off (com.inuoe.jzon:parse
                      (transports:build-responses-body
                       "gpt-5.3-codex"
@@ -475,6 +544,56 @@ content_filter reason does not, but keeps its usage."
         (is (eq :full kind))
         (is (null (transports::codex-websocket-session-continuation state)))))))
 
+(test codex-websocket-continuation-allows-pending-tool-call
+  (let* ((state (transports::make-codex-websocket-session))
+         (first-body (transports::build-responses-body-object
+                      "gpt-5.5"
+                      '((:role :user :content "hi"))))
+         (collector (transports::make-responses-output-collector
+                     :response-id "resp-tool-1")))
+    (transports::%collector-note-delta
+     collector
+     (rt:make-tool-call-delta "shell" '(:partial-json "")
+                              :call-id "call-1"
+                              :content-index 0))
+    (transports::%collector-note-delta
+     collector
+     (rt:make-tool-call-delta nil '(:partial-json "{\"cmd\":\"date\"}")
+                              :content-index 0))
+    (transports::%remember-codex-websocket-continuation
+     state first-body collector)
+    (let* ((continuation
+             (transports::codex-websocket-session-continuation state))
+           (response-items
+             (transports::codex-websocket-continuation-last-response-items
+              continuation))
+           (response-item (aref response-items 0)))
+      (is (= 1 (length response-items)))
+      (is (string= "function_call" (gethash "type" response-item)))
+      (is (string= "call-1" (gethash "call_id" response-item)))
+      (is (string= "shell" (gethash "name" response-item)))
+      (is (string= "{\"cmd\":\"date\"}" (gethash "arguments" response-item))))
+    (let ((next-body
+            (transports::build-responses-body-object
+             "gpt-5.5"
+             '((:role :user :content "hi")
+               (:role :assistant :content ""
+                :tool-calls ((:id "call-1" :name "shell"
+                              :arguments-json "{\"cmd\":\"date\"}")))
+               (:role :tool-result :tool-call-id "call-1"
+                :content "done")))))
+      (multiple-value-bind (delta-body kind)
+          (transports::%websocket-request-body state next-body)
+        (let* ((input (gethash "input" delta-body))
+               (item (aref input 0)))
+          (is (eq :delta kind))
+          (is (string= "resp-tool-1"
+                       (gethash "previous_response_id" delta-body)))
+          (is (= 1 (length input)))
+          (is (string= "function_call_output" (gethash "type" item)))
+          (is (string= "call-1" (gethash "call_id" item)))
+          (is (string= "done" (gethash "output" item))))))))
+
 (test codex-websocket-acquire-reuses-idle-cached-session
   (let ((state (transports::make-codex-websocket-session))
         (created 0))
@@ -572,6 +691,106 @@ content_filter reason does not, but keeps its usage."
           (is (= 3 (length (gethash "input" request-body))))
           (is (eq continuation
                   (transports::codex-websocket-session-continuation state))))))))
+
+(test codex-websocket-idle-expiry-discards-cached-socket
+  (let ((state (transports::make-codex-websocket-session
+                :socket 'old-socket
+                :continuation 'stale
+                :opened-at 0
+                :last-used-at 0))
+        (created 0))
+    (let ((transports::*codex-websocket-idle-ttl-seconds* 300))
+      (with-rebound-function
+          (transports::%now-seconds (lambda () 301))
+        (with-rebound-function
+            (transports::%make-codex-websocket
+             (lambda (url headers)
+               (declare (ignore url headers))
+               (list :socket (incf created))))
+          (let ((acquisition
+                  (transports::%acquire-codex-websocket
+                   state "wss://example" nil)))
+            (is (= 1 created))
+            (is (null (transports::codex-websocket-session-continuation
+                       state)))
+            (is (equal '(:socket 1)
+                       (transports::codex-websocket-acquisition-socket
+                        acquisition)))
+            (transports::%release-codex-websocket acquisition t)))))))
+
+(test codex-websocket-max-age-expiry-discards-cached-socket
+  (let ((state (transports::make-codex-websocket-session
+                :socket 'old-socket
+                :continuation 'stale
+                :opened-at 0
+                :last-used-at 3299))
+        (created 0))
+    (let ((transports::*codex-websocket-max-age-seconds* 3300))
+      (with-rebound-function
+          (transports::%now-seconds (lambda () 3301))
+        (with-rebound-function
+            (transports::%make-codex-websocket
+             (lambda (url headers)
+               (declare (ignore url headers))
+               (list :socket (incf created))))
+          (let ((acquisition
+                  (transports::%acquire-codex-websocket
+                   state "wss://example" nil)))
+            (is (= 1 created))
+            (is (null (transports::codex-websocket-session-continuation
+                       state)))
+            (is (equal '(:socket 1)
+                       (transports::codex-websocket-acquisition-socket
+                        acquisition)))
+            (transports::%release-codex-websocket acquisition t)))))))
+
+(test codex-websocket-release-keep-stamps-last-used
+  (let ((state (transports::make-codex-websocket-session)))
+    (with-rebound-function
+        (transports::%now-seconds (lambda () 42))
+      (with-rebound-function
+          (transports::%make-codex-websocket
+           (lambda (url headers)
+             (declare (ignore url headers))
+             'socket))
+        (let ((acquisition
+                (transports::%acquire-codex-websocket
+                 state "wss://example" nil)))
+          (transports::%release-codex-websocket acquisition t)
+          (is (= 42 (transports::codex-websocket-session-opened-at state)))
+          (is (= 42 (transports::codex-websocket-session-last-used-at
+                     state))))))))
+
+(test codex-websocket-discard-clears-socket-and-continuation
+  (let ((state (transports::make-codex-websocket-session
+                :socket 'socket
+                :continuation 'continuation
+                :opened-at 1
+                :last-used-at 2))
+        (close-count 0)
+        (shutdown-count 0))
+    (with-rebound-function
+        (websocket-driver:socket
+         (lambda (socket)
+           (declare (ignore socket))
+           'stream))
+      (with-rebound-function
+          (websocket-driver:close-connection
+           (lambda (socket)
+             (declare (ignore socket))
+             (incf close-count)))
+        (with-rebound-function
+            (transports::shutdown-request-stream
+             (lambda (stream)
+               (declare (ignore stream))
+               (incf shutdown-count)))
+          (transports::%discard-codex-websocket-session state))))
+    (is (= 1 shutdown-count))
+    (is (= 0 close-count))
+    (is (null (transports::codex-websocket-session-socket state)))
+    (is (null (transports::codex-websocket-session-continuation state)))
+    (is (null (transports::codex-websocket-session-opened-at state)))
+    (is (null (transports::codex-websocket-session-last-used-at state)))))
 
 (defun responses-adapter-fixture (context &key transport-profile session-id
                                             instructions transport-mode)
@@ -699,6 +918,69 @@ along on the request for exercising the codex compatibility path."
                          (cdr (assoc "session_id" captured-headers
                                      :test #'string=))))
             (let ((state (gethash "sess-ws"
+                                  transports::*codex-websocket-sessions*)))
+              (is (= 2 (transports::codex-websocket-session-requests state)))
+              (is (= 1 (transports::codex-websocket-session-full-requests state)))
+              (is (= 1 (transports::codex-websocket-session-delta-requests state))))))))))
+
+(test (codex-websocket-adapter-sends-tool-result-delta-after-tool-call :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id")
+             :session-id "sess-ws-tools")
+          (let ((captured-bodies '())
+                (attempts 0))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url headers req))
+                      (push body captured-bodies)
+                      (incf attempts)
+                      (make-string-input-stream
+                       (if (= attempts 1)
+                           *responses-canned-websocket-tool-call-stream*
+                           *responses-canned-websocket-stream*)))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")
+                      (:role :assistant :content ""
+                       :tool-calls ((:id "call-1" :name "shell"
+                                     :arguments-json "{\"cmd\":\"date\"}")))
+                      (:role :tool-result :tool-call-id "call-1"
+                       :content "done")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil)))
+            (let* ((bodies (reverse captured-bodies))
+                   (first-body (com.inuoe.jzon:parse (first bodies)))
+                   (second-body (com.inuoe.jzon:parse (second bodies)))
+                   (input (gethash "input" second-body))
+                   (item (aref input 0)))
+              (is (= 2 attempts))
+              (is (= 2 (length bodies)))
+              (is (null (gethash "previous_response_id" first-body)))
+              (is (string= "resp-tool-1"
+                           (gethash "previous_response_id" second-body)))
+              (is (= 1 (length input)))
+              (is (string= "function_call_output" (gethash "type" item)))
+              (is (string= "call-1" (gethash "call_id" item)))
+              (is (string= "done" (gethash "output" item))))
+            (let ((state (gethash "sess-ws-tools"
                                   transports::*codex-websocket-sessions*)))
               (is (= 2 (transports::codex-websocket-session-requests state)))
               (is (= 1 (transports::codex-websocket-session-full-requests state)))
@@ -850,6 +1132,484 @@ along on the request for exercising the codex compatibility path."
               (is (= 2 (transports::codex-websocket-session-full-requests state)))
               (is (= 0 (transports::codex-websocket-session-delta-requests state)))
               (is (null (transports::codex-websocket-session-continuation state))))))))))
+
+(test (codex-websocket-previous-response-not-found-retries-full-context :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id")
+             :session-id "sess-ws-prev-missing")
+          (let ((attempts 0)
+                (captured-bodies '()))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url headers req))
+                      (incf attempts)
+                      (push body captured-bodies)
+                      (when (= attempts 2)
+                        (error 'transports:openai-api-error
+                               :body "{\"error\":{\"code\":\"previous_response_not_found\"}}"))
+                      (make-string-input-stream
+                       *responses-canned-websocket-stream*))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")
+                      (:role :assistant :content "Hello")
+                      (:role :user :content "again")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil)))
+            (let* ((bodies (reverse captured-bodies))
+                   (delta-body (com.inuoe.jzon:parse (second bodies)))
+                   (retry-body (com.inuoe.jzon:parse (third bodies)))
+                   (state (gethash "sess-ws-prev-missing"
+                                   transports::*codex-websocket-sessions*)))
+              (is (= 3 attempts))
+              (is (string= "resp-1"
+                           (gethash "previous_response_id" delta-body)))
+              (is (= 1 (length (gethash "input" delta-body))))
+              (is (null (gethash "previous_response_id" retry-body)))
+              (is (= 3 (length (gethash "input" retry-body))))
+              (is (string= "resp-1"
+                           (transports::codex-websocket-continuation-last-response-id
+                            (transports::codex-websocket-session-continuation
+                             state)))))))))))
+
+(test (codex-websocket-connection-limit-retries-full-context :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id")
+             :session-id "sess-ws-limit")
+          (let ((attempts 0)
+                (captured-bodies '()))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url headers req))
+                      (incf attempts)
+                      (push body captured-bodies)
+                      (when (= attempts 2)
+                        (error 'transports:openai-api-error
+                               :body "{\"error\":{\"code\":\"websocket_connection_limit_reached\"}}"))
+                      (make-string-input-stream
+                       *responses-canned-websocket-stream*))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")
+                      (:role :assistant :content "Hello")
+                      (:role :user :content "again")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil)))
+            (let* ((bodies (reverse captured-bodies))
+                   (delta-body (com.inuoe.jzon:parse (second bodies)))
+                   (retry-body (com.inuoe.jzon:parse (third bodies))))
+              (is (= 3 attempts))
+              (is (string= "resp-1"
+                           (gethash "previous_response_id" delta-body)))
+              (is (= 1 (length (gethash "input" delta-body))))
+              (is (null (gethash "previous_response_id" retry-body)))
+              (is (= 3 (length (gethash "input" retry-body)))))))))))
+
+(test (codex-websocket-pre-start-failure-falls-back-to-sse-and-clears-cache :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id")
+             :session-id "sess-ws-fallback")
+          (let ((websocket-attempts 0)
+                (sse-called nil))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url body headers req))
+                      (incf websocket-attempts)
+                      (if (= websocket-attempts 1)
+                          (make-string-input-stream
+                           *responses-canned-websocket-stream*)
+                          (error "network down"))))
+                  (transports:*responses-http*
+                    (lambda (url body headers)
+                      (declare (ignore url body headers))
+                      (setf sse-called t)
+                      (values (make-string-input-stream
+                               *responses-canned-stream*)
+                              200))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")
+                      (:role :assistant :content "Hello")
+                      (:role :user :content "again")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil)))
+            (let ((state (gethash "sess-ws-fallback"
+                                  transports::*codex-websocket-sessions*)))
+              (is (= 2 websocket-attempts))
+              (is (eq t sse-called))
+              (is (null (transports::codex-websocket-session-continuation
+                         state))))))))))
+
+(test (codex-websocket-post-start-failure-does-not-fallback :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id")
+             :session-id "sess-ws-post-start")
+          (let ((sse-called nil))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url body headers req))
+                      (make-string-input-stream
+                       (format nil "~{~A~%~}"
+                               '("{\"type\":\"response.created\"}"
+                                 "{\"type\":\"error\",\"error\":{\"message\":\"boom\"}}")))))
+                  (transports:*responses-http*
+                    (lambda (url body headers)
+                      (declare (ignore url body headers))
+                      (setf sse-called t)
+                      (values (make-string-input-stream
+                               *responses-canned-stream*)
+                              200))))
+              (signals transports:openai-api-error
+                (transports:openai-responses-adapter
+                 provider request context
+                 :emit (lambda (d) (declare (ignore d)) nil)))
+              (let ((state (gethash "sess-ws-post-start"
+                                    transports::*codex-websocket-sessions*)))
+                (is (null sse-called))
+                (is (null (transports::codex-websocket-session-continuation
+                           state)))))))))))
+
+(test (codex-websocket-real-closer-shuts-down-websocket-stream :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (_provider request)
+        (responses-adapter-fixture
+         context
+         :transport-profile '(:websocket-continuation t))
+      (declare (ignore _provider))
+      (let ((stream (rt:make-model-stream request)))
+        (setf (rt:model-request-stream request) stream)
+        (let ((close-count 0)
+              (shutdown-count 0)
+              (worker nil))
+          (with-rebound-function
+              (transports::%make-codex-websocket
+               (lambda (url headers)
+                 (declare (ignore url headers))
+                 'fake-socket))
+            (with-rebound-function
+                (event-emitter:on
+                 (lambda (event socket listener)
+                   (declare (ignore event socket listener))
+                   nil))
+              (with-rebound-function
+                  (event-emitter:remove-listener
+                   (lambda (socket event listener)
+                     (declare (ignore socket event listener))
+                     nil))
+                (with-rebound-function
+                    (websocket-driver:send-text
+                     (lambda (socket body)
+                       (declare (ignore socket body))
+                       nil))
+                  (with-rebound-function
+                      (websocket-driver:socket
+                       (lambda (socket)
+                         (declare (ignore socket))
+                         'stream))
+                    (with-rebound-function
+                        (transports::shutdown-request-stream
+                         (lambda (stream)
+                           (declare (ignore stream))
+                           (incf shutdown-count)))
+                      (with-rebound-function
+                          (websocket-driver:close-connection
+                           (lambda (socket)
+                             (declare (ignore socket))
+                             (incf close-count)))
+                        (unwind-protect
+                             (progn
+                               (setf worker
+                                     (sb-thread:make-thread
+                                      (lambda ()
+                                        (ignore-errors
+                                          (transports::%stream-real-codex-websocket
+                                           request "wss://example" "{}" nil
+                                           (transports::make-codex-websocket-acquisition)
+                                           (transports::make-responses-output-collector)
+                                           (lambda (d) (declare (ignore d)) nil)
+                                           (lambda () nil))))
+                                      :name "codex-websocket-shutdown-test"))
+                               (loop repeat 40
+                                     until (rt:model-request-stream-closer request)
+                                     do (sleep 0.05))
+                               (is (not (null
+                                         (rt:model-request-stream-closer request))))
+                               (funcall (rt:model-request-stream-closer request))
+                               (loop repeat 40
+                                     until (plusp shutdown-count)
+                                     do (sleep 0.05))
+                               (ignore-errors
+                                (sb-thread:join-thread worker :timeout 1))
+                               (is (= 1 shutdown-count))
+                               (is (= 0 close-count))
+                               (is (not (and worker
+                                             (sb-thread:thread-alive-p worker)))))
+                          (when worker
+                            (ignore-errors
+                             (sb-thread:join-thread worker :timeout 1))
+                            (ignore-errors
+                             (sb-thread:terminate-thread worker))))))))))))))))
+
+(test (codex-websocket-abort-does-not-close-while-reader-active :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (_provider request)
+        (responses-adapter-fixture
+         context
+         :transport-profile '(:websocket-continuation t))
+      (declare (ignore _provider))
+      (let ((stream (rt:make-model-stream request)))
+        (setf (rt:model-request-stream request) stream)
+        (let ((worker nil)
+              (reader nil)
+              (reader-thread nil)
+              (reader-active nil)
+              (unsafe-close nil)
+              (shutdown-count 0)
+              (sent (sb-thread:make-semaphore
+                     :name "codex-websocket-abort-reader-active-sent"))
+              (reader-ready (sb-thread:make-semaphore
+                             :name "codex-websocket-abort-reader-active-ready"))
+              (reader-release (sb-thread:make-semaphore
+                               :name "codex-websocket-abort-reader-active-release")))
+          (with-rebound-function
+              (transports::%make-codex-websocket
+               (lambda (url headers)
+                 (declare (ignore url headers))
+                 'fake-socket))
+            (with-rebound-function
+                (event-emitter:on
+                 (lambda (event socket listener)
+                   (declare (ignore event socket listener))
+                   nil))
+              (with-rebound-function
+                  (event-emitter:remove-listener
+                   (lambda (socket event listener)
+                     (declare (ignore socket event listener))
+                     nil))
+                (with-rebound-function
+                    (websocket-driver:send-text
+                     (lambda (socket body)
+                       (declare (ignore socket body))
+                       (sb-thread:signal-semaphore sent)))
+                  (with-rebound-function
+                      (websocket-driver:close-connection
+                       (lambda (socket)
+                         (declare (ignore socket))
+                         (when (and reader-active
+                                    (not (eq sb-thread:*current-thread*
+                                             reader-thread)))
+                           (setf unsafe-close t))))
+                    (with-rebound-function
+                        (websocket-driver:socket
+                         (lambda (socket)
+                           (declare (ignore socket))
+                           'stream))
+                      (with-rebound-function
+                          (transports::shutdown-request-stream
+                           (lambda (stream)
+                             (declare (ignore stream))
+                             (incf shutdown-count)))
+                        (unwind-protect
+                             (progn
+                               (setf worker
+                                     (sb-thread:make-thread
+                                      (lambda ()
+                                        (ignore-errors
+                                          (transports::%stream-real-codex-websocket
+                                           request "wss://example" "{}" nil
+                                           (transports::make-codex-websocket-acquisition)
+                                           (transports::make-responses-output-collector)
+                                           (lambda (d) (declare (ignore d)) nil)
+                                           (lambda () nil))))
+                                      :name "codex-websocket-abort-reader-active-worker"))
+                               (sb-thread:wait-on-semaphore sent)
+                               (setf reader
+                                     (sb-thread:make-thread
+                                      (lambda ()
+                                        (setf reader-thread sb-thread:*current-thread*
+                                              reader-active t)
+                                        (sb-thread:signal-semaphore reader-ready)
+                                        (sb-thread:wait-on-semaphore reader-release)
+                                        (setf reader-active nil))
+                                      :name "codex-websocket-abort-reader-active-reader"))
+                               (sb-thread:wait-on-semaphore reader-ready)
+                               (is (not (null
+                                         (rt:model-request-stream-closer request))))
+                               (funcall (rt:model-request-stream-closer request))
+                               (loop repeat 40
+                                     until (not (and worker
+                                                     (sb-thread:thread-alive-p
+                                                      worker)))
+                                     do (sleep 0.05))
+                               (is (= 1 shutdown-count))
+                               (is (null unsafe-close)))
+                          (sb-thread:signal-semaphore reader-release)
+                          (when worker
+                            (ignore-errors (sb-thread:join-thread worker :timeout 1))
+                            (ignore-errors (sb-thread:terminate-thread worker)))
+                          (when reader
+                            (ignore-errors (sb-thread:join-thread reader :timeout 1))
+                            (ignore-errors (sb-thread:terminate-thread reader))))))))))))))))
+
+(test (codex-websocket-pre-open-abort-installs-closer :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (_provider request)
+        (responses-adapter-fixture
+         context
+         :transport-profile '(:websocket-continuation t))
+      (declare (ignore _provider))
+      (let ((stream (rt:make-model-stream request)))
+        (setf (rt:model-request-stream request) stream)
+        (let ((close-count 0)
+              (shutdown-count 0)
+              (send-count 0)
+              (on-count 0)
+              (worker nil)
+              (open-entered (sb-thread:make-semaphore
+                             :name "codex-websocket-pre-open-abort-entered"))
+              (open-release (sb-thread:make-semaphore
+                             :name "codex-websocket-pre-open-abort-release")))
+          (with-rebound-function
+              (transports::%make-codex-websocket
+               (lambda (url headers)
+                 (declare (ignore url headers))
+                 (sb-thread:signal-semaphore open-entered)
+                 (sb-thread:wait-on-semaphore open-release)
+                 'fake-socket))
+            (with-rebound-function
+                (event-emitter:on
+                 (lambda (event socket listener)
+                   (declare (ignore event socket listener))
+                   (incf on-count)
+                   nil))
+              (with-rebound-function
+                  (event-emitter:remove-listener
+                   (lambda (socket event listener)
+                     (declare (ignore socket event listener))
+                     nil))
+                (with-rebound-function
+                    (websocket-driver:send-text
+                     (lambda (socket body)
+                       (declare (ignore socket body))
+                       (incf send-count)))
+                  (with-rebound-function
+                      (websocket-driver:close-connection
+                       (lambda (socket)
+                         (declare (ignore socket))
+                         (incf close-count)))
+                    (with-rebound-function
+                        (websocket-driver:socket
+                         (lambda (socket)
+                           (declare (ignore socket))
+                           'stream))
+                      (with-rebound-function
+                          (transports::shutdown-request-stream
+                           (lambda (stream)
+                             (declare (ignore stream))
+                             (incf shutdown-count)))
+                        (unwind-protect
+                             (progn
+                               (setf worker
+                                     (sb-thread:make-thread
+                                      (lambda ()
+                                        (ignore-errors
+                                          (transports::%stream-real-codex-websocket
+                                           request "wss://example" "{}" nil
+                                           (transports::make-codex-websocket-acquisition)
+                                           (transports::make-responses-output-collector)
+                                           (lambda (d) (declare (ignore d)) nil)
+                                           (lambda () nil))))
+                                      :name "codex-websocket-pre-open-abort-test"))
+                               (sb-thread:wait-on-semaphore open-entered)
+                               (is (not (null
+                                         (rt:model-request-stream-closer request))))
+                               (funcall (rt:model-request-stream-closer request))
+                               (sb-thread:signal-semaphore open-release)
+                               (ignore-errors
+                                (sb-thread:join-thread worker :timeout 1))
+                               (is (not (and worker
+                                             (sb-thread:thread-alive-p worker))))
+                               (is (= 1 shutdown-count))
+                               (is (= 0 close-count))
+                               (is (= 0 send-count))
+                               (is (= 0 on-count))
+                               (is (null (rt:model-request-stream-closer request))))
+                          (sb-thread:signal-semaphore open-release)
+                          (when worker
+                            (ignore-errors
+                             (sb-thread:join-thread worker :timeout 1))
+                            (ignore-errors
+                             (sb-thread:terminate-thread worker))))))))))))))))
 
 (test (codex-websocket-timings-include-transport-debug-fields :fixture interactive-authority)
   (clrhash transports::*codex-websocket-sessions*)

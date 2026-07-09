@@ -93,12 +93,16 @@
   (let ((table (make-hash-table :test #'equal)))
     (dolist (definition
               (list
-               (make-model-option-definition
-                "reasoning-effort" :enum
-                :label "Reasoning effort"
-                :enum-values '(:off :minimal :low :medium :high :xhigh))
-               (make-model-option-definition
-                "text-verbosity" :enum
+	       (make-model-option-definition
+	        "reasoning-effort" :enum
+	        :label "Reasoning effort"
+	        :enum-values '(:off :minimal :low :medium :high :xhigh))
+	       (make-model-option-definition
+	        "reasoning-summary" :enum
+	        :label "Reasoning summary"
+	        :enum-values '(:auto :concise :detailed :none))
+	       (make-model-option-definition
+	        "text-verbosity" :enum
                 :label "Text verbosity"
                 :enum-values '(:low :medium :high))
                (make-model-option-definition

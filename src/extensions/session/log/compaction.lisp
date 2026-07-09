@@ -4,7 +4,11 @@
   (ceiling (length (if (stringp content) content (princ-to-string content))) 4))
 
 (defun estimate-message-tokens (message)
-  (estimate-content-tokens (message-content message)))
+  (+ (estimate-content-tokens (message-content message))
+     (loop for call in (getf (message-metadata message) :tool-calls)
+           sum (+ (estimate-content-tokens (getf call :id))
+                  (estimate-content-tokens (getf call :name))
+                  (estimate-content-tokens (getf call :arguments-json))))))
 
 (defun entry-cut-message (entry)
   (when (typep entry 'message-entry)
@@ -47,30 +51,39 @@ follow the assistant tool call that produced it."
   turn-start-index
   split-turn-p)
 
-(defun find-cut-point (entries start end keep-recent-tokens)
+(defun entry-token-sum (entries start end entry-token-fn)
+  (loop for i from start below end
+        sum (funcall entry-token-fn (aref entries i))))
+
+(defun effective-cut-budget (keep-recent-tokens summary-reserve-tokens)
+  (max 0 (- keep-recent-tokens (max 0 summary-reserve-tokens))))
+
+(defun find-cut-point (entries start end keep-recent-tokens
+                       &key (entry-token-fn #'entry-token-estimate)
+                         (summary-reserve-tokens 0))
   "Locate the cut that keeps roughly the last KEEP-RECENT-TOKENS of
-conversation and summarizes everything older. Snaps forward to a valid cut
-point so the kept window never begins on a tool result; when no cut point lies
-at or after the boundary (trailing tool results alone exceed KEEP-RECENT-TOKENS)
-snaps backward to the nearest cut point at or before it."
+conversation, minus SUMMARY-RESERVE-TOKENS, and summarizes everything older.
+Snaps forward to a valid cut point so the kept window never begins on a tool
+result; when no cut point lies at or after the boundary (trailing tool results
+alone exceed the cut budget) snaps backward to the nearest cut point at or
+before it."
   (let ((cut-points (find-valid-cut-points entries start end)))
     (when (null cut-points)
       (return-from find-cut-point
         (%make-cut-point :first-kept-index start
                          :turn-start-index -1
                          :split-turn-p nil)))
-    (let ((accumulated 0)
+    (let ((budget (effective-cut-budget keep-recent-tokens summary-reserve-tokens))
+          (accumulated 0)
           (cut-index (first cut-points)))
       (loop for i from (1- end) downto start
-            for message = (entry-cut-message (aref entries i))
-            when message
-              do (incf accumulated (estimate-message-tokens message))
-                 (when (>= accumulated keep-recent-tokens)
-                   (let ((snapped (or (find-if (lambda (c) (>= c i)) cut-points)
-                                      (find-if (lambda (c) (<= c i)) cut-points
-                                               :from-end t))))
-                     (when snapped (setf cut-index snapped)))
-                   (loop-finish)))
+            do (incf accumulated (funcall entry-token-fn (aref entries i)))
+               (when (>= accumulated budget)
+                 (let ((snapped (or (find-if (lambda (c) (>= c i)) cut-points)
+                                    (find-if (lambda (c) (<= c i)) cut-points
+                                             :from-end t))))
+                   (when snapped (setf cut-index snapped)))
+                 (loop-finish)))
       (loop while (> cut-index start)
             for prev = (aref entries (1- cut-index))
             until (or (typep prev 'compaction-entry)
@@ -94,7 +107,9 @@ snaps backward to the nearest cut point at or before it."
   tokens-before
   previous-summary)
 
-(defun prepare-session-compaction (path-entries keep-recent-tokens)
+(defun prepare-session-compaction (path-entries keep-recent-tokens
+                                   &key (entry-token-fn #'entry-token-estimate)
+                                     (summary-reserve-tokens 0))
   "Compute the compaction cut over PATH-ENTRIES (root->leaf). Returns a
 COMPACTION-PREPARATION, or NIL when the leaf is already a compaction (nothing to
 compact)."
@@ -109,9 +124,10 @@ compact)."
            (boundary-start (if prev-compaction-index (1+ prev-compaction-index) 0))
            (usage-start (or prev-compaction-index 0))
            (tokens-before
-             (loop for i from usage-start below count
-                   sum (entry-token-estimate (aref entries i))))
-           (cut (find-cut-point entries boundary-start count keep-recent-tokens))
+             (entry-token-sum entries usage-start count entry-token-fn))
+           (cut (find-cut-point entries boundary-start count keep-recent-tokens
+                                :entry-token-fn entry-token-fn
+                                :summary-reserve-tokens summary-reserve-tokens))
            (first-kept-index (cut-point-first-kept-index cut))
            (first-kept-id (object-id (aref entries first-kept-index)))
            (history-end (if (cut-point-split-turn-p cut)

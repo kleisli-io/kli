@@ -423,6 +423,76 @@
                  "the post-edit command is installed on reload"))
         (when (probe-file file) (delete-file file))))))
 
+(test (author-reload-command-preserves-live-extensions-on-failed-prepare
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (author-host)
+    (install-extension context app::*user-extension-commands-extension-manifest*)
+    (let* ((root (author-temp-tree))
+           (file (write-tree-file
+                  root ".kli/extensions/reload-survives.lisp"
+                  "(defextension reload-survives
+  (:provides
+   (command \"survive\"
+     :handler (lambda (command arguments context &key call-id on-update)
+                (declare (ignore command arguments context call-id on-update))
+                (reply \"alive\")))))"))
+           (provider (author-commands-provider protocol)))
+      (unwind-protect
+           (uiop:with-current-directory (root)
+             (with-extension-load-authority
+               (app:load-user-extensions context))
+             (is (ext:provider-call provider :find-command :survive)
+                 "precondition: the original extension is live")
+             (write-author-extension "(error \"reload prepare failed\")" file)
+             (invoke-test-command context :reload)
+             (is (ext:provider-call provider :find-command :survive)
+                 "the previous command survives a failed reload prepare")
+             (is (ext:extension-loaded-p protocol :reload-survives)
+                 "the previous extension handle remains installed")
+	            (is (app:extension-diagnostics protocol)
+	                "the failed reload still records diagnostics"))
+	        (when (probe-file file) (delete-file file))))))
+
+(test (author-reload-extensions-command-preserves-global-xdg-extensions
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol) (author-host)
+    (install-extension context app::*user-extension-commands-extension-manifest*)
+    (let* ((root (author-temp-tree))
+           (project (merge-pathnames "project/" root))
+           (file (write-tree-file
+                  root "kli/extensions/global-survives.lisp"
+                  "(defextension global-survives
+  (:provides
+   (command \"global-survive\"
+     :handler (lambda (command arguments context &key call-id on-update)
+                (declare (ignore command arguments context call-id on-update))
+                (reply \"alive\")))))"))
+           (provider (author-commands-provider protocol))
+           (old-xdg (uiop:getenv "XDG_CONFIG_HOME")))
+      (ensure-directories-exist project)
+      (unwind-protect
+           (progn
+             (setf (uiop:getenv "XDG_CONFIG_HOME") (namestring root))
+             (uiop:with-current-directory (project)
+               (with-extension-load-authority
+                 (app:load-user-extensions context))
+               (is (ext:provider-call provider :find-command :global-survive)
+                   "precondition: the global extension is live")
+               (write-author-extension "(error \"reload prepare failed\")" file)
+               (invoke-test-command context :reload
+                                    '(:tail "extensions"
+                                      :words ("extensions")))
+               (is (ext:provider-call provider :find-command :global-survive)
+                   "the global command survives `/reload extensions`")
+               (is (ext:extension-loaded-p protocol :global-survives)
+                   "the global extension handle remains installed")
+               (is (app:extension-diagnostics protocol)
+                   "the failed reload still records diagnostics")))
+        (if old-xdg
+            (setf (uiop:getenv "XDG_CONFIG_HOME") old-xdg)
+            (sb-posix:unsetenv "XDG_CONFIG_HOME"))
+        (when (probe-file file) (delete-file file))))))
+
 (test (author-index-does-not-install :fixture extension-load-authority)
   (multiple-value-bind (context protocol) (author-host)
     (declare (ignore context))
@@ -470,6 +540,79 @@
             "all three extensions are available")
         (is (null (cdr (assoc :probe-b (app:user-extension-status context))))
             "probe-b is available but not enabled")))))
+
+(defun lifecycle-mutation-waits-for-lock (thunk)
+  (let ((started (sb-thread:make-semaphore
+                  :name "kli-lifecycle-mutation-started"))
+        (done (sb-thread:make-semaphore
+               :name "kli-lifecycle-mutation-done"))
+        (worker nil)
+        (outcome nil))
+    (unwind-protect
+         (progn
+           (app::with-extension-lifecycle-lock
+             (setf worker
+                   (sb-thread:make-thread
+                    (lambda ()
+                      (sb-thread:signal-semaphore started)
+                      (setf outcome
+                            (handler-case
+                                (cons :values
+                                      (multiple-value-list
+                                       (with-extension-load-authority
+                                         (funcall thunk))))
+                              (error (condition)
+                                (cons :error condition))))
+                      (sb-thread:signal-semaphore done))
+                    :name "kli-lifecycle-mutation-test"))
+             (is (sb-thread:wait-on-semaphore started :timeout 1)
+                 "worker reached the lifecycle mutation")
+             (is (not (sb-thread:wait-on-semaphore done :timeout 0.05))
+                 "lifecycle mutation waits for the transition lock"))
+           (is (sb-thread:wait-on-semaphore done :timeout 1)
+               "lifecycle mutation completes after the transition lock releases")
+           (ignore-errors (sb-thread:join-thread worker :timeout 1))
+           (when (eq (car outcome) :error)
+             (error (cdr outcome)))
+           (cdr outcome))
+      (when worker
+        (ignore-errors (sb-thread:join-thread worker :timeout 1))
+        (when (sb-thread:thread-alive-p worker)
+          (ignore-errors (sb-thread:terminate-thread worker)))))))
+
+(test (author-extension-mutations-wait-for-lifecycle-lock
+       :fixture extension-load-authority)
+  (multiple-value-bind (context protocol) (author-host)
+    (let ((entry (app::make-user-extension-entry
+                  :id :lifecycle-probe
+                  :manifest (lambda ()
+                              (ext:make-extension :id :lifecycle-probe))
+                  :metadata '(:version "1.0.0"))))
+      (setf (gethash :lifecycle-probe (app::available-extensions protocol))
+            entry)
+      (is (equal '(t :enabled)
+                 (lifecycle-mutation-waits-for-lock
+                  (lambda ()
+                    (app:enable-user-extension context :lifecycle-probe)))))
+      (is (gethash :lifecycle-probe (app::installed-user-handles protocol)))
+      (is (equal '(t :disabled)
+                 (lifecycle-mutation-waits-for-lock
+                  (lambda ()
+                    (app:disable-user-extension context :lifecycle-probe)))))
+      (is (null (gethash :lifecycle-probe
+                         (app::installed-user-handles protocol))))
+      (app::install-user-extension protocol entry context)
+      (app:record-remote-install-pin
+       protocol (list :id "lifecycle-probe"
+                      :source-kind :registry
+                      :version "1.0.0"))
+      (is (equal '(t :uninstalled)
+                 (lifecycle-mutation-waits-for-lock
+                  (lambda ()
+                    (app:uninstall-remote-extension context "lifecycle-probe")))))
+      (is (null (gethash :lifecycle-probe
+                         (app::installed-user-handles protocol))))
+      (is (zerop (hash-table-count (app:remote-install-pins protocol)))))))
 
 (test (author-enable-disable-roundtrip :fixture extension-load-authority)
   (multiple-value-bind (context protocol) (author-host)

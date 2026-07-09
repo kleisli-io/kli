@@ -116,89 +116,6 @@ replacement characters."
                             head head-chars tail-chars tail))
                    t))))))))
 
-(defparameter *interactive-bash-command-names*
-  '("vi" "vim" "nvim" "nano" "emacs"
-    "less" "more" "man"
-    "top" "htop" "watch"
-    "ssh" "mosh"
-    "tmux" "screen"))
-
-(defun read-shell-word (command start)
-  (let ((index start)
-        (length (length command))
-        (quote nil))
-    (values
-     (with-output-to-string (word)
-       (loop while (< index length)
-             for char = (char command index)
-             do (cond
-                  ((and (not quote) (whitespace-char-p char))
-                   (return))
-                  ((and (not quote) (member char '(#\' #\") :test #'char=))
-                   (setf quote char)
-                   (incf index))
-                  ((and quote (char= char quote))
-                   (setf quote nil)
-                   (incf index))
-                  ((and (char= char #\\) (< (1+ index) length))
-                   (incf index)
-                   (write-char (char command index) word)
-                   (incf index))
-                  (t
-                   (write-char char word)
-                   (incf index)))))
-     index)))
-
-(defun shell-command-words (command &key (limit 12))
-  (let ((index 0)
-        (length (length command))
-        (words '()))
-    (loop while (and (< index length) (< (length words) limit))
-          do (loop while (and (< index length)
-                              (whitespace-char-p (char command index)))
-                   do (incf index))
-             (when (< index length)
-               (multiple-value-bind (word next-index)
-                   (read-shell-word command index)
-                 (push word words)
-                 (setf index next-index))))
-    (nreverse words)))
-
-(defun shell-basename (word)
-  (let ((position (position #\/ word :from-end t)))
-    (if position
-        (subseq word (1+ position))
-        word)))
-
-(defun shell-assignment-word-p (word)
-  (let ((position (position #\= word)))
-    (and position
-         (plusp position)
-         (every (lambda (char)
-                  (or (alphanumericp char) (char= char #\_)))
-                (subseq word 0 position))
-         (or (alpha-char-p (char word 0))
-             (char= (char word 0) #\_)))))
-
-(defun shell-option-word-p (word)
-  (and (plusp (length word))
-       (char= (char word 0) #\-)))
-
-(defun effective-shell-command-word (command)
-  (let ((skip-wrapper-options nil))
-    (dolist (word (shell-command-words command))
-      (let ((name (shell-basename word)))
-        (cond
-          ((shell-assignment-word-p word))
-          ((and skip-wrapper-options (shell-option-word-p word)))
-          ((member name '("env" "command" "exec" "time")
-                   :test #'string=)
-           (setf skip-wrapper-options t))
-          ((member name '("sudo" "doas") :test #'string=)
-           (setf skip-wrapper-options t))
-          (t
-           (return name)))))))
-
 ;;; Per-protocol bash policy: a plist of (:cwd :env-allowlist :default-timeout),
 ;;; serializable scalars/lists, consulted at every bash spawn. Each knob is
 ;;; opt-in -- a NIL policy changes nothing.
@@ -248,12 +165,6 @@ sandbox's job, not the tool's."
                        :from-end t :test #'string=)
           for value = (funcall getenv name)
           when value collect (concatenate 'string name "=" value))))
-
-(defun interactive-shell-command-name (command)
-  (let ((name (effective-shell-command-word command)))
-    (and name
-         (member name *interactive-bash-command-names* :test #'string=)
-         name)))
 
 (defun bash-timeout-seconds (parameters &optional policy)
   (let* ((value (effective-timeout policy
@@ -1206,23 +1117,13 @@ finished jobs without consuming output, so a later bash-output read still return
   (teardown-session-bash-jobs protocol))
 
 (defun run-bash-tool (tool parameters context &key call-id on-update)
-  "Guard interactive commands, then run COMMAND through the selected bash-exec
-provider under the session's bash policy, and format the result. Exec and output
-capping live in the provider. A run_in_background request launches a detached job
-and returns its id at once."
+  "Run COMMAND through the selected bash-exec provider under the session's bash
+policy, and format the result. Exec and output capping live in the provider. A
+run_in_background request launches a detached job and returns its id at once."
   (declare (ignore tool call-id))
   (let* ((protocol (active-protocol context))
          (policy (bash-policy protocol))
-         (command (required-tool-parameter parameters :command))
-         (interactive-name (interactive-shell-command-name command)))
-    (when interactive-name
-      (return-from run-bash-tool
-        (tool-text-result
-         (format nil "Command ~S looks interactive and is not supported by the Bash tool."
-                 interactive-name)
-         :details (list :command command
-                        :interactive-command interactive-name)
-         :error-p t)))
+         (command (required-tool-parameter parameters :command)))
     (when (background-requested-p (tool-parameter parameters :run_in_background))
       (return-from run-bash-tool
         (launch-bash-job protocol parameters command)))

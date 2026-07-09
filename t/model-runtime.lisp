@@ -47,6 +47,19 @@
        store
        session
        (sess:make-message-entry
+        (sess:make-assistant-message
+         ""
+         :id (gensym "RUNTIME-ASSISTANT-TOOL-")
+         :metadata
+         (list :tool-calls
+               (list (list :id :call-1
+                           :name "read"
+                           :arguments-json "{}")))))
+       context)
+      (sess:append-session-entry
+       store
+       session
+       (sess:make-message-entry
         (sess:make-tool-result-message "tool output"
                                        :id (gensym "RUNTIME-TOOL-MESSAGE-")
                                        :tool-call-id :call-1
@@ -339,6 +352,148 @@ loop thread and resolve from the worker."
                              (ctx:context-projected-messages
                               agent-context)))))))))
 
+(defun request-view-contents (view)
+  (loop for item in (ctx:context-view-items view)
+        for value = (ctx:context-view-item-payload-value item)
+        when (typep value 'sess:agent-message)
+          collect (sess:message-content value)))
+
+(defun request-replay-item-ids (request)
+  (mapcar #'ctx:context-view-item-id
+          (ctx:context-view-items
+           (rt:model-request-provider-replay-view request))))
+
+(test (model-runtime-request-audit-snapshots-survive-context-patches
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (_session agent-context sealed-context)
+        (make-runtime-session-and-context context)
+      (declare (ignore _session))
+      (multiple-value-bind (_provider _model selection)
+          (register-runtime-model context
+                                  "audit-provider"
+                                  "audit-model"
+                                  :auth-required-p nil)
+        (declare (ignore _provider _model))
+        (let* ((request (rt:make-model-request (model-runtime-service context)
+                                               selection
+                                               sealed-context
+                                               context))
+               (wire (copy-tree (rt:model-request-provider-wire-input request)))
+               (accounting (rt:model-request-accounting-result request))
+               (total (rt:request-accounting-result-total accounting))
+               (inspection (rt:inspect-model-request request))
+               (patch (ctx:make-append-message-patch
+                       (sess:make-user-message "after audit seal"))))
+          (is (equal '("hello")
+                     (request-view-contents
+                      (rt:model-request-sealed-editable-view request))))
+          (is (equal '("hello")
+                     (request-view-contents
+                      (rt:model-request-provider-replay-view request))))
+          (is (getf (getf inspection :audit) :provider-wire-input))
+          (is (eq :tokens (getf (getf inspection :audit) :accounting-units)))
+          (ctx:stage-context-patch agent-context patch)
+          (ctx:commit-context-patches agent-context context)
+          (is (equal wire (rt:model-request-provider-wire-input request)))
+          (is (= total
+                 (rt:request-accounting-result-total
+                  (rt:model-request-accounting-result request))))
+          (is (equal '("hello")
+                     (request-view-contents
+                      (rt:model-request-sealed-editable-view request))))
+          (is (equal '("hello" "after audit seal")
+                     (mapcar #'sess:message-content
+                             (ctx:context-projected-messages
+                              agent-context)))))))))
+
+(test (model-runtime-records-transport-wire-input-in-request-audit
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (_session _agent-context sealed-context)
+        (make-runtime-session-and-context context)
+      (declare (ignore _session _agent-context))
+      (multiple-value-bind (_provider _model selection)
+          (register-runtime-model context "wire-provider" "wire-model"
+                                  :auth-required-p nil)
+        (declare (ignore _provider _model))
+        (let ((request (rt:make-model-request (model-runtime-service context)
+                                              selection
+                                              sealed-context
+                                              context)))
+          (rt:record-model-request-wire-input
+           request :openai-responses "{\"model\":\"wire-model\",\"input\":[]}")
+          (is (string= "{\"model\":\"wire-model\",\"input\":[]}"
+                       (rt:model-request-provider-wire-input request)))
+          (is (eq :openai-responses
+                  (rt:request-accounting-result-api
+                   (rt:model-request-accounting-result request))))
+          (is (some (lambda (attr)
+                      (equal '(:message)
+                             (mapcar (lambda (id) (and (consp id) (first id)))
+                                     (getf attr :item-ids))))
+                    (rt:request-accounting-result-attributions
+                     (rt:model-request-accounting-result request)))))))))
+
+(test (model-runtime-request-audit-does-not-write-wire-to-session-log
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (session _agent-context sealed-context)
+        (make-runtime-session-and-context context)
+      (declare (ignore _agent-context))
+      (multiple-value-bind (_provider _model selection)
+          (register-runtime-model context "log-audit-provider" "log-audit-model"
+                                  :auth-required-p nil)
+        (declare (ignore _provider _model))
+        (let* ((before (sess:session-entry-count session))
+               (request (rt:make-model-request (model-runtime-service context)
+                                               selection
+                                               sealed-context
+                                               context)))
+          (rt:record-model-request-wire-input
+           request :openai-responses
+           "{\"model\":\"log-audit-model\",\"input\":[{\"role\":\"user\"}]}")
+          (is (= before (sess:session-entry-count session)))
+          (is (every (lambda (entry)
+                       (not (search "log-audit-model"
+                                    (prin1-to-string entry))))
+                     (sess:session-entries session))))))))
+
+(test (complete-text-and-normal-requests-share-audit-boundary
+       :fixture interactive-authority)
+  (multiple-value-bind (context protocol)
+      (model-runtime-test-context)
+    (declare (ignore protocol))
+    (multiple-value-bind (_session _agent-context sealed-context)
+        (make-runtime-session-and-context context)
+      (declare (ignore _session _agent-context))
+      (multiple-value-bind (_provider _model selection)
+          (register-runtime-model context "shared-provider" "shared-model"
+                                  :auth-required-p nil
+                                  :metadata '(:fake-deltas ("ok")))
+        (declare (ignore _provider _model))
+        (let* ((runtime (model-runtime-service context))
+               (normal (rt:make-model-request runtime selection sealed-context
+                                              context))
+               (isolated nil))
+          (rt:complete-text runtime selection sealed-context context
+                            :on-request (lambda (request)
+                                          (setf isolated request)))
+          (is (equal (request-replay-item-ids normal)
+                     (request-replay-item-ids isolated)))
+          (is (equal (rt:model-request-provider-wire-input normal)
+                     (rt:model-request-provider-wire-input isolated)))
+          (is (= (rt:request-accounting-result-total
+                  (rt:model-request-accounting-result normal))
+                 (rt:request-accounting-result-total
+                  (rt:model-request-accounting-result isolated)))))))))
+
 (test (model-runtime-resolves-auth-without-leaking-secret :fixture interactive-authority)
   (multiple-value-bind (context protocol)
       (model-runtime-test-context)
@@ -410,6 +565,61 @@ carrying neither text nor a signature are dropped."
     (is (equal '((:thinking "Thinking" :signature "sig==" :redacted nil)
                  (:thinking "[reasoning redacted]" :signature "opaque"
                   :redacted t))
+	               (rt:stream-thinking-blocks stream)))))
+
+(test stream-thinking-blocks-replaces-finalized-thinking-text
+  (let ((stream (rt:make-model-stream nil)))
+    (dolist (d (list (rt:make-thinking-delta "Head" :content-index 0)
+                     (rt:make-thinking-delta "er" :content-index 0)
+                     (rt:make-thinking-delta "Full final thinking"
+                                             :content-index 0
+                                             :replacement-p t
+                                             :signature "final")))
+      (rt:handle-model-delta stream d nil))
+    (is (equal '((:thinking "Full final thinking"
+                  :signature "final"
+                  :redacted nil))
+               (rt:stream-thinking-blocks stream)))))
+
+(test stream-thinking-blocks-prefers-raw-over-summary
+  (let ((stream (rt:make-model-stream nil)))
+    (dolist (d (list (rt:make-thinking-delta "Header"
+                                             :content-index 0
+                                             :source :summary)
+                     (rt:make-thinking-delta (format nil "~%~%")
+                                             :content-index 0
+                                             :source :summary)
+                     (rt:make-thinking-delta "Raw streamed"
+                                             :content-index 0
+                                             :source :raw)
+                     (rt:make-thinking-delta "Short summary"
+                                             :content-index 0
+                                             :source :summary
+                                             :replacement-p t
+                                             :signature "final")))
+      (rt:handle-model-delta stream d nil))
+    (is (equal '((:thinking "Raw streamed"
+                  :signature "final"
+                  :redacted nil))
+               (rt:stream-thinking-blocks stream)))))
+
+(test stream-thinking-blocks-replaces-raw-with-final-raw-content
+  (let ((stream (rt:make-model-stream nil)))
+    (dolist (d (list (rt:make-thinking-delta "Header"
+                                             :content-index 0
+                                             :source :summary)
+                     (rt:make-thinking-delta "Raw streamed"
+                                             :content-index 0
+                                             :source :raw)
+                     (rt:make-thinking-delta "Full raw final"
+                                             :content-index 0
+                                             :source :raw
+                                             :replacement-p t
+                                             :signature "final")))
+      (rt:handle-model-delta stream d nil))
+    (is (equal '((:thinking "Full raw final"
+                  :signature "final"
+                  :redacted nil))
                (rt:stream-thinking-blocks stream)))))
 
 (test (model-response-metadata-carries-thinking-blocks-when-collected :fixture interactive-authority)
@@ -465,11 +675,65 @@ carrying neither text nor a signature are dropped."
                                                sealed-context
                                                context))
                (messages (rt:model-request-model-messages request)))
-          (is (equal '(:user :tool-result)
+          (is (equal '(:user :assistant :tool-result)
                      (mapcar (lambda (message) (getf message :role))
                              messages)))
-          (is (equal "read" (getf (second messages) :tool-name)))
-          (is (equal :call-1 (getf (second messages) :tool-call-id))))))))
+          (is (equal "read" (getf (third messages) :tool-name)))
+          (is (equal :call-1 (getf (third messages) :tool-call-id))))))))
+
+(test (model-runtime-materializes-provider-replay-items :fixture interactive-authority)
+  "Request construction keeps semantic provider replay items inspectable and
+lowers them only at the provider materialization boundary."
+  (multiple-value-bind (context protocol)
+      (model-runtime-test-context)
+    (declare (ignore protocol))
+    (let* ((store (session-log-store context))
+           (session (sess:create-session store context :id (gensym "SUMMARY-SESSION-"))))
+      (flet ((append! (entry)
+               (sess:append-session-entry store session entry context)))
+        (append! (sess:make-message-entry
+                  (sess:make-user-message "write artifact")
+                  :id :summary-user))
+        (append! (sess:make-message-entry
+                  (sess:make-assistant-message
+                   ""
+                   :metadata
+                   (list :tool-calls
+                         (list (list :id "call_summary"
+                                     :name "write"
+                                     :arguments-json "{\"path\":\"a.txt\"}"))))
+                  :id :summary-assistant))
+        (append! (sess:make-message-entry
+                  (sess:make-tool-result-message
+                   "Wrote a.txt."
+                   :tool-call-id "call_summary"
+                   :tool-name "write")
+                  :id :summary-result))
+        (append! (sess:make-compaction-entry
+                  "The artifact was written to a.txt."
+                  :summary-assistant
+                  :id :summary-compaction)))
+      (let* ((agent-context (ctx:make-agent-context session store context))
+             (sealed-context (ctx:seal-context-projection agent-context context)))
+        (multiple-value-bind (_provider _model selection)
+            (register-runtime-model context
+                                    "summary-provider"
+                                    "summary-model"
+                                    :auth-required-p nil)
+          (declare (ignore _provider _model))
+          (let* ((request (rt:make-model-request (model-runtime-service context)
+                                                 selection
+                                                 sealed-context
+                                                 context))
+                 (items (rt:model-request-provider-replay-items request))
+                 (messages (rt:model-request-model-messages request)))
+            (is (equal '(:summary)
+                       (mapcar #'ctx:context-view-item-payload-kind items)))
+            (is (equal '(:summary)
+                       (mapcar (lambda (message) (getf message :role))
+                               messages)))
+            (is (string= "The artifact was written to a.txt."
+                         (getf (first messages) :content)))))))))
 
 (test (complete-text-returns-text-and-registers-no-loop-request :fixture interactive-authority)
   "An isolated completion yields the response text and never registers a loop
@@ -558,8 +822,8 @@ they serialize into session entries."
 
 (test (stream-buffers-clear-once-response-is-built :fixture interactive-authority)
   "The response owns the aggregated content after completion -- the stream's
-per-token buffers and the request's conversation snapshot are dropped, and the
-turn that retains the request no longer pins every streamed token."
+per-token buffers and transient request fields are dropped, while request audit
+snapshots remain available for inspection."
   (multiple-value-bind (context protocol) (model-runtime-test-context)
     (declare (ignore protocol))
     (multiple-value-bind (_session _agent-context sealed-context)
@@ -595,7 +859,12 @@ turn that retains the request no longer pins every streamed token."
           (is (null (rt:model-stream-thinking-deltas stream)))
           (is (null (rt::model-stream-tool-call-deltas stream)))
           (is (null (rt:model-request-model-messages request)))
-          (is (null (rt:model-request-sealed-context request))))))))
+          (is (null (rt:model-request-sealed-context request)))
+          (is (equal '("hello")
+                     (request-view-contents
+                      (rt:model-request-sealed-editable-view request))))
+          (is (rt:model-request-provider-wire-input request))
+          (is (rt:model-request-accounting-result request)))))))
 
 (test (completed-requests-evict-beyond-history-limit :fixture interactive-authority)
   "Completions beyond the history limit evict the oldest request, stream, and

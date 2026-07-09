@@ -103,6 +103,45 @@ is left for downstream to default."
                           :call-id (gethash "call_id" item)
                           :content-index idx)))
 
+(defun %json-array-values (value)
+  (cond ((vectorp value) (loop for item across value collect item))
+        ((listp value) value)
+        (t nil)))
+
+(defun %responses-text-parts-text (parts)
+  (let ((texts
+          (loop for part in (%json-array-values parts)
+                for text = (and (hash-table-p part) (gethash "text" part))
+                when (and (stringp text) (plusp (length text)))
+                  collect text)))
+    (when texts
+      (format nil "~{~A~^~%~%~}" texts))))
+
+(defun %responses-reasoning-item-text (item)
+  (when (hash-table-p item)
+    (let ((content (%responses-text-parts-text (gethash "content" item))))
+      (if content
+          (values content :raw)
+          (let ((summary (%responses-text-parts-text (gethash "summary" item))))
+            (when summary
+              (values summary :summary)))))))
+
+(defun %responses-reasoning-item-signature (item)
+  (when (hash-table-p item)
+    (ignore-errors (com.inuoe.jzon:stringify item))))
+
+(defun %responses-final-reasoning-delta (item idx)
+  (when (and (hash-table-p item)
+             (equal (gethash "type" item) "reasoning"))
+    (multiple-value-bind (text source) (%responses-reasoning-item-text item)
+      (when text
+        (make-thinking-delta
+         text
+         :content-index idx
+         :replacement-p t
+         :source source
+         :signature (%responses-reasoning-item-signature item))))))
+
 (defun map-responses-event (event-name data-string emit)
   "Parse DATA-STRING and EMIT the corresponding runtime delta(s), if any.
 Keys off the JSON \"type\" field -- the SSE event line is redundant, so
@@ -118,9 +157,18 @@ EVENT-NAME is ignored. Maps Responses stream events to block-aware deltas."
          (funcall emit (make-block-start-delta (%item-kind item) :content-index idx))
          (let ((identity (%function-call-identity-delta item idx)))
            (when identity (funcall emit identity)))))
-      ((member type '("response.reasoning_text.delta"
-                      "response.reasoning_summary_text.delta") :test #'equal)
-       (funcall emit (make-thinking-delta (gethash "delta" obj) :content-index idx)))
+      ((equal type "response.reasoning_text.delta")
+       (funcall emit (make-thinking-delta (gethash "delta" obj)
+                                          :content-index idx
+                                          :source :raw)))
+      ((equal type "response.reasoning_summary_text.delta")
+       (funcall emit (make-thinking-delta (gethash "delta" obj)
+                                          :content-index idx
+                                          :source :summary)))
+      ((equal type "response.reasoning_summary_part.done")
+       (funcall emit (make-thinking-delta (format nil "~%~%")
+                                          :content-index idx
+                                          :source :summary)))
       ((member type '("response.output_text.delta"
                       "response.refusal.delta") :test #'equal)
        (funcall emit (make-assistant-delta (gethash "delta" obj) :content-index idx)))
@@ -129,8 +177,11 @@ EVENT-NAME is ignored. Maps Responses stream events to block-aware deltas."
                                            (list :partial-json (gethash "delta" obj))
                                            :content-index idx)))
       ((equal type "response.output_item.done")
-       (funcall emit (make-block-end-delta (%item-kind (gethash "item" obj))
-                                           :content-index idx)))
+       (let ((item (gethash "item" obj)))
+         (let ((reasoning (%responses-final-reasoning-delta item idx)))
+           (when reasoning (funcall emit reasoning)))
+         (funcall emit (make-block-end-delta (%item-kind item)
+                                             :content-index idx))))
       ((member type '("response.completed" "response.incomplete") :test #'equal)
        (let* ((resp (gethash "response" obj))
               (usage (and (hash-table-p resp) (gethash "usage" resp))))
@@ -151,10 +202,23 @@ EVENT-NAME is ignored. Maps Responses stream events to block-aware deltas."
         "strict" nil))
 
 (defun %responses-function-call-item (tc)
-  (%obj "type" "function_call"
-        "call_id" (getf tc :id)
-        "name" (getf tc :name)
-        "arguments" (%tool-call-arguments-string tc)))
+  (let ((tc (%normalize-tool-call-for-wire tc)))
+    (%obj "type" "function_call"
+          "call_id" (getf tc :id)
+          "name" (getf tc :name)
+          "arguments" (%tool-call-arguments-string tc))))
+
+(defun %responses-assistant-output-items (content tool-calls)
+  (let ((items '()))
+    (unless (%blankp content)
+      (push (%obj "type" "message" "role" "assistant"
+                  "content" (list (%obj "type" "output_text"
+                                        "text" content
+                                        "annotations" #())))
+            items))
+    (dolist (tc tool-calls)
+      (push (%responses-function-call-item tc) items))
+    (nreverse items)))
 
 (defun convert-responses-input (messages &key developer-role-p)
   "Converted kli message plists to Responses `input` vector. A kli message
@@ -162,31 +226,25 @@ EVENT-NAME is ignored. Maps Responses stream events to block-aware deltas."
 top-level `instructions` field. Harness operator content takes the developer
 role when DEVELOPER-ROLE-P, else a <harness-context> user wrap; reference content
 lowers to an untrusted_text fence."
-  (let ((has-reference (%has-reference-p messages)))
+  (let* ((messages (%assert-provider-message-sequence messages))
+         (has-reference (%has-reference-p messages)))
     (coerce
      (loop for m in messages
-           for content = (getf m :content)
+           for content = (%provider-text-content (getf m :content))
            append (case (getf m :role)
-                    (:user (list (%obj "type" "message" "role" "user"
-                                       "content" (list (%obj "type" "input_text"
-                                                             "text" (princ-to-string content))))))
+                    ((:user :summary)
+                     (list (%obj "type" "message" "role" "user"
+                                 "content" (list (%obj "type" "input_text"
+                                                       "text" content)))))
                     (:assistant
-                     (let ((items '()))
-                       (unless (%blankp (princ-to-string content))
-                         (push (%obj "type" "message" "role" "assistant"
-                                     "content" (list (%obj "type" "output_text"
-                                                           "text" (princ-to-string content)
-                                                           "annotations" #())))
-                               items))
-                       (dolist (tc (getf m :tool-calls))
-                         (push (%responses-function-call-item tc) items))
-                       (nreverse items)))
+                     (%responses-assistant-output-items
+                      content (getf m :tool-calls)))
                     (:tool-result (list (%obj "type" "function_call_output"
-                                              "call_id" (getf m :tool-call-id)
+                                              "call_id" (%tool-result-call-id-for-wire m)
                                               "output" (%tool-result-content m))))
                     (:harness-context
                      (let ((trust (getf m :trust))
-                           (text (princ-to-string content)))
+                           (text content))
                        (if (eq trust :operator)
                            (let ((op (%operator-content text +untrusted-anchor+ has-reference)))
                              (list (%obj "type" "message"
@@ -207,9 +265,18 @@ lowers to an untrusted_text fence."
 (defparameter +reasoning-effort+
   '(:minimal "minimal" :low "low" :medium "medium" :high "high" :xhigh "xhigh"))
 
+(defparameter +reasoning-summary+
+  '(:auto "auto" :concise "concise" :detailed "detailed" :none "none"))
+
+(defun %responses-reasoning-summary-value (reasoning-summary)
+  (or (getf +reasoning-summary+ reasoning-summary)
+      (and reasoning-summary (%wire-option-value reasoning-summary))
+      "auto"))
+
 (defun build-responses-body-object (model-id messages
                                     &key (instructions "You are a helpful assistant.")
-                                      reasoning-effort tools session-id text-verbosity
+                                      reasoning-effort reasoning-summary
+                                      tools session-id text-verbosity
                                       service-tier prompt-cache-retention
                                       developer-role-p)
   (let ((body (%obj "model" model-id
@@ -233,18 +300,23 @@ lowers to an untrusted_text fence."
         (setf (gethash "prompt_cache_retention" body) retention)))
     (let ((effort (getf +reasoning-effort+ reasoning-effort)))
       (when effort
-        (setf (gethash "reasoning" body) (%obj "effort" effort "summary" "auto"))))
+        (setf (gethash "reasoning" body)
+              (%obj "effort" effort
+                    "summary" (%responses-reasoning-summary-value
+                               reasoning-summary)))))
     body))
 
 (defun build-responses-body (model-id messages
                              &key (instructions "You are a helpful assistant.")
-                               reasoning-effort tools session-id text-verbosity
+                               reasoning-effort reasoning-summary
+                               tools session-id text-verbosity
                                service-tier prompt-cache-retention
                                developer-role-p)
   (com.inuoe.jzon:stringify
    (build-responses-body-object model-id messages
                                 :instructions instructions
                                 :reasoning-effort reasoning-effort
+                                :reasoning-summary reasoning-summary
                                 :tools tools
                                 :session-id session-id
                                 :text-verbosity text-verbosity
@@ -289,6 +361,8 @@ NIL routes through websocket-driver-client.")
   socket
   continuation
   busy
+  opened-at
+  last-used-at
   (requests 0)
   (full-requests 0)
   (delta-requests 0)
@@ -300,7 +374,8 @@ NIL routes through websocket-driver-client.")
   socket
   reused
   cached
-  busy-fallback)
+  busy-fallback
+  retired)
 
 (defstruct responses-output-collector
   response-id
@@ -310,6 +385,12 @@ NIL routes through websocket-driver-client.")
 (defvar *codex-websocket-sessions* (make-hash-table :test #'equal))
 (defvar *codex-websocket-sessions-lock*
   (sb-thread:make-mutex :name "codex-websocket-sessions"))
+
+(defparameter *codex-websocket-idle-ttl-seconds* 300)
+(defparameter *codex-websocket-max-age-seconds* 3300)
+
+(defun %now-seconds ()
+  (get-universal-time))
 
 (defun %copy-json-object-except (object keys)
   (let ((copy (make-hash-table :test #'equal)))
@@ -451,10 +532,10 @@ NIL routes through websocket-driver-client.")
                         :arguments-json (%collector-tool-arguments deltas)))))
 
 (defun %collector-response-items (collector)
-  (convert-responses-input
-   (list (list :role :assistant
-               :content (%collector-text collector)
-               :tool-calls (%collector-tool-calls collector)))))
+  (coerce (%responses-assistant-output-items
+           (%collector-text collector)
+           (%collector-tool-calls collector))
+          'vector))
 
 (defun %note-completed-response-id (collector data-string)
   (let* ((obj (parse-sse-payload data-string))
@@ -531,15 +612,56 @@ NIL routes through websocket-driver-client.")
           (setf (gethash session-id *codex-websocket-sessions*)
                 (make-codex-websocket-session))))))
 
+(defun %mark-codex-websocket-opened (state)
+  (when state
+    (let ((now (%now-seconds)))
+      (sb-thread:with-mutex (*codex-websocket-sessions-lock*)
+        (setf (codex-websocket-session-opened-at state) now
+              (codex-websocket-session-last-used-at state) now)))))
+
+(defun %mark-codex-websocket-used (state)
+  (when state
+    (sb-thread:with-mutex (*codex-websocket-sessions-lock*)
+      (setf (codex-websocket-session-last-used-at state) (%now-seconds)))))
+
+(defun %codex-websocket-session-expired-p (state)
+  (when state
+    (let ((now (%now-seconds))
+          (opened-at (codex-websocket-session-opened-at state))
+          (last-used-at (codex-websocket-session-last-used-at state)))
+      (or (and last-used-at
+               (> (- now last-used-at)
+                  *codex-websocket-idle-ttl-seconds*))
+          (and opened-at
+               (> (- now opened-at)
+                  *codex-websocket-max-age-seconds*))))))
+
 (defun %websocket-open-p (socket)
   (and socket
        (ignore-errors (eq (websocket-driver:ready-state socket) :open))))
 
-(defun %close-codex-websocket-session (state)
+(defun %codex-websocket-stream (socket)
+  (ignore-errors (websocket-driver:socket socket)))
+
+(defun %shutdown-codex-websocket (socket)
+  (let ((stream (%codex-websocket-stream socket)))
+    (when stream
+      (shutdown-request-stream stream)
+      t)))
+
+(defun %discard-codex-websocket-session (state)
   (let ((socket (and state (codex-websocket-session-socket state))))
     (when socket
-      (ignore-errors (websocket-driver:close-connection socket))
-      (setf (codex-websocket-session-socket state) nil))))
+      (%shutdown-codex-websocket socket)))
+  (when state
+    (sb-thread:with-mutex (*codex-websocket-sessions-lock*)
+      (setf (codex-websocket-session-socket state) nil
+            (codex-websocket-session-continuation state) nil
+            (codex-websocket-session-opened-at state) nil
+            (codex-websocket-session-last-used-at state) nil))))
+
+(defun %close-codex-websocket-session (state)
+  (%discard-codex-websocket-session state))
 
 (defun %make-codex-websocket (url headers)
   (let ((socket (websocket-driver:make-client url :additional-headers headers)))
@@ -562,18 +684,21 @@ NIL routes through websocket-driver-client.")
 (defun %open-codex-websocket-acquisition (acquisition url headers)
   (handler-case
       (if (codex-websocket-acquisition-cached acquisition)
-          (let* ((state (codex-websocket-acquisition-state acquisition))
-                 (reused (%websocket-open-p
-                          (codex-websocket-session-socket state))))
-            (unless reused
-              (%close-codex-websocket-session state)
-              (setf (codex-websocket-session-socket state)
-                    (%make-codex-websocket url headers)))
-            (setf (codex-websocket-acquisition-socket acquisition)
-                  (codex-websocket-session-socket state)
-                  (codex-websocket-acquisition-reused acquisition)
-                  reused)
-            acquisition)
+          (let ((state (codex-websocket-acquisition-state acquisition)))
+            (when (%codex-websocket-session-expired-p state)
+              (%discard-codex-websocket-session state))
+            (let ((reused (%websocket-open-p
+                           (codex-websocket-session-socket state))))
+              (unless reused
+                (%close-codex-websocket-session state)
+                (setf (codex-websocket-session-socket state)
+                      (%make-codex-websocket url headers))
+                (%mark-codex-websocket-opened state))
+              (setf (codex-websocket-acquisition-socket acquisition)
+                    (codex-websocket-session-socket state)
+                    (codex-websocket-acquisition-reused acquisition)
+                    reused)
+              acquisition))
           (progn
             (setf (codex-websocket-acquisition-socket acquisition)
                   (%make-codex-websocket url headers)
@@ -593,18 +718,40 @@ NIL routes through websocket-driver-client.")
    (%claim-codex-websocket-session state)
    url headers))
 
+(defun %retire-codex-websocket-acquisition (acquisition)
+  (let ((socket (and acquisition
+                     (codex-websocket-acquisition-socket acquisition))))
+    (when acquisition
+      (setf (codex-websocket-acquisition-retired acquisition) t))
+    (when socket
+      (%shutdown-codex-websocket socket))
+    (when (and acquisition
+               (codex-websocket-acquisition-cached acquisition))
+      (let ((state (codex-websocket-acquisition-state acquisition)))
+        (sb-thread:with-mutex (*codex-websocket-sessions-lock*)
+          (when (eq (codex-websocket-session-socket state) socket)
+            (setf (codex-websocket-session-socket state) nil
+                  (codex-websocket-session-continuation state) nil
+                  (codex-websocket-session-opened-at state) nil
+                  (codex-websocket-session-last-used-at state) nil)))))))
+
 (defun %release-codex-websocket (acquisition keep)
   (when acquisition
     (if (codex-websocket-acquisition-cached acquisition)
         (let ((state (codex-websocket-acquisition-state acquisition)))
-          (unless keep
+          (unless (or keep
+                      (codex-websocket-acquisition-retired acquisition))
             (%close-codex-websocket-session state)
             (setf (codex-websocket-session-continuation state) nil))
+          (when (and keep
+                     (not (codex-websocket-acquisition-retired acquisition)))
+            (%mark-codex-websocket-used state))
           (sb-thread:with-mutex (*codex-websocket-sessions-lock*)
             (setf (codex-websocket-session-busy state) nil)))
         (let ((socket (codex-websocket-acquisition-socket acquisition)))
-          (when socket
-            (ignore-errors (websocket-driver:close-connection socket)))))))
+          (when (and socket
+                     (not (codex-websocket-acquisition-retired acquisition)))
+            (%shutdown-codex-websocket socket))))))
 
 (defun %codex-websocket-effective-cached-context-p (acquisition cached-context-p)
   (and cached-context-p
@@ -621,15 +768,12 @@ NIL routes through websocket-driver-client.")
     (values text (parse-sse-payload text))))
 
 (defun %stream-real-codex-websocket (request url body headers acquisition collector emit on-start)
-  (let* ((opened (%open-codex-websocket-acquisition acquisition url headers))
-         (socket (codex-websocket-acquisition-socket opened))
-         (reused (codex-websocket-acquisition-reused opened))
-         (state (and (codex-websocket-acquisition-cached opened)
-                     (codex-websocket-acquisition-state opened)))
-         (connection-stats (%record-codex-websocket-connection state reused))
+  (let* ((opened nil)
+         (socket nil)
          (queue '())
          (done nil)
          (failure nil)
+         (close-requested nil)
          (saw-completion nil)
          (lock (sb-thread:make-mutex :name "codex-websocket-stream"))
          (ready (sb-thread:make-semaphore :name "codex-websocket-stream" :count 0))
@@ -637,13 +781,18 @@ NIL routes through websocket-driver-client.")
          (on-error nil)
          (on-close nil)
          (keep nil))
-    (note-model-stream-timing
-     (model-request-stream request)
-     :websocket-connection
-     :detail (list* :reused (and reused t)
-                    :created (not reused)
-                    connection-stats))
     (labels ((wake () (sb-thread:signal-semaphore ready))
+             (request-close ()
+               (sb-thread:with-mutex (lock)
+                 (setf close-requested t))
+               (wake))
+             (close-requested-p ()
+               (sb-thread:with-mutex (lock)
+                 close-requested))
+             (abort-if-close-requested ()
+               (when (close-requested-p)
+                 (%retire-codex-websocket-acquisition opened)
+                 (error "Codex WebSocket request aborted")))
              (push-message (message)
                (handler-case
                    (multiple-value-bind (text obj)
@@ -678,25 +827,42 @@ NIL routes through websocket-driver-client.")
                        (wake)))
       (unwind-protect
            (progn
+             (setf (model-request-stream-closer request) #'request-close)
+             (setf opened (%open-codex-websocket-acquisition acquisition url headers)
+                   socket (codex-websocket-acquisition-socket opened))
+             (let* ((reused (codex-websocket-acquisition-reused opened))
+                    (state (and (codex-websocket-acquisition-cached opened)
+                                (codex-websocket-acquisition-state opened)))
+                    (connection-stats (%record-codex-websocket-connection state reused)))
+               (note-model-stream-timing
+                (model-request-stream request)
+                :websocket-connection
+                :detail (list* :reused (and reused t)
+                               :created (not reused)
+                               connection-stats)))
+             (abort-if-close-requested)
              (event-emitter:on :message socket on-message)
              (event-emitter:on :error socket on-error)
              (event-emitter:on :close socket on-close)
-             (setf (model-request-stream-closer request)
-                   (lambda () (ignore-errors
-                                (websocket-driver:close-connection socket))))
+             (abort-if-close-requested)
              (websocket-driver:send-text socket body)
              (loop
                (let ((next nil)
                      (failed nil)
+                     (close-now nil)
                      (finished nil))
                  (sb-thread:with-mutex (lock)
                    (when queue
                      (setf next (pop queue)))
                    (setf failed failure
+                         close-now close-requested
                          finished (and done (null queue))))
                  (cond
                    (next
                     (%process-codex-websocket-event request next collector emit on-start))
+                   (close-now
+                    (%retire-codex-websocket-acquisition opened)
+                    (error "Codex WebSocket request aborted"))
                    (failed (error failed))
                    (finished (return))
                    (t (sb-thread:wait-on-semaphore ready)))))
@@ -705,18 +871,43 @@ NIL routes through websocket-driver-client.")
         (ignore-errors (event-emitter:remove-listener socket :error on-error))
         (ignore-errors (event-emitter:remove-listener socket :close on-close))
         (setf (model-request-stream-closer request) nil)
-        (%release-codex-websocket opened keep)))))
+        (when opened
+          (%release-codex-websocket opened keep))))))
 
 (defun %stream-codex-websocket (request url body headers acquisition collector emit on-start)
   (if *codex-websocket-stream*
-      (let ((stream (funcall *codex-websocket-stream* url body headers request)))
-        (setf (model-request-stream-closer request)
-              (lambda () (shutdown-request-stream stream)))
+      (let ((stream nil)
+            (keep nil))
         (unwind-protect
-             (%stream-codex-websocket-lines request stream collector emit on-start)
+             (progn
+               (setf stream
+                     (funcall *codex-websocket-stream*
+                              url body headers request))
+               (setf (model-request-stream-closer request)
+                     (lambda () (shutdown-request-stream stream)))
+               (%stream-codex-websocket-lines request stream collector emit on-start)
+               (setf keep t))
           (setf (model-request-stream-closer request) nil)
-          (%release-codex-websocket acquisition t)))
+          (%release-codex-websocket acquisition keep)))
       (%stream-real-codex-websocket request url body headers acquisition collector emit on-start)))
+
+(defun %prepare-codex-websocket-attempt (state cached-context-p body-object
+                                         &key force-full)
+  (let* ((acquisition (%claim-codex-websocket-session state))
+         (body-state (%codex-websocket-body-state
+                      state acquisition cached-context-p))
+         (effective-cached-context-p
+           (and (not force-full)
+                (%codex-websocket-effective-cached-context-p
+                 acquisition cached-context-p))))
+    (multiple-value-bind (request-body request-kind)
+        (%websocket-request-body body-state body-object
+                                 effective-cached-context-p)
+      (values request-body
+              request-kind
+              acquisition
+              effective-cached-context-p
+              (%websocket-wire-body request-body)))))
 
 (defun %remember-codex-websocket-continuation (state full-body collector)
   (when (and state (responses-output-collector-response-id collector))
@@ -783,7 +974,8 @@ through a real streaming drakma POST.")
       (ignore-errors (close stream)))))
 
 (defun %note-responses-payload (request api body url messages
-                                &key include reasoning-effort service-tier
+                                &key include reasoning-effort reasoning-summary
+                                  service-tier
                                   prompt-cache-retention session-id
                                   text-verbosity transport-mode
                                   cached-context request-kind input-items
@@ -796,7 +988,8 @@ through a real streaming drakma POST.")
                          :reasoning-effort reasoning-effort
                          :reasoning-summary (and (getf +reasoning-effort+
                                                         reasoning-effort)
-                                                 "auto")
+                                                 (%responses-reasoning-summary-value
+                                                  reasoning-summary))
                          :service-tier service-tier
                          :prompt-cache-retention prompt-cache-retention
                          :session-id-present (not (null session-id))
@@ -808,6 +1001,43 @@ through a real streaming drakma POST.")
                          :full-input-items full-input-items
                          :delta-input-items delta-input-items
                          :websocket-stats websocket-stats))
+
+(defun %json-error-code (object)
+  (when (hash-table-p object)
+    (let ((error (gethash "error" object)))
+      (or (gethash "code" object)
+          (gethash "type" object)
+          (and (hash-table-p error)
+               (or (gethash "code" error)
+                   (gethash "type" error)))))))
+
+(defun %condition-error-body (condition)
+  (cond
+    ((typep condition 'openai-api-error)
+     (openai-api-error-body condition))
+    ((typep condition 'model-network-error)
+     (princ-to-string (model-network-error-cause condition)))
+    (t (princ-to-string condition))))
+
+(defun %condition-error-code (condition)
+  (let ((body (%condition-error-body condition)))
+    (cond
+      ((hash-table-p body) (%json-error-code body))
+      ((stringp body)
+       (or (ignore-errors (%json-error-code (parse-sse-payload body)))
+           (find-if (lambda (code) (%contains-ci-p code body))
+                    '("previous_response_not_found"
+                      "websocket_connection_limit_reached"))))
+      (t nil))))
+
+(defun %websocket-error-code-p (condition code)
+  (equal code (%condition-error-code condition)))
+
+(defun %previous-response-not-found-p (condition)
+  (%websocket-error-code-p condition "previous_response_not_found"))
+
+(defun %websocket-connection-limit-reached-p (condition)
+  (%websocket-error-code-p condition "websocket_connection_limit_reached"))
 
 (defun %fallbackable-websocket-error-p (condition)
   (not (eq (ignore-errors (kli/ext:condition-category condition)) :provider)))
@@ -834,6 +1064,7 @@ the provider transport profile."
                              "You are a helpful assistant."))
            (selection (model-request-selection request))
            (reasoning-effort (model-selection-option-value selection "reasoning-effort"))
+           (reasoning-summary (model-selection-option-value selection "reasoning-summary"))
            (text-verbosity (or (model-selection-option-value selection "text-verbosity")
                                (%transport-profile-value provider-profile :text-verbosity)))
            (service-tier (model-selection-option-value selection "service-tier"))
@@ -857,6 +1088,7 @@ the provider transport profile."
                          messages
                          :instructions instructions
                          :reasoning-effort reasoning-effort
+                         :reasoning-summary reasoning-summary
                          :tools (model-request-tool-schemas request)
                          :session-id session-id
                          :text-verbosity text-verbosity
@@ -883,66 +1115,112 @@ the provider transport profile."
            (state (and websocket-p
                        (%get-codex-websocket-session session-id))))
       (if websocket-p
-          (let* ((collector (make-responses-output-collector))
-                 (started nil)
-                 (ws-url (%codex-websocket-url url))
-                 (acquisition (%claim-codex-websocket-session state))
-                 (body-state (%codex-websocket-body-state
-                              state acquisition cached-context-p))
-                 (effective-cached-context-p
-                   (%codex-websocket-effective-cached-context-p
-                    acquisition cached-context-p)))
-            (multiple-value-bind (request-body request-kind)
-                (%websocket-request-body body-state body-object
-                                         effective-cached-context-p)
-              (let* ((websocket-stats
-                       (%record-codex-websocket-request body-state request-kind))
-                     (wire-body (%websocket-wire-body request-body))
-                     (input-items (%json-input-count request-body))
-                     (full-input-items (%json-input-count body-object))
-                     (delta-input-items (and (eq request-kind :delta)
-                                             input-items))
-                     (headers (build-codex-websocket-headers
-                               token account-id extra
-                               :session-id (or session-id
-                                               (princ-to-string (object-id request)))
-                               :account-id-header account-id-header
-                               :user-agent user-agent)))
-                (%note-responses-payload
-                 request :openai-codex-websocket wire-body ws-url messages
-                 :include '("reasoning.encrypted_content")
-                 :reasoning-effort reasoning-effort
-                 :service-tier service-tier
-                 :prompt-cache-retention prompt-cache-retention
-                 :session-id session-id
-                 :text-verbosity text-verbosity
-                 :transport-mode transport-mode
-                 :cached-context effective-cached-context-p
-                 :request-kind request-kind
-                 :input-items input-items
-                 :full-input-items full-input-items
-                 :delta-input-items delta-input-items
-                 :websocket-stats websocket-stats)
-                (handler-case
-                    (progn
-                      (%stream-codex-websocket
-                       request ws-url wire-body headers acquisition collector emit
-                       (lambda () (setf started t)))
-                      (when effective-cached-context-p
-                        (%remember-codex-websocket-continuation
-                         state body-object collector)))
-                  (error (condition)
-                    (when effective-cached-context-p
-                      (setf (codex-websocket-session-continuation state) nil))
-                    (when (or started
-                              (not (%fallbackable-websocket-error-p condition)))
-                      (error condition))
-                    (%stream-responses-sse request url body sse-headers emit))))))
+          (let* ((ws-url (%codex-websocket-url url))
+                 (headers (build-codex-websocket-headers
+                           token account-id extra
+                           :session-id (or session-id
+                                           (princ-to-string (object-id request)))
+                           :account-id-header account-id-header
+                           :user-agent user-agent)))
+            (labels ((discard-idle-state ()
+                       (when (and state
+                                  (not (codex-websocket-session-busy state)))
+                         (%discard-codex-websocket-session state)))
+                     (run-attempt (&key force-full)
+                       (let ((collector (make-responses-output-collector))
+                             (started nil))
+                         (multiple-value-bind (request-body request-kind
+                                               acquisition
+                                               effective-cached-context-p
+                                               wire-body)
+                             (%prepare-codex-websocket-attempt
+                              state cached-context-p body-object
+                              :force-full force-full)
+                           (let* ((body-state (%codex-websocket-body-state
+                                               state acquisition
+                                               cached-context-p))
+                                  (websocket-stats
+                                    (%record-codex-websocket-request
+                                     body-state request-kind))
+                                  (input-items (%json-input-count request-body))
+                                  (full-input-items
+                                    (%json-input-count body-object))
+                                  (delta-input-items
+                                    (and (eq request-kind :delta)
+                                         input-items)))
+                             (%note-responses-payload
+                              request :openai-codex-websocket wire-body ws-url messages
+                              :include '("reasoning.encrypted_content")
+                              :reasoning-effort reasoning-effort
+                              :reasoning-summary reasoning-summary
+                              :service-tier service-tier
+                              :prompt-cache-retention prompt-cache-retention
+                              :session-id session-id
+                              :text-verbosity text-verbosity
+                              :transport-mode transport-mode
+                              :cached-context effective-cached-context-p
+                              :request-kind request-kind
+                              :input-items input-items
+                              :full-input-items full-input-items
+                              :delta-input-items delta-input-items
+                              :websocket-stats websocket-stats)
+                             (handler-case
+                                 (progn
+                                   (%stream-codex-websocket
+                                    request ws-url wire-body headers acquisition
+                                    collector emit
+                                    (lambda () (setf started t)))
+                                   (when (and cached-context-p
+                                              (codex-websocket-acquisition-cached
+                                               acquisition))
+                                     (%remember-codex-websocket-continuation
+                                      state body-object collector))
+                                   (list :ok t :started started))
+                               (error (condition)
+                                 (when (and state
+                                            (codex-websocket-acquisition-cached
+                                             acquisition))
+                                   (setf (codex-websocket-session-continuation
+                                          state)
+                                         nil))
+                                 (list :ok nil
+                                       :started started
+                                       :condition condition
+                                       :request-kind request-kind)))))))
+                     (fallback-or-error (result)
+                       (let ((condition (getf result :condition)))
+                         (discard-idle-state)
+                         (when (or (getf result :started)
+                                   (not (%fallbackable-websocket-error-p
+                                         condition)))
+                           (error condition))
+                         (%stream-responses-sse
+                          request url body sse-headers emit))))
+              (let ((result (run-attempt)))
+                (cond
+                  ((getf result :ok) nil)
+                  ((getf result :started) (error (getf result :condition)))
+                  ((%previous-response-not-found-p (getf result :condition))
+                   (when state
+                     (setf (codex-websocket-session-continuation state) nil))
+                   (let ((retry (run-attempt :force-full t)))
+                     (if (getf retry :ok)
+                         nil
+                         (fallback-or-error retry))))
+                  ((%websocket-connection-limit-reached-p
+                    (getf result :condition))
+                   (discard-idle-state)
+                   (let ((retry (run-attempt :force-full t)))
+                     (if (getf retry :ok)
+                         nil
+                         (fallback-or-error retry))))
+                  (t (fallback-or-error result))))))
           (progn
             (%note-responses-payload
              request :openai-responses body url messages
              :include '("reasoning.encrypted_content")
              :reasoning-effort reasoning-effort
+             :reasoning-summary reasoning-summary
              :service-tier service-tier
              :prompt-cache-retention prompt-cache-retention
              :session-id session-id

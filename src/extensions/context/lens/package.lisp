@@ -24,9 +24,17 @@
                 #:custom-entry-p
                 #:entry-custom-type
                 #:entry-data
+                #:entry-agent-message
+                #:transcript-repair-entry
+                #:entry-repair-kind
+                #:entry-repair-policy
+                #:make-transcript-repair-entry
                 #:session-context-entries
                 #:session-context-messages
                 #:session-leaf-id
+                #:message-role
+                #:message-metadata
+                #:tool-call-id
                 #:serialize-record
                 #:serialize-value
                 #:deserialize-value
@@ -37,6 +45,11 @@
   (:export
    #:agent-context
    #:context-projection
+   #:context-view
+   #:context-view-item
+   #:context-view-payload
+   #:sealed-context-view
+   #:context-view-validation-error
    #:context-patch
    #:context-patch-set
    #:sealed-context
@@ -63,7 +76,28 @@
    #:projection-entries
    #:projection-leaf-id
    #:projection-epoch
-   #:sealed-context-messages
+   #:context-view-kind
+   #:context-view-source-id
+   #:context-view-source-epoch
+   #:context-view-items
+   #:context-view-provenance
+   #:context-view-policy
+   #:context-view-item-id
+   #:context-view-item-payload
+   #:context-view-item-payload-kind
+   #:context-view-item-payload-value
+   #:context-view-item-ordinal
+   #:context-view-item-group-id
+   #:context-view-payload-kind
+   #:context-view-payload-value
+   #:context-view-payload-metadata
+   #:context-view-validation-diagnostic
+   #:context-view-provenance-for-item
+   #:sealed-context-view
+   #:sealed-context-view-sealed-id
+   #:sealed-context-view-base-view-kind
+   #:sealed-context-view-leaf-id
+   #:sealed-context-view-sealed-at
    #:sealed-context-epoch
    #:sealed-context-source-context-id
    #:sealed-context-leaf-id
@@ -84,7 +118,15 @@
    #:abort-context-patches
    #:seal-context-projection
    #:seal-range-projection
-   #:context-model-messages
+   #:editable-context-view
+   #:transcript-context-view
+   #:summarizer-context-view
+   #:provider-replay-context-view
+   #:resolve-transcript-repair-policy
+   #:transcript-display-items
+   #:summarizer-input-items
+   #:provider-replay-items
+   #:provider-replay-messages
    #:context-epoch
    #:*context-lens-extension-manifest*))
 
