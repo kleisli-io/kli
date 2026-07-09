@@ -1190,6 +1190,71 @@ along on the request for exercising the codex compatibility path."
                             (transports::codex-websocket-session-continuation
                              state)))))))))))
 
+(test (codex-websocket-error-frame-previous-response-not-found-retries-full-context
+       :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id")
+             :session-id "sess-ws-prev-missing-frame")
+          (let ((attempts 0)
+                (captured-bodies '())
+                (signaled nil))
+            (let ((transports:*codex-websocket-stream*
+                    (lambda (url body headers req)
+                      (declare (ignore url headers req))
+                      (incf attempts)
+                      (push body captured-bodies)
+                      (make-string-input-stream
+                       (if (= attempts 2)
+                           (format nil "~A~%"
+                                   "{\"type\":\"error\",\"error\":{\"code\":\"previous_response_not_found\",\"message\":\"missing previous response\"}}")
+                           *responses-canned-websocket-stream*)))))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")))
+              (transports:openai-responses-adapter
+               provider request context
+               :emit (lambda (d) (declare (ignore d)) nil))
+              (setf (rt:model-request-model-messages request)
+                    '((:role :user :content "hi")
+                      (:role :assistant :content "Hello")
+                      (:role :user :content "again")))
+              (handler-case
+                  (transports:openai-responses-adapter
+                   provider request context
+                   :emit (lambda (d) (declare (ignore d)) nil))
+                (transports:openai-api-error (condition)
+                  (setf signaled condition))))
+            (is (null signaled)
+                "previous_response_not_found websocket error frames should retry full context")
+            (is (= 3 attempts))
+            (when (= 3 attempts)
+              (let* ((bodies (reverse captured-bodies))
+                     (delta-body (com.inuoe.jzon:parse (second bodies)))
+                     (retry-body (com.inuoe.jzon:parse (third bodies)))
+                     (state (gethash "sess-ws-prev-missing-frame"
+                                     transports::*codex-websocket-sessions*)))
+                (is (string= "resp-1"
+                             (gethash "previous_response_id" delta-body)))
+                (is (= 1 (length (gethash "input" delta-body))))
+                (is (null (gethash "previous_response_id" retry-body)))
+                (is (= 3 (length (gethash "input" retry-body))))
+                (is (string= "resp-1"
+                             (transports::codex-websocket-continuation-last-response-id
+                              (transports::codex-websocket-session-continuation
+                               state))))))))))))
+
 (test (codex-websocket-connection-limit-retries-full-context :fixture interactive-authority)
   (clrhash transports::*codex-websocket-sessions*)
   (multiple-value-bind (context protocol) (model-runtime-test-context)

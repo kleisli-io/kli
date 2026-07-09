@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-09
+
+### Fixed
+
+- Codex Responses WebSocket continuations now recover from `previous_response_not_found` error frames by clearing the cached continuation and retrying the full conversation context. This fixes follow-up prompts surfacing "Previous response ... not found" or taking a slower retry path when a cached `previous_response_id` is no longer available on the server.
+
 ## [0.2.0] - 2026-07-09
 
 ### Headline changes
