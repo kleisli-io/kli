@@ -8,10 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.2.0] - 2026-07-09
 
+### Headline changes
+
+#### Context views make model requests explicit
+
+- **Provider replay is built from explicit context views.** KLI now uses explicit context views for durable session logs, editable context, summarizer input, provider replay, request audit, and provider-visible accounting. Model requests are built from deliberate provider-shaped replay instead of the generic transcript projection.
+
 ### Added
 
-- KLI now uses explicit context views for durable session logs, editable context, summarizer input, provider replay, request audit, and provider-visible accounting. This is the headline 0.2.0 change: model requests are built from deliberate provider-shaped replay instead of the generic transcript projection.
-- Development shells now expose a `kli-debug` image when debug Swank support is available, and `kli-workspace debug` / `kli-workspace debug-ephemeral` launch named or throwaway workspaces with that image.
+- Development shells now expose a `kli-debug` image when debug Swank support is available.
 
 ### Fixed
 
