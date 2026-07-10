@@ -1271,7 +1271,8 @@ model response and one context-projection refresh per model turn."
                                 :auth-required-p nil
                                 :option-schemas (list (test-reasoning-effort-schema))
                                 :metadata '(:fake-blocks
-                                            ((:kind :thinking :text ("Pon" "dering."))
+                                            ((:kind :thinking :text ("Pondering."))
+                                             (:kind :thinking :text ("Checking."))
                                              (:kind :text :text ("Done.")))))
       (declare (ignore _provider _selection))
       (let* ((selection (models:select-model (model-registry context) model context
@@ -1281,8 +1282,11 @@ model response and one context-projection refresh per model turn."
         (agents:prompt-agent agent "think" context)
         (let ((payloads (reverse *captured-agent-thinking-deltas*)))
           (is (= 2 (length payloads)))
-          (is (equal '("Pon" "dering.")
+          (is (equal '("Pondering." "Checking.")
                      (mapcar (lambda (p) (getf p :text)) payloads)))
+          (is (equal '(0 1)
+                     (mapcar (lambda (p) (getf p :content-index)) payloads))
+              "thinking events preserve their model content block")
           (is (every (lambda (p) (eq :high (getf p :level))) payloads)
               "each thinking delta carries the selection's effort level")
           (let ((turn-id (kli:object-id (first (agents:agent-turns agent)))))

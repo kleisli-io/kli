@@ -129,6 +129,7 @@
    #:scrollback-anchor-bottom
    #:scrollback-reset
    #:begin-scrollback-stream
+   #:invalidate-scrollback-stream-render
    #:finalize-scrollback-stream
    #:recode-scrollback-renderer
    #:*tui-transcript-extension-manifest*

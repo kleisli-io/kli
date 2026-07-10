@@ -263,7 +263,8 @@ lowers to an untrusted_text fence."
      'vector)))
 
 (defparameter +reasoning-effort+
-  '(:minimal "minimal" :low "low" :medium "medium" :high "high" :xhigh "xhigh"))
+  '(:minimal "minimal" :low "low" :medium "medium" :high "high"
+    :xhigh "xhigh" :max "max"))
 
 (defparameter +reasoning-summary+
   '(:auto "auto" :concise "concise" :detailed "detailed" :none "none"))
@@ -584,29 +585,25 @@ NIL routes through websocket-driver-client.")
   (member type '("response.completed" "response.done" "response.incomplete")
           :test #'string=))
 
-(defun %websocket-error-event-p (type)
-  (member type '("error" "response.failed") :test #'string=))
-
-(defun %process-codex-websocket-event (request data-string collector emit on-start)
+(defun %process-codex-websocket-event (request data-string collector emit on-emit)
   (let* ((obj (parse-sse-payload data-string))
          (type (and (hash-table-p obj) (gethash "type" obj))))
-    (unless (%websocket-error-event-p type)
-      (funcall on-start))
     (when (%completion-websocket-event-p type)
       (%note-completed-response-id collector data-string))
     (%note-provider-event request (or type "message") data-string)
     (map-responses-event type data-string
                          (lambda (delta)
+                           (funcall on-emit)
                            (%collector-note-delta collector delta)
                            (funcall emit delta)))
     type))
 
-(defun %stream-codex-websocket-lines (request stream collector emit on-start)
+(defun %stream-codex-websocket-lines (request stream collector emit on-emit)
   (unwind-protect
        (loop for line = (read-line stream nil nil)
              while line
              unless (zerop (length (string-trim '(#\Space #\Tab #\Return) line)))
-               do (%process-codex-websocket-event request line collector emit on-start))
+               do (%process-codex-websocket-event request line collector emit on-emit))
     (ignore-errors (close stream))))
 
 (defun %get-codex-websocket-session (session-id)
@@ -771,7 +768,7 @@ NIL routes through websocket-driver-client.")
   (let ((text (%websocket-message-string message)))
     (values text (parse-sse-payload text))))
 
-(defun %stream-real-codex-websocket (request url body headers acquisition collector emit on-start)
+(defun %stream-real-codex-websocket (request url body headers acquisition collector emit on-emit)
   (let* ((opened nil)
          (socket nil)
          (queue '())
@@ -863,7 +860,7 @@ NIL routes through websocket-driver-client.")
                          finished (and done (null queue))))
                  (cond
                    (next
-                    (%process-codex-websocket-event request next collector emit on-start))
+                    (%process-codex-websocket-event request next collector emit on-emit))
                    (close-now
                     (%retire-codex-websocket-acquisition opened)
                     (error "Codex WebSocket request aborted"))
@@ -878,7 +875,7 @@ NIL routes through websocket-driver-client.")
         (when opened
           (%release-codex-websocket opened keep))))))
 
-(defun %stream-codex-websocket (request url body headers acquisition collector emit on-start)
+(defun %stream-codex-websocket (request url body headers acquisition collector emit on-emit)
   (if *codex-websocket-stream*
       (let ((stream nil)
             (keep nil))
@@ -889,11 +886,11 @@ NIL routes through websocket-driver-client.")
                               url body headers request))
                (setf (model-request-stream-closer request)
                      (lambda () (shutdown-request-stream stream)))
-               (%stream-codex-websocket-lines request stream collector emit on-start)
+               (%stream-codex-websocket-lines request stream collector emit on-emit)
                (setf keep t))
           (setf (model-request-stream-closer request) nil)
           (%release-codex-websocket acquisition keep)))
-      (%stream-real-codex-websocket request url body headers acquisition collector emit on-start)))
+      (%stream-real-codex-websocket request url body headers acquisition collector emit on-emit)))
 
 (defun %prepare-codex-websocket-attempt (state cached-context-p body-object
                                          &key force-full)
@@ -1132,7 +1129,7 @@ the provider transport profile."
                          (%discard-codex-websocket-session state)))
                      (run-attempt (&key force-full)
                        (let ((collector (make-responses-output-collector))
-                             (started nil))
+                             (emitted nil))
                          (multiple-value-bind (request-body request-kind
                                                acquisition
                                                effective-cached-context-p
@@ -1173,13 +1170,13 @@ the provider transport profile."
                                    (%stream-codex-websocket
                                     request ws-url wire-body headers acquisition
                                     collector emit
-                                    (lambda () (setf started t)))
+                                    (lambda () (setf emitted t)))
                                    (when (and cached-context-p
                                               (codex-websocket-acquisition-cached
                                                acquisition))
                                      (%remember-codex-websocket-continuation
                                       state body-object collector))
-                                   (list :ok t :started started))
+                                   (list :ok t :emitted emitted))
                                (error (condition)
                                  (when (and state
                                             (codex-websocket-acquisition-cached
@@ -1188,13 +1185,13 @@ the provider transport profile."
                                           state)
                                          nil))
                                  (list :ok nil
-                                       :started started
+                                       :emitted emitted
                                        :condition condition
                                        :request-kind request-kind)))))))
                      (fallback-or-error (result)
                        (let ((condition (getf result :condition)))
                          (discard-idle-state)
-                         (when (or (getf result :started)
+                         (when (or (getf result :emitted)
                                    (not (%fallbackable-websocket-error-p
                                          condition)))
                            (error condition))
@@ -1203,7 +1200,7 @@ the provider transport profile."
               (let ((result (run-attempt)))
                 (cond
                   ((getf result :ok) nil)
-                  ((getf result :started) (error (getf result :condition)))
+                  ((getf result :emitted) (error (getf result :condition)))
                   ((%previous-response-not-found-p (getf result :condition))
                    (when state
                      (setf (codex-websocket-session-continuation state) nil))

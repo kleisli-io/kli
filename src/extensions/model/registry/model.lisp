@@ -96,7 +96,7 @@
 	       (make-model-option-definition
 	        "reasoning-effort" :enum
 	        :label "Reasoning effort"
-	        :enum-values '(:off :minimal :low :medium :high :xhigh))
+	        :enum-values '(:off :minimal :low :medium :high :xhigh :max))
 	       (make-model-option-definition
 	        "reasoning-summary" :enum
 	        :label "Reasoning summary"

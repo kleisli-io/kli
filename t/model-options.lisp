@@ -4,7 +4,7 @@
   (let ((reasoning (models:find-model-option-definition "reasoning-effort")))
     (is (not (null reasoning)))
     (is (eq :enum (models:model-option-definition-type reasoning)))
-	  (is (equal '(:off :minimal :low :medium :high :xhigh)
+	  (is (equal '(:off :minimal :low :medium :high :xhigh :max)
 	             (models:model-option-definition-enum-values reasoning))))
   (is (equal '(:auto :concise :detailed :none)
              (models:model-option-definition-enum-values

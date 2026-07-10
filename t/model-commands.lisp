@@ -594,10 +594,10 @@ answer instead of opening a menu."
       (let ((popup (tui-editor:editor-completion (tui-app:tui-app-editor app))))
         (is (not (null popup)))
         (is (eq :selection (tui-editor:completion-popup-kind popup)))
-        (is (equal '("off" "minimal" "low" "medium" "high" "xhigh")
+        (is (equal '("off" "minimal" "low" "medium" "high" "xhigh" "max")
                    (mapcar #'tui-editor:completion-candidate-insert
                            (tui-editor:completion-popup-candidates popup))))
-        (is (equal '("  " "  " "  " "  " "* " "  ")
+        (is (equal '("  " "  " "  " "  " "* " "  " "  ")
                    (mapcar #'tui-editor:completion-candidate-description
                            (tui-editor:completion-popup-candidates popup)))
             "the current level is marked"))

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-10
+
+### Changed
+
+- OpenAI and Codex model catalogues now include GPT-5.6 (`gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`) and remove deprecated GPT-5.4 entries. OpenAI-family reasoning effort now accepts `max`.
+
+### Fixed
+
+- Live `eval` and `recompile-rerun` now unwind SBCL control-stack exhaustion into a structured resource error. Interactive evals complete and retract their park, so runaway recursion no longer leaves the agent hung or terminates the KLI session, and later eval calls remain usable.
+- Codex Responses WebSocket requests that close after `response.created` but before emitting any model delta now discard the failed connection and fall back to SSE. Once output has been emitted, kli still refuses to replay the request, preventing duplicated text or tool calls.
+- Thinking streams now preserve separate reasoning content blocks, so final provider updates replace only their own block instead of removing earlier thinking entries from the same turn.
+
 ## [0.2.1] - 2026-07-09
 
 ### Fixed

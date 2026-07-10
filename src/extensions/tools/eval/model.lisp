@@ -187,27 +187,29 @@ while this thread holds the stream, so the park can surface it safely."
 
 (defun run-park-body (source park)
   "Evaluate SOURCE on the park thread; an unhandled error parks rather than
-unwinds. Records the terminal outcome -- (:values list count) or (:aborted) --
-and announces it. abort-eval is the outer restart eval-abort unwinds through."
+unwinds. Records the terminal outcome -- (:values list count), (:error plist),
+or (:aborted) -- and announces it. abort-eval is the outer restart eval-abort
+unwinds through."
   (let ((current-form nil))
     (let ((outcome
-            (restart-case
-                (handler-bind
-                    ((error (lambda (condition)
-                              (park-and-await park condition current-form))))
-                  (let ((values nil)
-                        (count 0))
-                    (with-source-forms (form source :current current-form)
-                      (incf count)
-                      (let ((warning (directive-warning form)))
-                        (when warning (push warning (eval-park-warnings park))))
-                      (setf values (multiple-value-list (eval form))))
-                    (when (zerop count)
-                      (error "Eval tool received no forms."))
-                    (list :values values count)))
-              (abort-eval ()
-                :report "Abort the interactive eval and unwind."
-                (list :aborted)))))
+            (with-eval-control-stack-capture (current-form)
+              (restart-case
+                  (handler-bind
+                      ((error (lambda (condition)
+                                (park-and-await park condition current-form))))
+                    (let ((values nil)
+                          (count 0))
+                      (with-source-forms (form source :current current-form)
+                        (incf count)
+                        (let ((warning (directive-warning form)))
+                          (when warning (push warning (eval-park-warnings park))))
+                        (setf values (multiple-value-list (eval form))))
+                      (when (zerop count)
+                        (error "Eval tool received no forms."))
+                      (list :values values count)))
+                (abort-eval ()
+                  :report "Abort the interactive eval and unwind."
+                  (list :aborted))))))
       ;; One capture site: *package* is live for every on-thread exit -- success
       ;; and the graceful abort-eval unwind alike. A killed thread never reaches
       ;; here, so its package is never recorded.
@@ -295,11 +297,11 @@ park ~A.~@[~%~A~]"
 
 (defun interactive-done-result (outcome park package timeout-seconds stdout truncated-p
                                 &key handle bytes protocol)
-  "Tool-result for a resolved interactive eval: a value or a clean abort. The
-:park/:resumed-p metadata rides only when the park was actually surfaced to the
-model, so an interactive eval that completes without ever parking is byte-
-identical to a plain success. HANDLE/BYTES point at the retained output backing;
-PROTOCOL retains an overflowing value."
+  "Tool-result for a resolved interactive eval: a value, captured resource
+error, or clean abort. The :park/:resumed-p metadata rides only when the park was
+actually surfaced to the model, so an interactive eval that completes without
+ever parking is byte-identical to a plain success. HANDLE/BYTES point at the
+retained output backing; PROTOCOL retains an overflowing value."
   (ecase (first outcome)
     (:values
      (eval-values-result (second outcome) (third outcome) package timeout-seconds
@@ -309,6 +311,13 @@ PROTOCOL retains an overflowing value."
                          :handle handle :bytes bytes :protocol protocol
                          :extra-details (when (eval-park-surfaced-p park)
                                           (list :park (object-id park) :resumed-p t))))
+    (:error
+     (eval-error-result (second outcome) package timeout-seconds stdout truncated-p
+                        :current-package (eval-park-final-package park)
+                        :warnings (reverse (eval-park-warnings park))
+                        :handle handle :bytes bytes
+                        :extra-details (when (eval-park-surfaced-p park)
+                                         (list :park (object-id park) :resumed-p t))))
     (:aborted
      (make-tool-result
       :content (list (make-tool-text-content

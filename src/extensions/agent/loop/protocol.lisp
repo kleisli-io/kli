@@ -200,6 +200,8 @@ steer-agent keeps the synchronous idle catch-up."
                              :agent/thinking-delta
                              :payload (list :turn-id (object-id turn)
                                             :request-id (object-id request)
+                                            :content-index
+                                            (model-delta-content-index delta)
                                             :text (thinking-delta-text delta)
                                             :replacement-p
                                             (thinking-delta-replacement-p

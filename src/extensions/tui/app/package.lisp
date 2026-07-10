@@ -74,6 +74,7 @@
                 #:transcript-clear
                 #:scrollback-reset
                 #:begin-scrollback-stream
+                #:invalidate-scrollback-stream-render
                 #:finalize-scrollback-stream
                 #:toggle-tool-output-expansion)
   (:import-from #:kli/tui/terminal

@@ -272,6 +272,39 @@ never fires."
       (is (not (boundp 'cl-user::*e1-rerun-probe*))
           "the re-run never ran, so :form's side effect did not fire"))))
 
+(test (eval-recompile-rerun-control-stack-exhaustion-is-contained
+       :fixture tool-authority)
+  "The SBCL control-stack exhaustion condition in either recompile-rerun phase
+is structured, and the eval service remains usable afterward."
+  (dolist (site '(:definition :rerun))
+    (let* ((context (kli:make-kernel-host))
+           (protocol (switch-to-extension-protocol context)))
+      (install-extensions context
+                          event:*events-extension-manifest*
+                          tools-eval:*eval-tool-extension-manifest*
+                          tools-eval:*recompile-rerun-tool-extension-manifest*)
+      (let* ((stack-condition "(error 'sb-kernel::control-stack-exhausted)")
+             (parameters
+               (if (eq site :definition)
+                   (list :definition stack-condition
+                         :form "(error \"must not run\")"
+                         :timeout "5")
+                   (list :definition "(defun cl-user::stack-probe () :ok)"
+                         :form stack-condition :timeout "5")))
+             (result (ext:invoke-tool protocol :recompile-rerun parameters context))
+             (details (ext:tool-result-details result))
+             (phase (getf details site)))
+        (is (ext:tool-result-error-p result))
+        (is (eq :error (getf phase :status)))
+        (is (getf phase :resource-exhausted-p))
+        (is (search "CONTROL-STACK-EXHAUSTED" (getf phase :condition-type)))
+        (when (eq site :definition)
+          (is (eq :skipped (getf (getf details :rerun) :status))))
+        (let ((after (ext:invoke-tool protocol :eval '(:form "(+ 1 2)") context)))
+          (is (not (ext:tool-result-error-p after)))
+          (is (equal '("3")
+                     (getf (ext:tool-result-details after) :values))))))))
+
 (test (eval-timeout-interrupts-a-runaway-form :fixture tool-authority)
   "A form past the deadline is interrupted rather than wedging the caller: the
 result is flagged timed-out and the sticky package is not advanced by the killed
@@ -287,6 +320,40 @@ worker."
       (is (ext:tool-result-error-p result))
       (is (getf details :timed-out-p))
       (is (string= "COMMON-LISP-USER" (getf details :current-package))))))
+
+(test (eval-control-stack-exhaustion-is-contained :fixture tool-authority)
+  "Default, explicit return, and interactive modes turn SBCL's control-stack
+condition into an error result, leave no park behind, and preserve later evals."
+  (dolist (mode '(nil "return" "interactive"))
+    (let* ((context (kli:make-kernel-host))
+           (protocol (switch-to-extension-protocol context)))
+      (install-extensions context
+                          event:*events-extension-manifest*
+                          tools-eval:*eval-tool-extension-manifest*)
+      (let* ((parameters
+               (append
+                '(:form "(error 'sb-kernel::control-stack-exhausted)"
+                  :timeout "5")
+                (when mode (list :on-error mode))))
+             (result (ext:invoke-tool protocol :eval parameters context))
+             (details (ext:tool-result-details result))
+             (parks 0))
+        (is (ext:tool-result-error-p result))
+        (is (getf details :resource-exhausted-p))
+        (is (search "CONTROL-STACK-EXHAUSTED"
+                    (getf details :condition-type)))
+        (is (not (getf details :parked-p)))
+        (kli:map-live-objects
+         (lambda (id object)
+           (declare (ignore id))
+           (when (typep object 'tools-eval::eval-park)
+             (incf parks)))
+         (kli:context-registry context))
+        (is (zerop parks))
+        (let ((after (ext:invoke-tool protocol :eval '(:form "(+ 1 2)") context)))
+          (is (not (ext:tool-result-error-p after)))
+          (is (equal '("3")
+                     (getf (ext:tool-result-details after) :values))))))))
 
 (test eval-abort-persists-the-package-its-forms-reached
   "A parked interactive eval that an agent eval-aborts still leaves the session in

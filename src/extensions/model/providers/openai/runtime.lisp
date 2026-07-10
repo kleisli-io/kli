@@ -6,8 +6,11 @@
 (defparameter +openai-models+
   '((:id "gpt-5.1" :ctx 272000 :max-out 128000 :developer-role t)
     (:id "gpt-5.2" :ctx 272000 :max-out 128000 :developer-role t)
-    (:id "gpt-5.4" :ctx 272000 :max-out 128000 :developer-role t)
-    (:id "gpt-5.5" :ctx 272000 :max-out 128000 :developer-role t)))
+    (:id "gpt-5.5" :ctx 272000 :max-out 128000 :developer-role t)
+    (:id "gpt-5.6" :ctx 272000 :max-out 128000 :developer-role t)
+    (:id "gpt-5.6-sol" :ctx 272000 :max-out 128000 :developer-role t)
+    (:id "gpt-5.6-terra" :ctx 272000 :max-out 128000 :developer-role t)
+    (:id "gpt-5.6-luna" :ctx 272000 :max-out 128000 :developer-role t)))
 
 (defun %model-transport-profile (m)
   (append (list :max-output (getf m :max-out))
@@ -30,7 +33,7 @@ installer and return the contribution-state the retractor drains."
                                :name (getf m :id)
                                :context-window (getf m :ctx)
 	                               :option-schemas (list (make-model-option-schema "reasoning-effort"
-	                                                                               :values '(:off :minimal :low :medium :high :xhigh)
+	                                                                               :values '(:off :minimal :low :medium :high :xhigh :max)
 	                                                                               :default :off)
 	                                                     (make-model-option-schema "reasoning-summary"
 	                                                                               :values '(:auto :concise :detailed :none)

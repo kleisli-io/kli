@@ -35,6 +35,7 @@
   (:import-from #:kli/model/runtime
                 #:assistant-delta
                 #:assistant-delta-text
+                #:model-delta-content-index
                 #:thinking-delta
                 #:thinking-delta-text
                 #:thinking-delta-replacement-p

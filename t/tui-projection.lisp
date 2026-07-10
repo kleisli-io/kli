@@ -103,6 +103,34 @@
         (is (string= "Full final thinking."
                      (tui-transcript:event-text te3)))))))
 
+(test projection-scopes-thinking-replacements-to-content-block
+  (let ((buffer (tui-transcript:make-projection-buffer)))
+    (let ((first (project :agent/thinking-delta
+                          '(:turn-id :t1 :content-index 0
+                            :text "First provisional")
+                          buffer))
+          (second (project :agent/thinking-delta
+                           '(:turn-id :t1 :content-index 1
+                             :text "Second provisional")
+                           buffer)))
+      (let ((first-final (project :agent/thinking-delta
+                                  '(:turn-id :t1 :content-index 0
+                                    :text "First final" :replacement-p t)
+                                  buffer))
+            (second-final (project :agent/thinking-delta
+                                   '(:turn-id :t1 :content-index 1
+                                     :text "Second final" :replacement-p t)
+                                   buffer)))
+        (is (eq first first-final))
+        (is (eq second second-final))
+        (is (not (eq first second))
+            "each content block owns a distinct live event")
+        (is (string= "First final" (tui-transcript:event-text first)))
+        (is (string= "Second final" (tui-transcript:event-text second))))
+      (is (null (project :agent/message-end '(:turn-id :t1) buffer)))
+      (is (zerop (hash-table-count buffer))
+          "message-end clears every thinking block for the turn"))))
+
 (test projection-prefers-raw-thinking-over-summary
   (let ((buffer (tui-transcript:make-projection-buffer)))
     (let ((te1 (project :agent/thinking-delta

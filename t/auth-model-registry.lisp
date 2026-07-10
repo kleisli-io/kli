@@ -18,7 +18,7 @@
   (kli:find-live-object (kli:context-registry context)
                         :model-registry-service))
 
-(defun test-reasoning-effort-schema (&key (values '(:off :minimal :low :medium :high :xhigh))
+(defun test-reasoning-effort-schema (&key (values '(:off :minimal :low :medium :high :xhigh :max))
                                           (default :off))
   (models:make-model-option-schema "reasoning-effort"
                                    :values values

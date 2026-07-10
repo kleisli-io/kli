@@ -1359,7 +1359,8 @@ along on the request for exercising the codex compatibility path."
               (is (null (transports::codex-websocket-session-continuation
                          state))))))))))
 
-(test (codex-websocket-post-start-failure-does-not-fallback :fixture interactive-authority)
+(test (codex-websocket-acknowledgement-before-close-falls-back-to-sse
+       :fixture interactive-authority)
   (clrhash transports::*codex-websocket-sessions*)
   (multiple-value-bind (context protocol) (model-runtime-test-context)
     (declare (ignore protocol))
@@ -1375,28 +1376,83 @@ along on the request for exercising the codex compatibility path."
              :transport-profile '(:developer-role t :session-identity t
                                   :websocket-continuation t
                                   :session-header "session-id")
-             :session-id "sess-ws-post-start")
+             :session-id "sess-ws-ack-close")
           (let ((sse-called nil))
-            (let ((transports:*codex-websocket-stream*
-                    (lambda (url body headers req)
-                      (declare (ignore url body headers req))
-                      (make-string-input-stream
-                       (format nil "~{~A~%~}"
-                               '("{\"type\":\"response.created\"}"
-                                 "{\"type\":\"error\",\"error\":{\"message\":\"boom\"}}")))))
-                  (transports:*responses-http*
+            (let ((transports:*responses-http*
                     (lambda (url body headers)
                       (declare (ignore url body headers))
                       (setf sse-called t)
                       (values (make-string-input-stream
                                *responses-canned-stream*)
                               200))))
-              (signals transports:openai-api-error
+              (with-rebound-function
+                  (transports::%stream-codex-websocket
+                   (lambda (req url body headers acquisition collector emit on-emit)
+                     (declare (ignore url body headers))
+                     (unwind-protect
+                          (progn
+                            (transports::%process-codex-websocket-event
+                             req "{\"type\":\"response.created\"}"
+                             collector emit on-emit)
+                            (error "Codex WebSocket closed before response.completed"))
+                       (transports::%release-codex-websocket acquisition nil))))
                 (transports:openai-responses-adapter
                  provider request context
                  :emit (lambda (d) (declare (ignore d)) nil)))
-              (let ((state (gethash "sess-ws-post-start"
+              (let ((state (gethash "sess-ws-ack-close"
                                     transports::*codex-websocket-sessions*)))
+                (is (eq t sse-called))
+                (is (null (transports::codex-websocket-session-continuation
+                           state)))))))))))
+
+(test (codex-websocket-emitted-delta-before-close-does-not-fallback
+       :fixture interactive-authority)
+  (clrhash transports::*codex-websocket-sessions*)
+  (multiple-value-bind (context protocol) (model-runtime-test-context)
+    (declare (ignore protocol))
+    (with-temp-credentials (path)
+      (let ((store (credential-store context)))
+        (auth:store-oauth-credential store "openai-codex" context
+                                     :access "AT" :refresh "RT"
+                                     :expires (+ (get-universal-time) 3600)
+                                     :account-id "acct-1" :path path)
+        (multiple-value-bind (provider request)
+            (responses-adapter-fixture
+             context
+             :transport-profile '(:developer-role t :session-identity t
+                                  :websocket-continuation t
+                                  :session-header "session-id")
+             :session-id "sess-ws-emitted-close")
+          (let ((emitted 0)
+                (sse-called nil))
+            (let ((transports:*responses-http*
+                    (lambda (url body headers)
+                      (declare (ignore url body headers))
+                      (setf sse-called t)
+                      (values (make-string-input-stream
+                               *responses-canned-stream*)
+                              200))))
+              (with-rebound-function
+                  (transports::%stream-codex-websocket
+                   (lambda (req url body headers acquisition collector emit on-emit)
+                     (declare (ignore url body headers))
+                     (unwind-protect
+                          (progn
+                            (transports::%process-codex-websocket-event
+                             req
+                             "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"partial\"}"
+                             collector emit on-emit)
+                            (error "Codex WebSocket closed before response.completed"))
+                       (transports::%release-codex-websocket acquisition nil))))
+                (signals simple-error
+                  (transports:openai-responses-adapter
+                   provider request context
+                   :emit (lambda (delta)
+                           (declare (ignore delta))
+                           (incf emitted)))))
+              (let ((state (gethash "sess-ws-emitted-close"
+                                    transports::*codex-websocket-sessions*)))
+                (is (= 1 emitted))
                 (is (null sse-called))
                 (is (null (transports::codex-websocket-session-continuation
                            state)))))))))))

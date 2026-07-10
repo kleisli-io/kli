@@ -8,9 +8,11 @@
   ;; ChatGPT-account allowlist. The endpoint 400s any other id with
   ;; "model is not supported when using Codex with a ChatGPT account".
   '((:id "gpt-5.3-codex-spark" :ctx 128000 :max-out 128000)
-    (:id "gpt-5.4"             :ctx 272000 :max-out 128000)
-    (:id "gpt-5.4-mini"        :ctx 272000 :max-out 128000)
-    (:id "gpt-5.5"             :ctx 272000 :max-out 128000)))
+    (:id "gpt-5.5"             :ctx 272000 :max-out 128000)
+    (:id "gpt-5.6"             :ctx 272000 :max-out 128000)
+    (:id "gpt-5.6-sol"         :ctx 272000 :max-out 128000)
+    (:id "gpt-5.6-terra"       :ctx 272000 :max-out 128000)
+    (:id "gpt-5.6-luna"        :ctx 272000 :max-out 128000)))
 
 (defun install-codex-provider (protocol contribution context)
   "Register the Codex catalogue -- oauth-keyed, Responses api -- via the shared
@@ -43,7 +45,7 @@ credential-reference."
                                :name (getf m :id)
                                :context-window (getf m :ctx)
 	                               :option-schemas (list (make-model-option-schema "reasoning-effort"
-	                                                                               :values '(:off :minimal :low :medium :high :xhigh)
+	                                                                               :values '(:off :minimal :low :medium :high :xhigh :max)
 	                                                                               :default :off)
 	                                                     (make-model-option-schema "reasoning-summary"
 	                                                                               :values '(:auto :concise :detailed :none)

@@ -16,7 +16,7 @@ own form. Runs with full first-party image authority: a form can read, write,
 and edit files and run processes. This is not a sandbox -- it grants no
 confinement. With :on-error \"interactive\" an unhandled error parks the thread
 on the live restarts instead of unwinding; resume it with eval-continue or
-eval-abort (debug authority)."
+eval-abort (debug authority). :timeout is seconds, capped at 300."
      :parameters '(:object (:form :string)
                    (:package :string :optional t)
                    (:timeout :integer :optional t)
@@ -35,8 +35,8 @@ eval-abort (debug authority)."
 restarts by name. :park is the id the parked eval returned, :restart the restart
 name (e.g. USE-VALUE), and :arg an optional value read in the eval package for
 restarts that take one. The resumed computation reuses the original eval's timeout
-unless :timeout overrides it. Returns the resumed outcome. Requires debug authority
-over the live image."
+unless :timeout overrides it. :timeout is seconds, capped at 300. Returns the
+resumed outcome. Requires debug authority over the live image."
      :parameters '(:object (:park :string)
                    (:restart :string)
                    (:arg :string :optional t)
@@ -50,7 +50,8 @@ over the live image."
      :label "Abort parked eval"
      :description "Unwind a parked interactive eval cleanly, leaving no parked
 thread. :park is the id the parked eval returned; :timeout optionally overrides the
-original eval's budget for the unwind. Requires debug authority over the live image."
+original eval's budget for the unwind, in seconds and capped at 300. Requires debug
+authority over the live image."
      :parameters '(:object (:park :string)
                    (:timeout :integer :optional t))
      :runner #'run-eval-abort-tool
@@ -69,7 +70,7 @@ the redefinition is applied immediately and is NOT automatically rolled back if
 the snapshot manually if you need the old one. Both are loaded form-by-form and
 share the sticky
 current package (pass :package to override). Runs with full first-party image
-authority -- not a sandbox."
+authority -- not a sandbox. :timeout is seconds, capped at 300."
      :parameters '(:object (:definition :string)
                    (:form :string)
                    (:package :string :optional t)

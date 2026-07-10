@@ -44,7 +44,9 @@ stays hidden until the codex login resolves."
           (is (string= "chatgpt-account-id" (getf profile :account-id-header)))
           (is (string= "low" (getf profile :text-verbosity)))
           (is (eq t (getf profile :user-agent))))
-        (dolist (model-id '("gpt-5.3-codex-spark" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5"))
+        (dolist (model-id '("gpt-5.3-codex-spark" "gpt-5.5"
+                            "gpt-5.6" "gpt-5.6-sol"
+                            "gpt-5.6-terra" "gpt-5.6-luna"))
           (let* ((definition (models:find-model-definition registry "openai-codex" model-id))
                  (meta (and definition (models:model-definition-metadata definition)))
                  (profile (getf meta :transport-profile))
@@ -60,6 +62,8 @@ stays hidden until the codex login resolves."
             (is (= 128000 (getf profile :max-output)))
             (is (null (getf meta :developer-role)))))
         (is (null (models:find-model-definition registry "openai-codex" "gpt-5.2-codex")))
+        (is (null (models:find-model-definition registry "openai-codex" "gpt-5.4")))
+        (is (null (models:find-model-definition registry "openai-codex" "gpt-5.4-mini")))
         (is (not (null (rt:find-model-stream-adapter
                         (model-runtime-service context) :openai-responses))))
         (is (zerop (count-codex-available registry store context)))
@@ -67,4 +71,4 @@ stays hidden until the codex login resolves."
                                      :access "AT" :refresh "RT"
                                      :expires (+ (get-universal-time) 3600)
                                      :account-id "acct" :path path)
-        (is (= 4 (count-codex-available registry store context)))))))
+        (is (= 6 (count-codex-available registry store context)))))))

@@ -453,6 +453,14 @@
           (scrollback-renderer-stream-hl renderer) nil))
   renderer)
 
+(defun invalidate-scrollback-stream-render (renderer event)
+  "Drop append-only render state after EVENT's text was replaced in place."
+  (when (eq (scrollback-renderer-streaming-event renderer) event)
+    (setf (scrollback-renderer-stream-render-cache renderer) nil
+          (scrollback-renderer-stream-md renderer) nil
+          (scrollback-renderer-stream-hl renderer) nil))
+  renderer)
+
 (defun finalize-scrollback-stream (renderer)
   "Close the commit boundary so the next render freezes the finalized event into
    scrollback. Region geometry stays so that frame can clear on-screen remnants.

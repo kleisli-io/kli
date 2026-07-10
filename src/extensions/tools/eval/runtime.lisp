@@ -279,17 +279,41 @@ top-level form that was evaluating, surfaced as :source."
            (when form
              (list :source (prin1-to-string form))))))
 
+(defun capture-eval-control-stack-exhaustion (condition form)
+  "Describe a control-stack exhaustion after its signaling stack has unwound.
+Backtrace and restart inspection are deliberately omitted because either can
+consume stack while the guard page is still unprotected."
+  (with-bounded-printer
+    (list* :condition-type (princ-to-string (type-of condition))
+           :message (princ-to-string condition)
+           :category :internal
+           :backtrace '()
+           :restarts '()
+           :resource-exhausted-p t
+           (when form
+             (list :source (prin1-to-string form))))))
+
+(defmacro! with-eval-control-stack-capture ((source-form) &body body)
+  "Run BODY; after a control-stack exhaustion unwinds, return (:error plist)."
+  `(handler-case
+       (progn ,@body)
+     (sb-kernel::control-stack-exhausted (,g!condition)
+       (list :error
+             (capture-eval-control-stack-exhaustion ,g!condition
+                                                    ,source-form)))))
+
 (defmacro! with-structured-capture ((source-form) &body body)
   "Run BODY; on an error, unwind and return (:error plist) snapshotted at signal
 time, the plist's :source taken from SOURCE-FORM's current value. BODY returns
 the success value when nothing signals."
-  `(block ,g!capture
-     (handler-bind
-         ((error (lambda (condition)
-                   (return-from ,g!capture
-                     (list :error
-                           (capture-eval-condition condition ,source-form))))))
-       ,@body)))
+  `(with-eval-control-stack-capture (,source-form)
+     (block ,g!capture
+       (handler-bind
+           ((error (lambda (condition)
+                     (return-from ,g!capture
+                       (list :error
+                             (capture-eval-condition condition ,source-form))))))
+         ,@body))))
 
 (defparameter +nested-directive-names+
   '("IN-PACKAGE" "DEFPACKAGE" "IN-READTABLE"
@@ -589,12 +613,13 @@ thread did not stop)~;~]~@[~%~A~]"
 
 (defun eval-error-result (info package timeout-seconds stdout truncated-p
                           &key current-package warnings forms-evaluated
-                               handle bytes)
+                               handle bytes extra-details)
   "Tool-result for a form that signaled. INFO is the captured-condition plist;
 its structured fields ride :details to the model, the condition message heads
 the human text, and any captured output precedes it. CURRENT-PACKAGE,
 WARNINGS, and FORMS-EVALUATED ride alongside; HANDLE/BYTES point at the retained
-output backing when the captured output overflowed."
+output backing when the captured output overflowed. EXTRA-DETAILS prefixes the
+result details."
   (let ((message (getf info :message)))
     (make-tool-result
      :content (list (make-tool-text-content
@@ -606,7 +631,8 @@ output backing when the captured output overflowed."
                                  message)
                              (and forms-evaluated (plusp forms-evaluated) forms-evaluated)
                              (eval-output-spill-notice truncated-p handle bytes))))
-     :details (append (list :package (package-name package)
+     :details (append extra-details
+                      (list :package (package-name package)
                             :current-package (or current-package
                                                  (package-name package))
                             :timeout-seconds timeout-seconds)
